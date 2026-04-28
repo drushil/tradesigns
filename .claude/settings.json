@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "project": {
+    "name": "AI Trading Agent",
+    "description": "Paper-trading AI agent with micro-signal analysis, EWA learning engine, and Streamlit dashboard"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(python*)",
+      "Bash(pip*)",
+      "Bash(streamlit*)",
+      "Bash(find:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)",
+      "Bash(echo:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(curl * | bash*)",
+      "Bash(wget * | bash*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import ast, sys; ast.parse(open('$CLAUDE_TOOL_OUTPUT_FILE').read())\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "PYTHONPATH": ".",
+    "STREAMLIT_SERVER_HEADLESS": "true"
+  },
+  "context": {
+    "files": [
+      "CLAUDE.md",
+      "requirements.txt",
+      "config/risk_profiles.py",
+      "database/schema.sql"
+    ]
+  },
+  "mcpServers": {
+    "supabase": {
+      "transport": "http",
+      "url": "https://mcp.supabase.com/mcp?project_ref=crxrnmmvrbwhqulyehmo"
+    }
+  }
+}
