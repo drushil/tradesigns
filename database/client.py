@@ -1,28 +1,33 @@
 """
 database/client.py
 Supabase client wrapper. All DB operations go through here.
+Reads credentials from os.environ (which app.py populates from st.secrets).
 """
 import os
-import json
-from datetime import datetime, date
+from datetime import date
 from typing import Optional
 from supabase import create_client, Client
-from dotenv import load_dotenv
 
-load_dotenv()
+
+def _get_env(key: str) -> Optional[str]:
+    """Read from os.environ (works locally via .env and on Streamlit Cloud via st.secrets bridge)."""
+    return os.environ.get(key)
 
 
 def get_client(write: bool = False) -> Client:
     """
-    write=True  -> uses SUPABASE_SERVICE_KEY (bypasses RLS, agent backend writes)
-    write=False -> uses SUPABASE_ANON_KEY    (read-only, dashboard safe)
+    write=False → anon key  (dashboard reads — respects RLS)
+    write=True  → service_role key (agent writes — bypasses RLS)
     """
-    url = os.getenv("SUPABASE_URL")
+    url = _get_env("SUPABASE_URL")
     if not url:
-        raise ValueError("SUPABASE_URL must be set in .env")
-    key = (os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_ANON_KEY")) if write           else os.getenv("SUPABASE_ANON_KEY")
+        raise ValueError("SUPABASE_URL not set — add it to Streamlit secrets or .env")
+    if write:
+        key = _get_env("SUPABASE_SERVICE_KEY") or _get_env("SUPABASE_ANON_KEY")
+    else:
+        key = _get_env("SUPABASE_ANON_KEY")
     if not key:
-        raise ValueError("SUPABASE_ANON_KEY must be set in .env")
+        raise ValueError("SUPABASE_ANON_KEY not set — add it to Streamlit secrets or .env")
     return create_client(url, key)
 
 
@@ -39,12 +44,19 @@ def get_recent_trades(days: int = 30, ticker: str = None) -> list:
     q = db.table("trades").select("*").order("created_at", desc=True)
     if ticker:
         q = q.eq("ticker", ticker)
-    q = q.limit(500)
-    result = q.execute()
+    result = q.limit(500).execute()
     return result.data or []
 
 
 def get_trade_stats(days: int = 30) -> dict:
+    """Try the pre-computed view first, fall back to Python aggregation."""
+    try:
+        db = get_client()
+        result = db.table("trade_stats_30d").select("*").execute()
+        if result.data:
+            return result.data[0]
+    except Exception:
+        pass
     trades = get_recent_trades(days)
     if not trades:
         return {"total": 0, "wins": 0, "losses": 0, "win_rate": 0,
@@ -52,12 +64,12 @@ def get_trade_stats(days: int = 30) -> dict:
     wins   = [t for t in trades if (t.get("net_pnl_pct") or 0) > 0]
     losses = [t for t in trades if (t.get("net_pnl_pct") or 0) <= 0]
     return {
-        "total": len(trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
-        "avg_pnl": round(sum(t.get("net_pnl_pct", 0) for t in trades) / len(trades), 3),
-        "total_pnl_eur": round(sum(t.get("pnl_eur", 0) for t in trades), 2),
+        "total":          len(trades),
+        "wins":           len(wins),
+        "losses":         len(losses),
+        "win_rate":       round(len(wins) / len(trades) * 100, 1),
+        "avg_pnl":        round(sum(t.get("net_pnl_pct", 0) for t in trades) / len(trades), 3),
+        "total_pnl_eur":  round(sum(t.get("pnl_eur", 0) for t in trades), 2),
         "avg_hold_minutes": round(sum(t.get("hold_minutes", 0) for t in trades) / len(trades), 1),
     }
 
@@ -85,7 +97,7 @@ def get_recent_signals(hours: int = 24) -> list:
 def save_signal_weights(regime: str, weights: dict, trade_count: int, trigger: str):
     db = get_client(write=True)
     record = {
-        "regime": regime,
+        "regime":          regime,
         "order_book":      round(weights.get("order_book_imbalance", 0.25), 4),
         "tape_aggression": round(weights.get("tape_aggression", 0.25), 4),
         "rsi_divergence":  round(weights.get("rsi_divergence", 0.20), 4),
@@ -98,22 +110,24 @@ def save_signal_weights(regime: str, weights: dict, trade_count: int, trigger: s
 
 
 def get_latest_weights(regime: str = "global") -> Optional[dict]:
-    db = get_client()
-    result = (db.table("signal_weights")
-               .select("*")
-               .eq("regime", regime)
-               .order("updated_at", desc=True)
-               .limit(1)
-               .execute())
-    if result.data:
-        r = result.data[0]
-        return {
-            "order_book_imbalance": r["order_book"],
-            "tape_aggression":      r["tape_aggression"],
-            "rsi_divergence":       r["rsi_divergence"],
-            "news_sentiment":       r["news_sentiment"],
-            "vwap_deviation":       r["vwap_deviation"],
-        }
+    try:
+        db = get_client()
+        result = (db.table("latest_signal_weights")
+                   .select("*")
+                   .eq("regime", regime)
+                   .limit(1)
+                   .execute())
+        if result.data:
+            r = result.data[0]
+            return {
+                "order_book_imbalance": r["order_book"],
+                "tape_aggression":      r["tape_aggression"],
+                "rsi_divergence":       r["rsi_divergence"],
+                "news_sentiment":       r["news_sentiment"],
+                "vwap_deviation":       r["vwap_deviation"],
+            }
+    except Exception:
+        pass
     return None
 
 
@@ -133,10 +147,10 @@ def get_weight_history(regime: str = "global", limit: int = 50) -> list:
 def save_learning(week_start: date, insights: list, trades_analysed: int):
     db = get_client(write=True)
     db.table("learnings").insert({
-        "week_start":       week_start.isoformat(),
-        "insights_json":    insights,
-        "trades_analysed":  trades_analysed,
-        "applied":          False,
+        "week_start":      week_start.isoformat(),
+        "insights_json":   insights,
+        "trades_analysed": trades_analysed,
+        "applied":         False,
     }).execute()
 
 
@@ -171,14 +185,14 @@ def get_snapshots(days: int = 30) -> list:
 
 def log_event(level: str, event: str, detail: dict = None):
     try:
-        db = get_client()
+        db = get_client(write=True)
         db.table("agent_logs").insert({
             "level":  level,
             "event":  event,
             "detail": detail or {},
         }).execute()
     except Exception:
-        pass  # never crash the agent due to logging failure
+        pass  # never crash the agent due to a logging failure
 
 
 def get_logs(level: str = None, limit: int = 100) -> list:
@@ -190,20 +204,9 @@ def get_logs(level: str = None, limit: int = 100) -> list:
     return result.data or []
 
 
-# ── Views (pre-computed by Supabase) ─────────────────────────────────────────
-
-def get_trade_stats_view() -> dict:
-    """Read from pre-computed view — faster than re-aggregating in Python."""
-    try:
-        db = get_client()
-        result = db.table("trade_stats_30d").select("*").execute()
-        return result.data[0] if result.data else {}
-    except Exception:
-        return {}
-
+# ── Views ─────────────────────────────────────────────────────────────────────
 
 def get_regime_performance_view() -> list:
-    """Read regime performance from pre-computed view."""
     try:
         db = get_client()
         result = db.table("regime_performance").select("*").execute()
@@ -213,7 +216,6 @@ def get_regime_performance_view() -> list:
 
 
 def get_latest_weights_view() -> list:
-    """All regimes latest weights from pre-computed view."""
     try:
         db = get_client()
         result = db.table("latest_signal_weights").select("*").execute()

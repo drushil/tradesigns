@@ -1,9 +1,18 @@
 """
-app.py  — Main Streamlit dashboard entry point
+app.py — Streamlit dashboard entry point
 Run locally:  streamlit run app.py
 Deploy:       Push to GitHub → connect Streamlit Cloud
 """
+import os
 import streamlit as st
+
+# ── Streamlit Cloud secrets → env vars ───────────────────────────────────────
+# Streamlit Cloud stores secrets in st.secrets, not os.environ.
+# This block pushes them into os.environ so all existing code works unchanged.
+if hasattr(st, "secrets"):
+    for k, v in st.secrets.items():
+        if isinstance(v, str):
+            os.environ.setdefault(k, v)
 
 st.set_page_config(
     page_title="AI Trading Agent",
@@ -12,14 +21,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Global CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-}
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .stMetric label { font-size: 11px !important; letter-spacing: .06em; text-transform: uppercase; }
 .stMetric [data-testid="metric-container"] { background: #0f0f0f; border-radius: 10px; padding: 14px 18px; border: 0.5px solid #222; }
 .signal-card { background: #111; border: 0.5px solid #222; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
@@ -34,18 +39,13 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 0.5px solid #1
 </style>
 """, unsafe_allow_html=True)
 
-# Routing via pages — Streamlit multipage
-from frontend.pages import (
-    overview, signals, trades, learning, config_page, logs
-)
-
 PAGES = {
-    "📊 Overview":      overview,
-    "📡 Live Signals":  signals,
-    "🔄 Trades":        trades,
-    "🧠 Learning":      learning,
-    "⚙️  Config":       config_page,
-    "📋 Agent Logs":    logs,
+    "📊 Overview":    "overview",
+    "📡 Live Signals": "signals",
+    "🔄 Trades":      "trades",
+    "🧠 Learning":    "learning",
+    "⚙️  Config":     "config_page",
+    "📋 Agent Logs":  "logs",
 }
 
 with st.sidebar:
@@ -54,8 +54,23 @@ with st.sidebar:
     selection = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
     st.markdown("---")
     st.markdown(
-        "<div style='font-size:11px;color:#555;'>Paper trading mode<br>Powered by Alpaca + Claude</div>",
-        unsafe_allow_html=True
+        "<div style='font-size:11px;color:#555;'>Paper trading · Alpaca + Claude</div>",
+        unsafe_allow_html=True,
     )
 
-PAGES[selection].render()
+# Lazy import — pages only loaded when selected, never at startup
+page_module = PAGES[selection]
+if page_module == "overview":
+    from frontend.pages import overview as page
+elif page_module == "signals":
+    from frontend.pages import signals as page
+elif page_module == "trades":
+    from frontend.pages import trades as page
+elif page_module == "learning":
+    from frontend.pages import learning as page
+elif page_module == "config_page":
+    from frontend.pages import config_page as page
+else:
+    from frontend.pages import logs as page
+
+page.render()
