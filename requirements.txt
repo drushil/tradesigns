@@ -10,7 +10,7 @@ supabase==2.5.0
 alpaca-py==0.20.0
 
 # ── Market data ───────────────────────────────────────────────────────────────
-yfinance==0.2.40
+yfinance>=0.2.54
 pandas>=2.2,<3.0
 numpy>=2.0
 pillow>=11.0

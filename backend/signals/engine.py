@@ -5,6 +5,7 @@ Returns a normalised composite score -1.0 to +1.0.
 """
 import os
 import time
+import logging
 import requests
 import numpy as np
 import pandas as pd
@@ -15,6 +16,9 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# yfinance prints its own error messages to stderr even when exceptions are caught
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
