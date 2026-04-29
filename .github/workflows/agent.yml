@@ -24,6 +24,35 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-agent.txt
 
+      - name: Validate runtime configuration
+        env:
+          ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
+          ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
+          GROQ_API_KEY:         "${{ secrets.GROQ_API_KEY }}"
+          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
+          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
+        run: |
+          python <<'PY'
+          import os
+          import sys
+
+          required = [
+              "ALPACA_API_KEY",
+              "ALPACA_SECRET_KEY",
+              "GROQ_API_KEY",
+              "SUPABASE_URL",
+              "SUPABASE_ANON_KEY",
+              "SUPABASE_SERVICE_KEY",
+          ]
+          missing = [key for key in required if not os.getenv(key)]
+          for key in required:
+              print(f"{key}: {'set' if os.getenv(key) else 'missing'}")
+          if missing:
+              print(f"Missing required configuration: {', '.join(missing)}", file=sys.stderr)
+              sys.exit(1)
+          PY
+
       - name: Run signal cycle
         env:
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
@@ -61,6 +90,7 @@ jobs:
       - name: Send Telegram summary
         if: always()
         env:
+          PYTHONPATH: "."
           TELEGRAM_BOT_TOKEN: "${{ secrets.TELEGRAM_BOT_TOKEN }}"
           TELEGRAM_CHAT_ID:   "${{ secrets.TELEGRAM_CHAT_ID }}"
         run: |

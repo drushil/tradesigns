@@ -218,14 +218,15 @@ def get_snapshots(days: int = 30) -> list:
 
 def log_event(level: str, event: str, detail: dict = None):
     try:
+        print(f"[{level}] {event}: {detail or {}}")
         db = get_client(write=True)
         db.table("agent_logs").insert({
             "level":  level,
             "event":  event,
             "detail": detail or {},
         }).execute()
-    except Exception:
-        pass  # never crash the agent due to a logging failure
+    except Exception as e:
+        print(f"[LOG_WRITE_FAILED] {level} {event}: {str(e)[:200]}")
 
 
 def get_logs(level: str = None, limit: int = 100) -> list:

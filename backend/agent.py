@@ -126,11 +126,31 @@ def _record_llm_call():
     _llm_calls_this_hour += 1
 
 
+def _missing_runtime_config() -> list[str]:
+    required = [
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "GROQ_API_KEY",
+        "SUPABASE_URL",
+        "SUPABASE_ANON_KEY",
+        "SUPABASE_SERVICE_KEY",
+    ]
+    return [key for key in required if not os.getenv(key)]
+
+
 # ── Core cycle ────────────────────────────────────────────────────────────────
 
 def run_signal_cycle():
     """Main cycle: compute signals → gate → decide → execute."""
     global _learning_engine
+
+    missing_config = _missing_runtime_config()
+    if missing_config:
+        log_event("ERROR", "runtime_config_missing", {
+            "missing": missing_config,
+            "hint": "Set these as GitHub Actions secrets before the agent can trade.",
+        })
+        return
 
     if _learning_engine is None:
         _learning_engine = _init_learning_engine()
