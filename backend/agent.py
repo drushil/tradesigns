@@ -53,7 +53,7 @@ def _get_portfolio_state() -> dict:
         import yfinance as yf
         vix_df = yf.download("^VIX", period="1d", interval="1h",
                              progress=False, auto_adjust=True)
-        vix = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 20.0
+        vix = float(vix_df["Close"].iloc[-1].item()) if not vix_df.empty else 20.0
     except Exception:
         vix = 20.0
 
