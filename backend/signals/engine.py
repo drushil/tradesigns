@@ -5,7 +5,6 @@ Returns a normalised composite score -1.0 to +1.0.
 """
 import os
 import time
-import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -14,8 +13,6 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
-
-NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -140,7 +137,7 @@ _NEWS_CACHE_TTL = 900  # 15 minutes
 
 def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     """
-    Polls NewsAPI for recent headlines on the ticker.
+    Fetches recent headlines via yfinance (free, no API key).
     Counts positive/negative financial keywords.
     Returns score -1 to +1.
     """
@@ -151,9 +148,6 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
         if now - cached_time < _NEWS_CACHE_TTL:
             return cached_result
 
-    if not NEWSAPI_KEY:
-        return 0.0, {"error": "no_newsapi_key"}
-
     positive_kw = ["surge", "soar", "rally", "beat", "record", "upgrade",
                    "bullish", "growth", "profit", "revenue", "strong",
                    "gains", "outperform", "buy", "positive"]
@@ -162,35 +156,24 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
                    "drop", "underperform", "negative", "warning"]
 
     try:
-        url = "https://newsapi.org/v2/everything"
-        params = {
-            "q": ticker,
-            "language": "en",
-            "sortBy": "publishedAt",
-            "pageSize": 10,
-            "apiKey": NEWSAPI_KEY,
-        }
-        resp = requests.get(url, params=params, timeout=5)
-        articles = resp.json().get("articles", [])
+        articles = yf.Ticker(ticker).news or []
 
         pos_count = neg_count = 0
         headlines = []
         for a in articles[:5]:
-            text = ((a.get("title") or "") + " " + (a.get("description") or "")).lower()
-            headlines.append(a.get("title", "")[:80])
+            title = (a.get("title") or "")
+            headlines.append(title[:80])
+            text = title.lower()
             pos_count += sum(1 for kw in positive_kw if kw in text)
             neg_count += sum(1 for kw in negative_kw if kw in text)
 
         total = pos_count + neg_count
-        if total == 0:
-            score = 0.0
-        else:
-            score = _clamp((pos_count - neg_count) / total)
+        score = _clamp((pos_count - neg_count) / total) if total else 0.0
 
         meta = {
             "articles_found": len(articles),
-            "positive_hits": pos_count,
-            "negative_hits": neg_count,
+            "positive_hits":  pos_count,
+            "negative_hits":  neg_count,
             "latest_headline": headlines[0] if headlines else "",
         }
     except Exception as e:

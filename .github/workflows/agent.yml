@@ -33,7 +33,6 @@ jobs:
           SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY:    ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          NEWSAPI_KEY:          ${{ secrets.NEWSAPI_KEY }}
           REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USER_AGENT:    ${{ secrets.REDDIT_USER_AGENT }}
