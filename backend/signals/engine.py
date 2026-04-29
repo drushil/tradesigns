@@ -153,10 +153,35 @@ def _fetch_finviz_headlines(ticker: str) -> list:
     return [row.a.text.strip() for row in table.find_all("tr") if row.a][:10]
 
 
+def _fetch_stocktwits(ticker: str) -> tuple[list, int, int]:
+    """
+    Fetch recent StockTwits messages for a ticker.
+    Returns (body_texts, explicit_bullish_count, explicit_bearish_count).
+    Explicit user-tagged sentiment is a stronger signal than keyword matching.
+    """
+    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
+    resp = requests.get(url, timeout=5)
+    resp.raise_for_status()
+    messages = resp.json().get("messages", [])
+
+    bodies, bullish, bearish = [], 0, 0
+    for m in messages[:20]:
+        body = (m.get("body") or "").strip()
+        if body:
+            bodies.append(body[:120])
+        tag = ((m.get("entities") or {}).get("sentiment") or {}).get("basic", "")
+        if tag == "Bullish":
+            bullish += 1
+        elif tag == "Bearish":
+            bearish += 1
+    return bodies, bullish, bearish
+
+
 def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     """
-    Combines yfinance + Finviz headlines (both free, no API key).
-    Counts positive/negative financial keywords across all sources.
+    Combines yfinance + Finviz headlines + StockTwits messages (all free, no key).
+    StockTwits explicit Bullish/Bearish tags are counted as direct signal;
+    all text sources are also keyword-scored.
     Returns score -1 to +1.
     """
     cache_key = ticker
@@ -173,47 +198,60 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
                    "loss", "decline", "sell", "weak", "concern", "risk",
                    "drop", "underperform", "negative", "warning"]
 
-    headlines = []
+    texts = []
+    st_bullish = st_bearish = 0
 
     # Source 1: yfinance
     try:
         for a in (yf.Ticker(ticker).news or [])[:5]:
             title = (a.get("title") or "").strip()
             if title:
-                headlines.append(title)
+                texts.append(title)
     except Exception:
         pass
 
     # Source 2: Finviz
     try:
-        headlines.extend(_fetch_finviz_headlines(ticker))
+        texts.extend(_fetch_finviz_headlines(ticker))
+    except Exception:
+        pass
+
+    # Source 3: StockTwits (bodies for keyword scoring + explicit tags)
+    try:
+        bodies, st_bullish, st_bearish = _fetch_stocktwits(ticker)
+        texts.extend(bodies)
     except Exception:
         pass
 
     # Deduplicate while preserving order
-    seen = set()
-    unique = []
-    for h in headlines:
-        key = h[:50].lower()
+    seen, unique = set(), []
+    for t in texts:
+        key = t[:50].lower()
         if key not in seen:
             seen.add(key)
-            unique.append(h)
-    headlines = unique
+            unique.append(t)
 
+    # Keyword scoring across all text sources
     pos_count = neg_count = 0
-    for title in headlines:
-        text = title.lower()
-        pos_count += sum(1 for kw in positive_kw if kw in text)
-        neg_count += sum(1 for kw in negative_kw if kw in text)
+    for text in unique:
+        low = text.lower()
+        pos_count += sum(1 for kw in positive_kw if kw in low)
+        neg_count += sum(1 for kw in negative_kw if kw in low)
+
+    # StockTwits explicit tags count as 2 keyword hits each (direct user intent)
+    pos_count += st_bullish * 2
+    neg_count += st_bearish * 2
 
     total = pos_count + neg_count
     score = _clamp((pos_count - neg_count) / total) if total else 0.0
 
     meta = {
-        "articles_found":  len(headlines),
-        "positive_hits":   pos_count,
-        "negative_hits":   neg_count,
-        "latest_headline": headlines[0][:80] if headlines else "",
+        "articles_found":   len(unique),
+        "positive_hits":    pos_count,
+        "negative_hits":    neg_count,
+        "st_bullish":       st_bullish,
+        "st_bearish":       st_bearish,
+        "latest_headline":  unique[0][:80] if unique else "",
     }
 
     _news_cache[cache_key] = (now, (score, meta))
