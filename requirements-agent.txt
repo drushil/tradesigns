@@ -1,0 +1,11 @@
+# Agent-only extras — used by GitHub Actions, not Streamlit Cloud
+-r requirements.txt
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+apscheduler>=3.10.4
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+python-telegram-bot>=21.3
+
+# ── Reddit sentiment (optional) ───────────────────────────────────────────────
+praw>=7.7.0
