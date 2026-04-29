@@ -23,11 +23,16 @@ def get_client(write: bool = False) -> Client:
     if not url:
         raise ValueError("SUPABASE_URL not set — add it to Streamlit secrets or .env")
     if write:
-        key = _get_env("SUPABASE_SERVICE_KEY") or _get_env("SUPABASE_ANON_KEY")
+        key = _get_env("SUPABASE_SERVICE_KEY")
+        if not key:
+            raise ValueError(
+                "SUPABASE_SERVICE_KEY not set — add it to Streamlit secrets or .env. "
+                "The service role key is required for write operations."
+            )
     else:
         key = _get_env("SUPABASE_ANON_KEY")
-    if not key:
-        raise ValueError("SUPABASE_ANON_KEY not set — add it to Streamlit secrets or .env")
+        if not key:
+            raise ValueError("SUPABASE_ANON_KEY not set — add it to Streamlit secrets or .env")
     return create_client(url, key)
 
 
