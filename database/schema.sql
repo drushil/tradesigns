@@ -61,6 +61,10 @@ create table if not exists signals (
     rsi_divergence_score    real,
     news_sentiment_score    real,
     vwap_deviation_score    real,
+    macd_score              real,
+    rel_strength_score      real,
+    earnings_days           smallint,
+    earnings_mult           numeric(4,2) default 1.0,
     regime                  text,
     vix                     numeric(6,2),
     volume_vs_avg           numeric(6,2),
@@ -86,6 +90,8 @@ create table if not exists signal_weights (
     rsi_divergence  numeric(6,4) not null check (rsi_divergence between 0 and 1),
     news_sentiment  numeric(6,4) not null check (news_sentiment between 0 and 1),
     vwap_deviation  numeric(6,4) not null check (vwap_deviation between 0 and 1),
+    macd_crossover  numeric(6,4) not null default 0.10 check (macd_crossover between 0 and 1),
+    relative_strength numeric(6,4) not null default 0.08 check (relative_strength between 0 and 1),
     trade_count     integer,
     trigger         text check (trigger in (
                         'trade_update','weekly_review','manual','init'))
@@ -93,6 +99,17 @@ create table if not exists signal_weights (
 
 create index if not exists idx_weights_regime_time
     on signal_weights (regime, updated_at desc);
+
+-- Idempotent upgrades for existing databases created before the 8-signal engine.
+alter table if exists signals
+    add column if not exists macd_score real,
+    add column if not exists rel_strength_score real,
+    add column if not exists earnings_days smallint,
+    add column if not exists earnings_mult numeric(4,2) default 1.0;
+
+alter table if exists signal_weights
+    add column if not exists macd_crossover numeric(6,4) not null default 0.10 check (macd_crossover between 0 and 1),
+    add column if not exists relative_strength numeric(6,4) not null default 0.08 check (relative_strength between 0 and 1);
 
 -- 4. LEARNINGS
 create table if not exists learnings (
@@ -194,7 +211,8 @@ grant select on regime_performance to anon;
 create or replace view latest_signal_weights as
 select distinct on (regime)
     regime, order_book, tape_aggression, rsi_divergence,
-    news_sentiment, vwap_deviation, trade_count, updated_at
+    news_sentiment, vwap_deviation, macd_crossover, relative_strength,
+    trade_count, updated_at
 from signal_weights
 order by regime, updated_at desc;
 

@@ -115,22 +115,22 @@ def _compute_and_display_live(tickers, profile_name):
                 result = compute_all_signals(ticker, weights)
                 all_results[ticker] = result
                 sigs          = result["signals"]
-                earnings_meta = sigs.get("earnings_proximity", {}).get("meta", {}) or {}
+                earnings_meta = sigs.get("earnings_proximity", {}).get("meta", {})
                 insert_signal({
-                    "ticker":                ticker,
-                    "composite_score":       result["composite_score"],
-                    "order_book_score":      sigs.get("order_book_imbalance", {}).get("score", 0),
-                    "tape_aggression_score": sigs.get("tape_aggression",      {}).get("score", 0),
-                    "rsi_divergence_score":  sigs.get("rsi_divergence",       {}).get("score", 0),
-                    "news_sentiment_score":  sigs.get("news_sentiment",       {}).get("score", 0),
-                    "vwap_deviation_score":  sigs.get("vwap_deviation",       {}).get("score", 0),
-                    "macd_score":            sigs.get("macd_crossover",       {}).get("score", 0),
-                    "rel_strength_score":    sigs.get("relative_strength",    {}).get("score", 0),
-                    "earnings_days":         earnings_meta.get("days_to_earnings"),
-                    "earnings_mult":         earnings_meta.get("earnings_multiplier", 1.0),
-                    "regime":                regime,
-                    "gated":                 False,
-                    "llm_called":            False,
+                    "ticker":               ticker,
+                    "composite_score":      result["composite_score"],
+                    "order_book_score":     sigs.get("order_book_imbalance", {}).get("score", 0),
+                    "tape_aggression_score":sigs.get("tape_aggression",      {}).get("score", 0),
+                    "rsi_divergence_score": sigs.get("rsi_divergence",       {}).get("score", 0),
+                    "news_sentiment_score": sigs.get("news_sentiment",       {}).get("score", 0),
+                    "vwap_deviation_score": sigs.get("vwap_deviation",       {}).get("score", 0),
+                    "macd_score":           sigs.get("macd_crossover",       {}).get("score", 0),
+                    "rel_strength_score":   sigs.get("relative_strength",    {}).get("score", 0),
+                    "earnings_days":        earnings_meta.get("days_to_earnings"),
+                    "earnings_mult":        earnings_meta.get("earnings_multiplier", 1.0),
+                    "regime":               regime,
+                    "gated":                False,
+                    "llm_called":           False,
                 })
             except Exception as e:
                 all_results[ticker] = {"error": str(e)}
@@ -138,6 +138,8 @@ def _compute_and_display_live(tickers, profile_name):
 
     _render_live_cards(all_results, weights)
 
+
+# ── DB display path ───────────────────────────────────────────────────────────
 
 # ── DB display path ───────────────────────────────────────────────────────────
 
@@ -181,11 +183,12 @@ def _render_live_cards(results: dict, weights: dict):
         ):
             col_gauge, col_signals = st.columns([1, 2])
 
+            # Gauge
             with col_gauge:
                 fig = go.Figure(go.Indicator(
                     mode="gauge+number",
                     value=composite,
-                    domain={"x": [0, 1], "y": [0, 1]},
+                    domain={"x": [0,1], "y": [0,1]},
                     number={"font": {"size": 26, "color": "#fff", "family": "DM Mono"}},
                     gauge={
                         "axis": {"range": [-1, 1], "tickcolor": "#444",
@@ -201,7 +204,7 @@ def _render_live_cards(results: dict, weights: dict):
                 ))
                 fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#888",
                                   height=190, margin=dict(l=8, r=8, t=16, b=8))
-                st.plotly_chart(fig, use_container_width=True, key=f"gauge_{ticker}")
+                st.plotly_chart(fig, use_container_width=True)
 
                 if e_mult > 1.0:
                     st.markdown(
@@ -210,15 +213,17 @@ def _render_live_cards(results: dict, weights: dict):
                         unsafe_allow_html=True
                     )
 
+            # 8-signal breakdown
             with col_signals:
                 sigs = result["signals"]
                 for sig_key, meta in ALL_SIGNALS.items():
                     if sig_key == "earnings_proximity":
+                        # Show earnings as a special row
                         ed   = (sigs.get("earnings_proximity", {})
                                 .get("meta", {}).get("days_to_earnings"))
                         mult = (sigs.get("earnings_proximity", {})
                                 .get("meta", {}).get("earnings_multiplier", 1.0))
-                        color     = "#EF9F27" if mult > 1.0 else "#444"
+                        color = "#EF9F27" if mult > 1.0 else "#444"
                         label_txt = (f"{ed}d to earnings · ×{mult:.1f}"
                                      if ed is not None else "earnings: unknown")
                         st.markdown(f"""
@@ -229,18 +234,18 @@ def _render_live_cards(results: dict, weights: dict):
                             <span style="font-family:'DM Mono',monospace;color:{color}">{label_txt}</span>
                           </div>
                           <div style="background:#1a1a1a;border-radius:3px;height:4px">
-                            <div style="width:{min((mult - 1) * 100, 100):.0f}%;height:100%;
+                            <div style="width:{min((mult-1)*100,100):.0f}%;height:100%;
                                  background:{color};border-radius:3px"></div>
                           </div>
                         </div>""", unsafe_allow_html=True)
                         continue
 
-                    sig_data  = sigs.get(sig_key, {})
-                    score     = sig_data.get("score", 0) or 0
-                    w         = weights.get(sig_key, 0.0)
-                    bar_w     = int(abs(score) * 100)
-                    color     = "#00d4a0" if score > 0 else ("#ff5c5c" if score < 0 else "#444")
-                    new_badge = " 🆕" if meta["new"] else ""
+                    sig_data = sigs.get(sig_key, {})
+                    score    = sig_data.get("score", 0) or 0
+                    w        = weights.get(sig_key, 0.0)
+                    bar_w    = int(abs(score) * 100)
+                    color    = "#00d4a0" if score > 0 else ("#ff5c5c" if score < 0 else "#444")
+                    new_badge= " 🆕" if meta["new"] else ""
 
                     st.markdown(f"""
                     <div style="margin-bottom:8px">
@@ -257,23 +262,26 @@ def _render_live_cards(results: dict, weights: dict):
                       </div>
                     </div>""", unsafe_allow_html=True)
 
+                # Show news headline if available
                 news_meta = sigs.get("news_sentiment", {}).get("meta", {})
                 if news_meta.get("latest_headline"):
                     src = news_meta.get("source", "")
                     st.caption(f"📰 [{src}] {news_meta['latest_headline']}")
 
+                # Show RS context
                 rs_meta = sigs.get("relative_strength", {}).get("meta", {})
                 if rs_meta.get("rs_10bar") is not None:
-                    rs       = rs_meta["rs_10bar"]
-                    spy_ret  = rs_meta.get("spy_ret_10bar", 0)
+                    rs = rs_meta["rs_10bar"]
+                    spy_ret = rs_meta.get("spy_ret_10bar", 0)
                     tick_ret = rs_meta.get("ticker_ret_10bar", 0)
-                    color    = "#00d4a0" if rs > 0 else "#ff5c5c"
+                    color = "#00d4a0" if rs > 0 else "#ff5c5c"
                     st.caption(
                         f"📊 vs SPY (10 bars): {tick_ret:+.2f}% vs {spy_ret:+.2f}% "
                         f"→ RS <span style='color:{color}'>{rs:+.2f}%</span>",
                         unsafe_allow_html=True
                     )
 
+                # MACD context
                 macd_meta = sigs.get("macd_crossover", {}).get("meta", {})
                 if macd_meta.get("crossed_up"):
                     st.caption("⚡ MACD bullish crossover detected")
@@ -296,14 +304,16 @@ def _render_db_cards(latest: dict):
                   + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""))
 
         with st.expander(header, expanded=False):
+            # Row 1: original 5
             st.markdown("**Original signals**")
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Order Book",    f"{row.get('order_book_score',    0) or 0:+.3f}")
-            c2.metric("Tape Aggrssn", f"{row.get('tape_aggression_score', 0) or 0:+.3f}")
+            c2.metric("Tape Aggrssn", f"{row.get('tape_aggression_score',0) or 0:+.3f}")
             c3.metric("RSI Diverg",   f"{row.get('rsi_divergence_score', 0) or 0:+.3f}")
             c4.metric("News Sntmnt",  f"{row.get('news_sentiment_score', 0) or 0:+.3f}")
             c5.metric("VWAP Dev",     f"{row.get('vwap_deviation_score', 0) or 0:+.3f}")
 
+            # Row 2: new 3
             st.markdown("**New signals 🆕**")
             n1, n2, n3, _ = st.columns(4)
             n1.metric("MACD",         f"{row.get('macd_score',         0) or 0:+.3f}")

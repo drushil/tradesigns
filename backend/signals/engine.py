@@ -372,6 +372,168 @@ def order_book_score(ticker: str) -> tuple[float, dict]:
         return 0.0, {"error": str(e)[:80]}
 
 
+# ── Signal 6: MACD Crossover (free — yfinance) ───────────────────────────────
+
+def macd_crossover_score(ticker: str) -> tuple[float, dict]:
+    """
+    MACD on 5-minute bars.
+    Positive histogram/cross-up implies bullish momentum; negative implies bearish.
+    """
+    df = _get_bars(ticker, period="5d", interval="5m")
+    if df is None:
+        return 0.0, {"error": "no_data"}
+
+    close = df["Close"].squeeze()
+    ema_fast = close.ewm(span=12, adjust=False).mean()
+    ema_slow = close.ewm(span=26, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+
+    latest_hist = float(hist.iloc[-1])
+    prev_hist = float(hist.iloc[-2])
+    latest_price = float(close.iloc[-1])
+    hist_pct = latest_hist / latest_price * 100 if latest_price else 0.0
+    hist_slope = latest_hist - prev_hist
+
+    crossed_up = prev_hist <= 0 < latest_hist
+    crossed_down = prev_hist >= 0 > latest_hist
+
+    base = _clamp(hist_pct / 0.15)
+    if crossed_up:
+        base += 0.35
+    elif crossed_down:
+        base -= 0.35
+
+    return _clamp(base), {
+        "macd": round(float(macd.iloc[-1]), 5),
+        "signal": round(float(signal.iloc[-1]), 5),
+        "histogram": round(latest_hist, 5),
+        "histogram_pct": round(hist_pct, 4),
+        "histogram_slope": round(hist_slope, 5),
+        "crossed_up": crossed_up,
+        "crossed_down": crossed_down,
+    }
+
+
+# ── Signal 7: Relative Strength vs SPY (free — yfinance) ─────────────────────
+
+def relative_strength_score(ticker: str, benchmark: str = "SPY") -> tuple[float, dict]:
+    """
+    Compares ticker performance to SPY over 5/10/20 recent 5-minute bars.
+    Outperformance is bullish; underperformance is bearish.
+    """
+    if ticker.upper() == benchmark.upper():
+        return 0.0, {
+            "benchmark": benchmark,
+            "rs_5bar": 0.0,
+            "rs_10bar": 0.0,
+            "rs_20bar": 0.0,
+            "ticker_ret_10bar": 0.0,
+            "spy_ret_10bar": 0.0,
+            "note": "ticker_is_benchmark",
+        }
+
+    ticker_df = _get_bars(ticker, period="5d", interval="5m")
+    bench_df = _get_bars(benchmark, period="5d", interval="5m")
+    if ticker_df is None or bench_df is None:
+        return 0.0, {"error": "no_data"}
+
+    ticker_close = ticker_df["Close"].squeeze()
+    bench_close = bench_df["Close"].squeeze()
+
+    def ret_pct(series: pd.Series, bars: int) -> float:
+        if len(series) <= bars:
+            return 0.0
+        start = float(series.iloc[-bars - 1])
+        end = float(series.iloc[-1])
+        return (end - start) / start * 100 if start else 0.0
+
+    rs_values = {}
+    weighted_rs = 0.0
+    weights = {5: 0.25, 10: 0.45, 20: 0.30}
+    for bars, weight in weights.items():
+        ticker_ret = ret_pct(ticker_close, bars)
+        bench_ret = ret_pct(bench_close, bars)
+        rel = ticker_ret - bench_ret
+        rs_values[bars] = (ticker_ret, bench_ret, rel)
+        weighted_rs += rel * weight
+
+    score = _clamp(weighted_rs / 1.5)
+    return score, {
+        "benchmark": benchmark,
+        "rs_5bar": round(rs_values[5][2], 3),
+        "rs_10bar": round(rs_values[10][2], 3),
+        "rs_20bar": round(rs_values[20][2], 3),
+        "ticker_ret_10bar": round(rs_values[10][0], 3),
+        "spy_ret_10bar": round(rs_values[10][1], 3),
+        "weighted_rs": round(weighted_rs, 3),
+    }
+
+
+# ── Signal 8: Earnings Proximity Multiplier (free — yfinance) ────────────────
+
+_earnings_cache: dict = {}
+_EARNINGS_CACHE_TTL = 21600  # 6 hours
+
+
+def earnings_proximity_signal(ticker: str) -> tuple[float, dict]:
+    """
+    Finds next earnings date when available.
+    Returns a neutral score and a multiplier used to amplify the final composite.
+    """
+    cache_key = ticker.upper()
+    now_ts = time.time()
+    if cache_key in _earnings_cache:
+        cached_time, cached_result = _earnings_cache[cache_key]
+        if now_ts - cached_time < _EARNINGS_CACHE_TTL:
+            return cached_result
+
+    result = (0.0, {
+        "days_to_earnings": None,
+        "earnings_multiplier": 1.0,
+        "source": "yfinance",
+    })
+
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        dates = ticker_obj.get_earnings_dates(limit=8)
+        if dates is not None and not dates.empty:
+            now = pd.Timestamp.utcnow()
+            if dates.index.tz is None:
+                idx = dates.index.tz_localize("UTC")
+            else:
+                idx = dates.index.tz_convert("UTC")
+            future = idx[idx >= now]
+            if len(future) > 0:
+                next_date = future[0]
+                days = max(0, int((next_date - now).total_seconds() // 86400))
+                if days <= 1:
+                    mult = 1.5
+                elif days <= 3:
+                    mult = 1.35
+                elif days <= 7:
+                    mult = 1.15
+                else:
+                    mult = 1.0
+                result = (0.0, {
+                    "days_to_earnings": days,
+                    "earnings_date": next_date.date().isoformat(),
+                    "earnings_multiplier": mult,
+                    "source": "yfinance",
+                })
+    except Exception as e:
+        result = (0.0, {
+            "days_to_earnings": None,
+            "earnings_multiplier": 1.0,
+            "source": "yfinance",
+            "error": str(e)[:80],
+        })
+
+    _earnings_cache[cache_key] = (now_ts, result)
+    return result
+
+
 # ── Regime Detection ──────────────────────────────────────────────────────────
 
 def detect_regime(ticker: str = "SPY") -> str:
@@ -413,7 +575,7 @@ def detect_regime(ticker: str = "SPY") -> str:
 
 def compute_all_signals(ticker: str, weights: dict) -> dict:
     """
-    Runs all 5 signals, applies profile weights, returns composite score
+    Runs all 8 signals, applies profile weights, returns composite score
     plus full metadata for logging and display.
     """
     results = {}
@@ -423,21 +585,38 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
     s3, m3 = news_sentiment_score(ticker)
     s4, m4 = tape_aggression_score(ticker)
     s5, m5 = order_book_score(ticker)
+    s6, m6 = macd_crossover_score(ticker)
+    s7, m7 = relative_strength_score(ticker)
+    s8, m8 = earnings_proximity_signal(ticker)
 
     results["rsi_divergence"]       = {"score": s1, "meta": m1}
     results["vwap_deviation"]        = {"score": s2, "meta": m2}
     results["news_sentiment"]        = {"score": s3, "meta": m3}
     results["tape_aggression"]       = {"score": s4, "meta": m4}
     results["order_book_imbalance"]  = {"score": s5, "meta": m5}
+    results["macd_crossover"]        = {"score": s6, "meta": m6}
+    results["relative_strength"]     = {"score": s7, "meta": m7}
+    results["earnings_proximity"]    = {"score": s8, "meta": m8}
 
     # Weighted composite
-    composite = (
-        s1 * weights.get("rsi_divergence",       0.15) +
-        s2 * weights.get("vwap_deviation",        0.10) +
-        s3 * weights.get("news_sentiment",        0.20) +
-        s4 * weights.get("tape_aggression",       0.25) +
-        s5 * weights.get("order_book_imbalance",  0.30)
+    weighted_signals = {
+        "rsi_divergence": s1,
+        "vwap_deviation": s2,
+        "news_sentiment": s3,
+        "tape_aggression": s4,
+        "order_book_imbalance": s5,
+        "macd_crossover": s6,
+        "relative_strength": s7,
+    }
+    weight_total = sum(max(0.0, weights.get(k, 0.0)) for k in weighted_signals)
+    if weight_total <= 0:
+        weight_total = 1.0
+    composite = sum(
+        score * (max(0.0, weights.get(name, 0.0)) / weight_total)
+        for name, score in weighted_signals.items()
     )
+    earnings_multiplier = m8.get("earnings_multiplier", 1.0)
+    composite *= earnings_multiplier
     composite = _clamp(composite)
 
     regime = detect_regime()
@@ -448,5 +627,6 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
         "regime":          regime,
         "signals":         results,
         "weights_used":    weights,
+        "earnings_multiplier": earnings_multiplier,
         "computed_at":     datetime.utcnow().isoformat(),
     }

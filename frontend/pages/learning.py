@@ -11,8 +11,11 @@ SIGNAL_LABELS = {
     "rsi_divergence":  "RSI Divergence",
     "news_sentiment":  "News Sentiment",
     "vwap_deviation":  "VWAP Deviation",
+    "macd_crossover":  "MACD Crossover",
+    "relative_strength": "Relative Strength",
 }
-SIGNAL_COLORS = ["#00d4a0", "#6c63ff", "#ffd166", "#ff5c5c", "#4ecdc4"]
+SIGNAL_COLORS = ["#00d4a0", "#6c63ff", "#ffd166", "#ff5c5c",
+                 "#4ecdc4", "#ef9f27", "#9b8cff"]
 
 
 def render():
@@ -40,6 +43,8 @@ def render():
             "RSI Divergence":       latest.get("rsi_divergence", 0.15),
             "News Sentiment":       latest.get("news_sentiment", 0.20),
             "VWAP Deviation":       latest.get("vwap_deviation", 0.10),
+            "MACD Crossover":       latest.get("macd_crossover", 0.10),
+            "Relative Strength":    latest.get("relative_strength", 0.08),
         }
         st.caption(f"Last updated: {latest.get('updated_at','—')[:19]} UTC · "
                    f"Trigger: `{latest.get('trigger','—')}` · "
@@ -56,6 +61,8 @@ def render():
             "RSI Divergence":       sw.get("rsi_divergence", 0.15),
             "News Sentiment":       sw.get("news_sentiment", 0.20),
             "VWAP Deviation":       sw.get("vwap_deviation", 0.10),
+            "MACD Crossover":       sw.get("macd_crossover", 0.10),
+            "Relative Strength":    sw.get("relative_strength", 0.08),
         }
         st.info("No weight updates yet — showing profile priors. Start trading to enable learning.")
 
@@ -119,6 +126,8 @@ def render():
             "rsi_divergence_score":   "RSI Divergence",
             "news_sentiment_score":   "News Sentiment",
             "vwap_deviation_score":   "VWAP Deviation",
+            "macd_score":             "MACD Crossover",
+            "rel_strength_score":     "Relative Strength",
         }
 
         from database.client import get_recent_signals

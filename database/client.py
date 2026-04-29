@@ -117,6 +117,8 @@ def save_signal_weights(regime: str, weights: dict, trade_count: int, trigger: s
         "rsi_divergence":  round(weights.get("rsi_divergence", 0.20), 4),
         "news_sentiment":  round(weights.get("news_sentiment", 0.20), 4),
         "vwap_deviation":  round(weights.get("vwap_deviation", 0.10), 4),
+        "macd_crossover":  round(weights.get("macd_crossover", 0.10), 4),
+        "relative_strength": round(weights.get("relative_strength", 0.08), 4),
         "trade_count":     trade_count,
         "trigger":         trigger,
     }
@@ -139,6 +141,8 @@ def get_latest_weights(regime: str = "global") -> Optional[dict]:
                 "rsi_divergence":       r["rsi_divergence"],
                 "news_sentiment":       r["news_sentiment"],
                 "vwap_deviation":       r["vwap_deviation"],
+                "macd_crossover":       r.get("macd_crossover", 0.10),
+                "relative_strength":    r.get("relative_strength", 0.08),
             }
     except Exception:
         pass
