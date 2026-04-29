@@ -51,6 +51,7 @@ def render():
 
     st.markdown("---")
     st.markdown("### Signal Weights (current priors)")
+    st.caption("7 weighted signal scores plus Earnings Proximity as an 8th multiplier signal.")
 
     sw = profile["signal_weights"]
     for sig, w in sw.items():

@@ -64,6 +64,12 @@ def render():
     tickers = [t.strip() for t in os.getenv("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",")]
     profile_name = os.getenv("RISK_PROFILE", "moderate")
 
+    weighted_count = sum(1 for meta in ALL_SIGNALS.values() if meta["db_col"])
+    c_total, c_weighted, c_multiplier = st.columns(3)
+    c_total.metric("Signals", len(ALL_SIGNALS))
+    c_weighted.metric("Weighted scores", weighted_count)
+    c_multiplier.metric("Multiplier", "Earnings")
+
     col_r, col_info = st.columns([1, 4])
     with col_r:
         run_now = st.button("🔄 Compute Signals Now", use_container_width=True)
@@ -155,9 +161,23 @@ def _display_from_db(tickers):
             t = s.get("ticker")
             if t not in latest:
                 latest[t] = s
+        missing_cols = _missing_new_signal_columns(latest.values())
+        if missing_cols:
+            st.warning(
+                "Supabase is still returning the original 5-signal schema. "
+                "Apply the `database/schema.sql` upgrade so MACD, Relative Strength, "
+                "and Earnings Proximity can be stored. Live compute still uses all 8."
+            )
         _render_db_cards(latest)
     except Exception as e:
         st.error(f"DB error: {e}")
+
+
+def _missing_new_signal_columns(rows) -> list:
+    required = ["macd_score", "rel_strength_score", "earnings_days", "earnings_mult"]
+    for row in rows:
+        return [col for col in required if col not in row]
+    return []
 
 
 # ── Live render (full 8-signal breakdown) ─────────────────────────────────────
@@ -292,6 +312,11 @@ def _render_live_cards(results: dict, weights: dict):
 # ── DB render (compact — 8 metrics in 2 rows) ─────────────────────────────────
 
 def _render_db_cards(latest: dict):
+    def fmt_score(row: dict, col: str) -> str:
+        if col not in row:
+            return "not stored"
+        return f"{row.get(col, 0) or 0:+.3f}"
+
     for ticker, row in latest.items():
         composite = row.get("composite_score", 0) or 0
         action    = "🟢 BULLISH" if composite > 0.35 else ("🔴 BEARISH" if composite < -0.35 else "⚪ NEUTRAL")
@@ -316,10 +341,14 @@ def _render_db_cards(latest: dict):
             # Row 2: new 3
             st.markdown("**New signals 🆕**")
             n1, n2, n3, _ = st.columns(4)
-            n1.metric("MACD",         f"{row.get('macd_score',         0) or 0:+.3f}")
-            n2.metric("Rel Strength", f"{row.get('rel_strength_score', 0) or 0:+.3f}")
-            n3.metric("Earnings ×",   f"×{e_mult:.1f}"
-                      + (f" ({e_days}d)" if e_days is not None else ""))
+            n1.metric("MACD", fmt_score(row, "macd_score"))
+            n2.metric("Rel Strength", fmt_score(row, "rel_strength_score"))
+            n3.metric(
+                "Earnings ×",
+                "not stored" if "earnings_mult" not in row else (
+                    f"×{e_mult:.1f}" + (f" ({e_days}d)" if e_days is not None else "")
+                ),
+            )
 
             if gated:
                 st.warning(f"Gated: {row.get('gate_reason', '—')}")
