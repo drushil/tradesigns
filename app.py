@@ -4,6 +4,8 @@ Run locally:  streamlit run app.py
 Deploy:       Push to GitHub → connect Streamlit Cloud
 """
 import os
+import importlib.util
+from pathlib import Path
 import streamlit as st
 
 # ── Streamlit Cloud secrets → env vars ───────────────────────────────────────
@@ -58,19 +60,18 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-# Lazy import — pages only loaded when selected, never at startup
-page_module = PAGES[selection]
-if page_module == "overview":
-    from frontend.pages import overview as page
-elif page_module == "signals":
-    from frontend.pages import signals as page
-elif page_module == "trades":
-    from frontend.pages import trades as page
-elif page_module == "learning":
-    from frontend.pages import learning as page
-elif page_module == "config_page":
-    from frontend.pages import config_page as page
-else:
-    from frontend.pages import logs as page
+def _load_page(module_name: str):
+    """Load page modules by path to avoid Streamlit Cloud package import cache issues."""
+    page_path = Path(__file__).parent / "frontend" / "pages" / f"{module_name}.py"
+    spec = importlib.util.spec_from_file_location(f"trading_agent_page_{module_name}", page_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load page module: {module_name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# Lazy load — pages only loaded when selected, never at startup
+page = _load_page(PAGES[selection])
 
 page.render()
