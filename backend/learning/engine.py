@@ -8,7 +8,7 @@ import os
 import json
 from datetime import datetime, timedelta, date
 from typing import Optional
-import anthropic
+from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -19,13 +19,13 @@ LEARNING_RATE        = 0.05
 MAX_WEIGHT           = 0.55
 MIN_WEIGHT           = 0.03
 
-_client: Optional[anthropic.Anthropic] = None
+_client: Optional[Groq] = None
 
 
-def _get_client():
+def _get_client() -> Groq:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _client
 
 
@@ -269,13 +269,12 @@ Output ONLY a valid JSON array, no other text:
 ]"""
 
     try:
-        response = _get_client().messages.create(
-            model="claude-sonnet-4-6",
+        response = _get_client().chat.completions.create(
+            model="llama-3.3-70b-versatile",
             max_tokens=800,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
         )
-        raw = response.content[0].text.strip()
-        # Strip markdown fences if present
+        raw = response.choices[0].message.content.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -284,7 +283,7 @@ Output ONLY a valid JSON array, no other text:
         return insights if isinstance(insights, list) else []
     except Exception as e:
         return [{"insight": f"Analysis error: {str(e)[:100]}",
-                 "action": "Check API key and trade data format",
+                 "action": "Check GROQ_API_KEY and trade data format",
                  "confidence": 0.0, "category": "error"}]
 
 
@@ -309,17 +308,22 @@ Reply ONLY with valid JSON, no other text:
 {{"action":"BUY","conviction":0.72,"hold_minutes":30,"stop_loss_pct":2.0,"rationale":"momentum with news support"}}"""
 
     try:
-        response = _get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
+        response = _get_client().chat.completions.create(
+            model="llama-3.1-8b-instant",
             max_tokens=120,
-            messages=[{"role": "user", "content": prompt}],
-            system=(
-                "You are a trading signal interpreter. "
-                "Reply ONLY with the exact JSON format requested. "
-                "No explanation, no markdown, just JSON."
-            )
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a trading signal interpreter. "
+                        "Reply ONLY with the exact JSON format requested. "
+                        "No explanation, no markdown, just JSON."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
         )
-        raw = response.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         return json.loads(raw)
     except Exception as e:
         return {"action": "HOLD", "conviction": 0.0,
