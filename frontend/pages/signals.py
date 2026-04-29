@@ -135,7 +135,7 @@ def _render_signal_cards(results: dict, weights: dict):
                     height=200,
                     margin=dict(l=10, r=10, t=20, b=10),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"gauge_{ticker}")
 
             with col_breakdown:
                 st.markdown("**Individual signal scores**")
