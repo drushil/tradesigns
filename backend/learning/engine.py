@@ -303,6 +303,9 @@ Risk profile: {profile.get('display_name','moderate')}
 Max hold: {profile.get('max_hold_minutes',60)} minutes
 Stop loss: {profile.get('stop_loss_pct',2.0)}%
 
+Decision rule: BUY for strong positive scores, SELL for strong negative scores,
+HOLD only when the setup is unclear or conviction is below threshold.
+
 Reply ONLY with valid JSON, no other text:
 {{"action":"BUY","conviction":0.72,"hold_minutes":30,"stop_loss_pct":2.0,"rationale":"momentum with news support"}}"""
 

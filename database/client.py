@@ -91,9 +91,24 @@ def get_trade_stats(days: int = 30) -> dict:
 # ── Signals ───────────────────────────────────────────────────────────────────
 
 def insert_signal(signal: dict) -> dict:
-    db = get_client(write=True)
-    result = db.table("signals").insert(signal).execute()
-    return result.data[0] if result.data else {}
+    try:
+        db = get_client(write=True)
+        result = db.table("signals").insert(signal).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        base_columns = {
+            "ticker", "composite_score", "order_book_score",
+            "tape_aggression_score", "rsi_divergence_score",
+            "news_sentiment_score", "vwap_deviation_score", "regime",
+            "vix", "volume_vs_avg", "gated", "gate_reason",
+            "llm_called", "llm_action", "llm_conviction",
+        }
+        fallback = {k: v for k, v in signal.items() if k in base_columns}
+        try:
+            result = db.table("signals").insert(fallback).execute()
+            return result.data[0] if result.data else {}
+        except Exception:
+            return {"error": str(e)}
 
 
 def get_recent_signals(hours: int = 24) -> list:

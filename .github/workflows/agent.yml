@@ -11,7 +11,7 @@ on:
 jobs:
   run-agent-cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -45,18 +45,18 @@ jobs:
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           LLM_CALLS_PER_HOUR_LIMIT: "20"
         run: |
-          python -c "
-          import os
-          from backend.agent import run_signal_cycle, run_weekly_digest
+          python <<'PY'
           from datetime import datetime, timezone
+          from backend.agent import run_signal_cycle, run_weekly_digest
+
           now = datetime.now(timezone.utc)
           if now.weekday() == 6 and now.hour == 18:
-              print('Running weekly digest...')
+              print("Running weekly digest...")
               run_weekly_digest()
           else:
-              print('Running signal cycle...')
+              print("Running signal cycle...")
               run_signal_cycle()
-          "
+          PY
 
       - name: Send Telegram summary
         if: always()

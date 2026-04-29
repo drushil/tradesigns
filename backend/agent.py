@@ -23,10 +23,24 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           save_signal_weights, get_latest_weights,
                                           save_snapshot, save_learning, log_event, get_logs)
 
-TICKERS  = [t.strip() for t in os.getenv("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",")]
-PROFILE  = get_profile(os.getenv("RISK_PROFILE", "moderate"))
-HORIZON  = os.getenv("INVESTMENT_HORIZON", "short")
-LLM_HOUR_LIMIT = int(os.getenv("LLM_CALLS_PER_HOUR_LIMIT", "20"))
+def _env_value(key: str, default: str) -> str:
+    value = os.getenv(key)
+    if value is None or not value.strip():
+        return default
+    return value.strip()
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(_env_value(key, str(default)))
+    except ValueError:
+        return default
+
+
+TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",") if t.strip()]
+PROFILE  = get_profile(_env_value("RISK_PROFILE", "moderate"))
+HORIZON  = _env_value("INVESTMENT_HORIZON", "short")
+LLM_HOUR_LIMIT = _env_int("LLM_CALLS_PER_HOUR_LIMIT", 20)
 
 # Global learning engine (persists in memory between cycles)
 _learning_engine: Optional[RegimeAwareWeightEngine] = None
@@ -132,6 +146,12 @@ def run_signal_cycle():
         "vix": portfolio_state["vix"], "tickers": TICKERS
     })
 
+    if not TICKERS:
+        log_event("ERROR", "no_tickers_configured", {
+            "hint": "Set TICKER_UNIVERSE or leave it unset to use SPY,QQQ,GLD"
+        })
+        return
+
     for ticker in TICKERS:
         try:
             _process_ticker(ticker, regime, weights, effective_profile,
@@ -182,6 +202,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     })
 
     if not gate_ok:
+        log_event("INFO", "trade_gated", {
+            "ticker": ticker,
+            "composite": composite,
+            "reason": gate_reason,
+        })
         return
 
     # 4. EV check
@@ -197,12 +222,26 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     llm_result = llm_signal_decision(ticker, composite, regime, news_headline, profile)
     _record_llm_call()
+    log_event("SIGNAL", "llm_decision", {
+        "ticker": ticker,
+        "composite": composite,
+        "action": llm_result.get("action"),
+        "conviction": llm_result.get("conviction"),
+        "rationale": llm_result.get("rationale", ""),
+    })
 
-    if llm_result["action"] not in ("BUY", "SELL"):
+    action = llm_result.get("action", "HOLD")
+    if action not in ("BUY", "SELL"):
+        log_event("INFO", "llm_hold", {"ticker": ticker, "result": llm_result})
         return
 
     conviction = llm_result.get("conviction", 0.5)
     if conviction < profile["min_conviction"]:
+        log_event("INFO", "conviction_below_threshold", {
+            "ticker": ticker,
+            "conviction": conviction,
+            "min_conviction": profile["min_conviction"],
+        })
         return
 
     # 6. Size and submit order
@@ -219,7 +258,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     order = submit_market_order(
         ticker       = ticker,
-        side         = llm_result["action"].lower(),
+        side         = action.lower(),
         qty          = round(qty, 6),
         stop_loss_pct= llm_result.get("stop_loss_pct", profile["stop_loss_pct"])
     )
@@ -235,7 +274,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "stop_price":    current_price * (1 - profile["stop_loss_pct"] / 100),
         "hold_minutes":  llm_result.get("hold_minutes", 30),
         "size_eur":      final_size,
-        "side":          llm_result["action"],
+        "side":          action,
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
         "regime":        regime,
@@ -245,7 +284,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     }
 
     log_event("TRADE", "order_submitted", {
-        "ticker": ticker, "side": llm_result["action"],
+        "ticker": ticker, "side": action,
         "size_eur": round(final_size, 2), "conviction": conviction,
         "composite": composite, "rationale": llm_result.get("rationale")
     })
@@ -358,7 +397,6 @@ def _save_snapshot(portfolio_state, regime):
     save_snapshot({
         "total_value_eur":    equity,
         "cash_eur":           portfolio_state["cash"],
-        "invested_eur":       equity - portfolio_state["cash"],
         "daily_pnl_pct":      -portfolio_state["drawdown_today"],
         "cumulative_pnl_pct": round(cum_pnl, 3),
         "drawdown_pct":       portfolio_state["drawdown_today"],
