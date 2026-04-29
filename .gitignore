@@ -24,6 +24,7 @@ Thumbs.db
 skills/
 
 # Other AI tool config directories (auto-generated)
+.claude/worktrees/
 .cursor/
 .windsurf/
 .aider-desk/
@@ -33,3 +34,6 @@ skills/
 .bob/
 .codebuddy/
 .cortex/
+
+# Nested local copies/worktrees should not be committed as submodules
+tradesigns/
