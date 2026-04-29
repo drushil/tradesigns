@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
+
 # yfinance prints its own error messages to stderr even when exceptions are caught
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
@@ -145,6 +147,26 @@ _FINVIZ_HEADERS = {
 }
 
 
+def _fetch_newsapi_headlines(ticker: str) -> list:
+    """
+    NewsAPI fallback — only called when yfinance returns nothing.
+    Free tier: 100 req/day. With 15-min cache this stays well within limit
+    as long as yfinance is healthy (NewsAPI only fires on yfinance failures).
+    Requires NEWSAPI_KEY env var; silently skipped if absent.
+    """
+    if not NEWSAPI_KEY:
+        return []
+    resp = requests.get(
+        "https://newsapi.org/v2/everything",
+        params={"q": ticker, "language": "en", "sortBy": "publishedAt",
+                "pageSize": 10, "apiKey": NEWSAPI_KEY},
+        timeout=5,
+    )
+    resp.raise_for_status()
+    articles = resp.json().get("articles", [])
+    return [(a.get("title") or "").strip() for a in articles[:10] if a.get("title")]
+
+
 def _fetch_finviz_headlines(ticker: str) -> list:
     """Scrape recent headlines from finviz.com/quote.ashx — no API key needed."""
     url = f"https://finviz.com/quote.ashx?t={ticker}"
@@ -205,7 +227,7 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     texts = []
     st_bullish = st_bearish = 0
 
-    # Source 1: yfinance
+    # Source 1: yfinance; Source 1b: NewsAPI backup when yfinance returns nothing
     try:
         for a in (yf.Ticker(ticker).news or [])[:5]:
             title = (a.get("title") or "").strip()
@@ -213,6 +235,11 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
                 texts.append(title)
     except Exception:
         pass
+    if not texts:
+        try:
+            texts.extend(_fetch_newsapi_headlines(ticker))
+        except Exception:
+            pass
 
     # Source 2: Finviz
     try:
