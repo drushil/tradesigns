@@ -141,6 +141,8 @@ def _compute_and_display_live(tickers, profile_name):
 
 # ── DB display path ───────────────────────────────────────────────────────────
 
+# ── DB display path ───────────────────────────────────────────────────────────
+
 def _display_from_db(tickers):
     try:
         from database.client import get_recent_signals
