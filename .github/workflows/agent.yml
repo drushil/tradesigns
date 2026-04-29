@@ -1,4 +1,4 @@
-name: Trading Agent — Signal Cycle
+name: Trading Agent - Signal Cycle
 
 on:
   schedule:
@@ -26,23 +26,23 @@ jobs:
 
       - name: Run signal cycle
         env:
-          ALPACA_API_KEY:       ${{ secrets.ALPACA_API_KEY }}
-          ALPACA_SECRET_KEY:    ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
+          ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
           ALPACA_BASE_URL:      https://paper-api.alpaca.markets
-          GROQ_API_KEY:         ${{ secrets.GROQ_API_KEY }}
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY:    ${{ secrets.SUPABASE_ANON_KEY }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          NEWSAPI_KEY:          ${{ secrets.NEWSAPI_KEY }}
-          REDDIT_CLIENT_ID:     ${{ secrets.REDDIT_CLIENT_ID }}
-          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
-          REDDIT_USER_AGENT:    ${{ secrets.REDDIT_USER_AGENT }}
-          TELEGRAM_BOT_TOKEN:   ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:     ${{ secrets.TELEGRAM_CHAT_ID }}
-          RISK_PROFILE:         ${{ vars.RISK_PROFILE }}
-          INVESTMENT_HORIZON:   ${{ vars.INVESTMENT_HORIZON }}
-          TICKER_UNIVERSE:      ${{ vars.TICKER_UNIVERSE }}
-          STARTING_CAPITAL_EUR: ${{ vars.STARTING_CAPITAL_EUR }}
+          GROQ_API_KEY:         "${{ secrets.GROQ_API_KEY }}"
+          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
+          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
+          NEWSAPI_KEY:          "${{ secrets.NEWSAPI_KEY }}"
+          REDDIT_CLIENT_ID:     "${{ secrets.REDDIT_CLIENT_ID }}"
+          REDDIT_CLIENT_SECRET: "${{ secrets.REDDIT_CLIENT_SECRET }}"
+          REDDIT_USER_AGENT:    "${{ secrets.REDDIT_USER_AGENT }}"
+          TELEGRAM_BOT_TOKEN:   "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          TELEGRAM_CHAT_ID:     "${{ secrets.TELEGRAM_CHAT_ID }}"
+          RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
+          INVESTMENT_HORIZON:   "${{ vars.INVESTMENT_HORIZON }}"
+          TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
+          STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           LLM_CALLS_PER_HOUR_LIMIT: "20"
         run: |
           python -c "
@@ -61,7 +61,7 @@ jobs:
       - name: Send Telegram summary
         if: always()
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_BOT_TOKEN: "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          TELEGRAM_CHAT_ID:   "${{ secrets.TELEGRAM_CHAT_ID }}"
         run: |
           python scripts/telegram_notify.py
