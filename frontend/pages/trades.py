@@ -108,7 +108,7 @@ def render():
         return ""
 
     st.dataframe(
-        show_df.style.applymap(highlight_pnl, subset=["net_pnl_pct"] if "net_pnl_pct" in show_df.columns else []),
+        show_df.style.map(highlight_pnl, subset=["net_pnl_pct"] if "net_pnl_pct" in show_df.columns else []),
         use_container_width=True,
         height=400,
     )

@@ -11,7 +11,7 @@ def render():
 
     # ── Load data ──────────────────────────────────────────────────────────
     try:
-        from database.client import get_snapshots, get_trade_stats, get_positions as db_positions
+        from database.client import get_snapshots, get_trade_stats
         from backend.broker.alpaca import get_account, get_positions
         snapshots  = get_snapshots(days=30)
         trade_stats = get_trade_stats(days=30)
