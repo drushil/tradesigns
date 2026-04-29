@@ -341,7 +341,12 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
 def _save_snapshot(portfolio_state, regime):
     from database.client import get_snapshots
     snaps = get_snapshots(days=1)
-    start_equity = float(os.getenv("STARTING_CAPITAL_EUR", "100"))
+    # Safely handle None, empty strings, or missing keys
+    raw_capital = os.getenv("STARTING_CAPITAL_EUR", "100")
+    if not raw_capital or raw_capital.strip() == "":
+        start_equity = 100.0
+    else:
+        start_equity = float(raw_capital)
     if snaps:
         start_equity = max(start_equity,
                            snaps[-1].get("total_value_eur", start_equity))
