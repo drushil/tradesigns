@@ -200,8 +200,11 @@ def get_learnings(limit: int = 10) -> list:
 # ── Portfolio snapshots ───────────────────────────────────────────────────────
 
 def save_snapshot(snapshot: dict):
-    db = get_client(write=True)
-    db.table("portfolio_snapshots").insert(snapshot).execute()
+    try:
+        db = get_client(write=True)
+        db.table("portfolio_snapshots").insert(snapshot).execute()
+    except Exception as e:
+        print(f"[SNAPSHOT_WRITE_FAILED] {str(e)[:200]}")
 
 
 def get_snapshots(days: int = 30) -> list:

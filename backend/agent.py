@@ -401,18 +401,22 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
 def _save_snapshot(portfolio_state, regime):
     from database.client import get_snapshots
     snaps = get_snapshots(days=1)
-    # Safely handle None, empty strings, or missing keys
+    equity = portfolio_state["equity"]
+
+    # Safely handle None, empty strings, or missing keys. If starting capital is
+    # unset, anchor to current equity so a 100k Alpaca paper account does not
+    # look like a 99,900% gain from the old 100 EUR default.
     raw_capital = os.getenv("STARTING_CAPITAL_EUR", "100")
     if not raw_capital or raw_capital.strip() == "":
-        start_equity = 100.0
+        start_equity = equity
     else:
         start_equity = float(raw_capital)
     if snaps:
         start_equity = max(start_equity,
                            snaps[-1].get("total_value_eur", start_equity))
 
-    equity = portfolio_state["equity"]
-    cum_pnl = (equity - start_equity) / start_equity * 100
+    cum_pnl = (equity - start_equity) / start_equity * 100 if start_equity else 0.0
+    cum_pnl = max(-9999.0, min(9999.0, cum_pnl))
 
     save_snapshot({
         "total_value_eur":    equity,
