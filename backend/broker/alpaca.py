@@ -4,6 +4,7 @@ All broker interactions go through here.
 Paper trading on Alpaca (free). Swap base URL to go live.
 """
 import os
+import math
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
@@ -13,10 +14,15 @@ load_dotenv()
 
 def _get_trading_client():
     from alpaca.trading.client import TradingClient
+    paper = os.getenv("ALPACA_PAPER", "true").strip().lower() != "false"
+    if not paper and os.getenv("ENABLE_LIVE_TRADING", "").strip().lower() != "true":
+        raise RuntimeError(
+            "Live trading is disabled. Set ENABLE_LIVE_TRADING=true only after paper validation."
+        )
     return TradingClient(
         os.getenv("ALPACA_API_KEY"),
         os.getenv("ALPACA_SECRET_KEY"),
-        paper=True
+        paper=paper
     )
 
 
@@ -94,24 +100,56 @@ def get_orders(status: str = "all", limit: int = 50) -> list:
 
 # ── Order submission ──────────────────────────────────────────────────────────
 
+def _round_price(price: float) -> float:
+    return round(price, 2) if price >= 1 else round(price, 4)
+
+
 def submit_market_order(ticker: str, side: str, qty: float,
-                         stop_loss_pct: float = 2.0) -> dict:
+                         stop_loss_pct: float = 2.0,
+                         take_profit_pct: float = 2.0,
+                         current_price: float = None) -> dict:
     """
     Submits a market order with an immediate stop-loss bracket.
     side: 'buy' | 'sell'
     """
     try:
-        from alpaca.trading.requests import MarketOrderRequest, TrailingStopOrderRequest
-        from alpaca.trading.enums    import OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            MarketOrderRequest, TakeProfitRequest, StopLossRequest
+        )
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 
         client = _get_trading_client()
         order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        use_bracket = os.getenv("USE_BRACKET_ORDERS", "true").strip().lower() != "false"
+
+        qty = math.floor(qty) if use_bracket else round(qty, 6)
+        if qty <= 0:
+            return {"error": "quantity below 1 share after bracket sizing", "ticker": ticker, "side": side}
+
+        kwargs = {}
+        if use_bracket:
+            if not current_price or current_price <= 0:
+                return {"error": "current_price required for bracket order", "ticker": ticker, "side": side}
+            stop_loss_pct = float(stop_loss_pct)
+            take_profit_pct = float(take_profit_pct)
+            if side.lower() == "buy":
+                take_profit_price = current_price * (1 + take_profit_pct / 100)
+                stop_price = current_price * (1 - stop_loss_pct / 100)
+            else:
+                take_profit_price = current_price * (1 - take_profit_pct / 100)
+                stop_price = current_price * (1 + stop_loss_pct / 100)
+            kwargs = {
+                "order_class": OrderClass.BRACKET,
+                "take_profit": TakeProfitRequest(limit_price=_round_price(take_profit_price)),
+                "stop_loss": StopLossRequest(stop_price=_round_price(stop_price)),
+            }
 
         req = MarketOrderRequest(
             symbol       = ticker,
-            qty          = round(qty, 6),
+            qty          = qty,
             side         = order_side,
             time_in_force= TimeInForce.DAY,
+            **kwargs,
         )
         order = client.submit_order(req)
 
@@ -121,6 +159,7 @@ def submit_market_order(ticker: str, side: str, qty: float,
             "side":       side,
             "qty":        float(order.qty or qty),
             "status":     str(order.status),
+            "order_class": "bracket" if use_bracket else "market",
             "submitted_at": datetime.utcnow().isoformat(),
         }
     except Exception as e:
@@ -160,6 +199,17 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     vix      = portfolio_state.get("vix", 20.0)
     cash_pct = portfolio_state.get("cash_pct", 100.0)
     trades_today = portfolio_state.get("trades_today", 0)
+    allowed = profile.get("allowed_instruments", [])
+    open_tickers = {p.get("ticker") for p in portfolio_state.get("positions", [])}
+
+    if allowed and ticker not in allowed and not profile.get("allow_individual_stocks", False):
+        return False, f"{ticker} not allowed for profile"
+
+    if ticker in open_tickers:
+        return False, f"position already open for {ticker}"
+
+    if side.lower() == "sell" and not profile.get("allow_short_selling", False):
+        return False, "short selling disabled for profile"
 
     if drawdown >= profile["max_drawdown_pct"]:
         return False, f"max drawdown hit ({drawdown:.1f}% ≥ {profile['max_drawdown_pct']}%)"

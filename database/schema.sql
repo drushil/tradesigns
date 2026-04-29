@@ -50,7 +50,35 @@ create index if not exists idx_trades_regime      on trades (regime);
 create index if not exists idx_trades_pnl         on trades (net_pnl_pct)
     where net_pnl_pct is not null;
 
--- 2. SIGNALS
+-- 2. OPEN_TRADES
+create table if not exists open_trades (
+    id                  bigint generated always as identity primary key,
+    created_at          timestamptz not null default now(),
+    updated_at          timestamptz not null default now(),
+    entry_time          timestamptz,
+    closed_at           timestamptz,
+    ticker              text not null unique,
+    side                text not null check (side in ('BUY','SELL')),
+    entry_price         numeric(12,4),
+    stop_price          numeric(12,4),
+    take_profit_price   numeric(12,4),
+    size_eur            numeric(10,2),
+    order_id            text,
+    status              text not null default 'open' check (status in ('open','closed')),
+    close_reason        text,
+    regime              text,
+    composite_score     numeric(6,4),
+    llm_conviction      numeric(6,4),
+    llm_rationale       text,
+    signals_json        jsonb default '{}'::jsonb
+);
+
+create index if not exists idx_open_trades_status on open_trades (status, created_at desc);
+
+alter table if exists open_trades
+    add column if not exists entry_time timestamptz;
+
+-- 3. SIGNALS
 create table if not exists signals (
     id                      bigint generated always as identity primary key,
     created_at              timestamptz not null default now(),
@@ -80,7 +108,7 @@ create index if not exists idx_signals_ticker_time on signals (ticker, created_a
 create index if not exists idx_signals_active      on signals (created_at desc)
     where gated = false;
 
--- 3. SIGNAL_WEIGHTS
+-- 4. SIGNAL_WEIGHTS
 create table if not exists signal_weights (
     id              bigint generated always as identity primary key,
     updated_at      timestamptz not null default now(),
@@ -111,7 +139,7 @@ alter table if exists signal_weights
     add column if not exists macd_crossover numeric(6,4) not null default 0.10 check (macd_crossover between 0 and 1),
     add column if not exists relative_strength numeric(6,4) not null default 0.08 check (relative_strength between 0 and 1);
 
--- 4. LEARNINGS
+-- 5. LEARNINGS
 create table if not exists learnings (
     id              bigint generated always as identity primary key,
     created_at      timestamptz not null default now(),
@@ -123,7 +151,7 @@ create table if not exists learnings (
 
 create index if not exists idx_learnings_week on learnings (week_start desc);
 
--- 5. PORTFOLIO_SNAPSHOTS
+-- 6. PORTFOLIO_SNAPSHOTS
 create table if not exists portfolio_snapshots (
     id                  bigint generated always as identity primary key,
     snapshot_at         timestamptz not null default now(),
@@ -142,7 +170,7 @@ create table if not exists portfolio_snapshots (
 
 create index if not exists idx_snapshots_at on portfolio_snapshots (snapshot_at desc);
 
--- 6. AGENT_LOGS
+-- 7. AGENT_LOGS
 create table if not exists agent_logs (
     id          bigint generated always as identity primary key,
     logged_at   timestamptz not null default now(),
@@ -162,6 +190,7 @@ create index if not exists idx_logs_errors     on agent_logs (logged_at desc)
 -- service_role = agent backend (bypasses RLS, write access)
 
 alter table trades              enable row level security;
+alter table open_trades         enable row level security;
 alter table signals             enable row level security;
 alter table signal_weights      enable row level security;
 alter table learnings           enable row level security;
@@ -169,6 +198,7 @@ alter table portfolio_snapshots enable row level security;
 alter table agent_logs          enable row level security;
 
 create policy "anon read trades"             on trades             for select to anon using (true);
+create policy "anon read open_trades"        on open_trades        for select to anon using (true);
 create policy "anon read signals"            on signals            for select to anon using (true);
 create policy "anon read signal_weights"     on signal_weights     for select to anon using (true);
 create policy "anon read learnings"          on learnings          for select to anon using (true);

@@ -4,7 +4,7 @@ Supabase client wrapper. All DB operations go through here.
 Reads credentials from os.environ (which app.py populates from st.secrets).
 """
 import os
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 from supabase import create_client, Client
 
@@ -42,6 +42,58 @@ def insert_trade(trade: dict) -> dict:
     db = get_client(write=True)
     result = db.table("trades").insert(trade).execute()
     return result.data[0] if result.data else {}
+
+
+def save_open_trade(ticker: str, trade: dict) -> dict:
+    """Best-effort persistence for scheduled runs; bracket orders remain source of truth."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "ticker": ticker,
+            "side": trade.get("side"),
+            "entry_time": trade.get("entry_time").isoformat() if trade.get("entry_time") else None,
+            "entry_price": trade.get("entry_price"),
+            "stop_price": trade.get("stop_price"),
+            "take_profit_price": trade.get("take_profit_price"),
+            "size_eur": trade.get("size_eur"),
+            "order_id": trade.get("order_id"),
+            "regime": trade.get("regime"),
+            "composite_score": trade.get("composite_score"),
+            "llm_conviction": trade.get("llm_conviction"),
+            "llm_rationale": trade.get("llm_rationale"),
+            "signals_json": trade.get("signals_json", {}),
+            "status": "open",
+        }
+        result = db.table("open_trades").upsert(record, on_conflict="ticker").execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[OPEN_TRADE_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_open_trade_records() -> list:
+    try:
+        db = get_client()
+        result = (db.table("open_trades")
+                  .select("*")
+                  .eq("status", "open")
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[OPEN_TRADE_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def close_open_trade_record(ticker: str, reason: str = None):
+    try:
+        db = get_client(write=True)
+        db.table("open_trades").update({
+            "status": "closed",
+            "closed_at": datetime.utcnow().isoformat(),
+            "close_reason": reason,
+        }).eq("ticker", ticker).eq("status", "open").execute()
+    except Exception as e:
+        print(f"[OPEN_TRADE_CLOSE_FAILED] {str(e)[:200]}")
 
 
 def get_recent_trades(days: int = 30, ticker: str = None) -> list:

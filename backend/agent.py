@@ -21,7 +21,9 @@ from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_sign
                                           generate_weekly_insights, llm_signal_decision)
 from database.client             import (insert_trade, insert_signal, get_recent_trades,
                                           save_signal_weights, get_latest_weights,
-                                          save_snapshot, save_learning, log_event, get_logs)
+                                          save_snapshot, save_learning, log_event, get_logs,
+                                          save_open_trade, get_open_trade_records,
+                                          close_open_trade_record)
 
 def _env_value(key: str, default: str) -> str:
     value = os.getenv(key)
@@ -37,10 +39,18 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(_env_value(key, str(default)))
+    except ValueError:
+        return default
+
+
 TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",") if t.strip()]
 PROFILE  = get_profile(_env_value("RISK_PROFILE", "moderate"))
 HORIZON  = _env_value("INVESTMENT_HORIZON", "short")
 LLM_HOUR_LIMIT = _env_int("LLM_CALLS_PER_HOUR_LIMIT", 20)
+IS_PAPER_TRADING = _env_value("ALPACA_PAPER", "true").lower() != "false"
 
 # Global learning engine (persists in memory between cycles)
 _learning_engine: Optional[RegimeAwareWeightEngine] = None
@@ -58,6 +68,8 @@ def _init_learning_engine() -> RegimeAwareWeightEngine:
 
 def _get_portfolio_state() -> dict:
     account   = get_account()
+    if "error" in account:
+        return {"broker_error": account["error"], "equity": 0, "cash": 0, "positions": []}
     positions = get_positions()
     equity    = account.get("portfolio_value", 100.0)
     cash      = account.get("cash", 100.0)
@@ -93,8 +105,18 @@ def _get_portfolio_state() -> dict:
 def _count_trades_today() -> int:
     trades = get_recent_trades(days=1)
     today  = datetime.utcnow().date()
-    return sum(1 for t in trades
-               if t.get("created_at", "")[:10] == str(today))
+    closed_count = sum(1 for t in trades
+                       if t.get("created_at", "")[:10] == str(today))
+    try:
+        trade_logs = get_logs(level="TRADE", limit=200)
+        submitted_count = sum(
+            1 for l in trade_logs
+            if l.get("event") == "order_submitted"
+            and (l.get("logged_at") or "")[:10] == str(today)
+        )
+        return max(closed_count, submitted_count)
+    except Exception:
+        return closed_count
 
 
 def _count_consecutive(outcome: str) -> int:
@@ -135,7 +157,64 @@ def _missing_runtime_config() -> list[str]:
         "SUPABASE_ANON_KEY",
         "SUPABASE_SERVICE_KEY",
     ]
+    if not IS_PAPER_TRADING and os.getenv("ENABLE_LIVE_TRADING", "").strip().lower() != "true":
+        required.append("ENABLE_LIVE_TRADING")
     return [key for key in required if not os.getenv(key)]
+
+
+def _apply_execution_overrides(profile: dict) -> dict:
+    p = profile.copy()
+    if IS_PAPER_TRADING:
+        for key, value in p.get("paper_overrides", {}).items():
+            p[key] = value
+    return p
+
+
+def _trading_capital(equity: float) -> float:
+    raw = os.getenv("TRADING_CAPITAL_EUR") or os.getenv("STARTING_CAPITAL_EUR")
+    if raw and raw.strip():
+        try:
+            return min(float(raw), equity)
+        except ValueError:
+            pass
+    return equity
+
+
+def _deterministic_action(composite: float) -> str:
+    return "BUY" if composite > 0 else "SELL"
+
+
+def _parse_dt(value):
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return datetime.utcnow()
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return datetime.utcnow()
+
+
+def _hydrate_open_trades():
+    for record in get_open_trade_records():
+        ticker = record.get("ticker")
+        if not ticker or ticker in _open_trades:
+            continue
+        _open_trades[ticker] = {
+            "entry_time": _parse_dt(record.get("entry_time") or record.get("created_at")),
+            "entry_price": float(record.get("entry_price") or 0),
+            "stop_price": float(record.get("stop_price") or 0),
+            "take_profit_price": float(record.get("take_profit_price") or 0),
+            "hold_minutes": 30,
+            "size_eur": float(record.get("size_eur") or 0),
+            "side": record.get("side", "BUY"),
+            "composite_score": float(record.get("composite_score") or 0),
+            "signals_json": record.get("signals_json") or {},
+            "regime": record.get("regime") or "ranging",
+            "llm_conviction": float(record.get("llm_conviction") or 0),
+            "llm_rationale": record.get("llm_rationale") or "",
+            "order_id": record.get("order_id"),
+        }
 
 
 # ── Core cycle ────────────────────────────────────────────────────────────────
@@ -156,10 +235,18 @@ def run_signal_cycle():
         _learning_engine = _init_learning_engine()
 
     portfolio_state = _get_portfolio_state()
+    if portfolio_state.get("broker_error"):
+        log_event("ERROR", "broker_account_unavailable", {
+            "error": portfolio_state["broker_error"],
+        })
+        return
     regime          = detect_regime()
-    effective_profile = get_effective_profile(PROFILE, portfolio_state)
+    effective_profile = _apply_execution_overrides(
+        get_effective_profile(PROFILE, portfolio_state)
+    )
     weights          = _learning_engine.get_weights(regime)
     recent_trades    = get_recent_trades(days=30)
+    _hydrate_open_trades()
 
     log_event("INFO", "cycle_start", {
         "regime": regime, "equity": portfolio_state["equity"],
@@ -196,9 +283,10 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
                     .get("meta", {}).get("latest_headline", ""))
 
     # 2. Pre-trade gate (hard rules)
-    size_eur = compute_position_size(portfolio_state["equity"], profile, 0.7)
+    capital_base = _trading_capital(portfolio_state["equity"])
+    size_eur = compute_position_size(capital_base, profile, 0.7)
     gate_ok, gate_reason = pre_trade_gate(
-        ticker, "buy", size_eur, composite, profile, portfolio_state
+        ticker, _deterministic_action(composite).lower(), size_eur, composite, profile, portfolio_state
     )
 
     # 3. Log signal to DB
@@ -242,20 +330,20 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     llm_result = llm_signal_decision(ticker, composite, regime, news_headline, profile)
     _record_llm_call()
+    suggested_action = llm_result.get("action", "HOLD")
+    action = _deterministic_action(composite)
+    raw_llm_conviction = llm_result.get("conviction", 0)
+    llm_conviction = raw_llm_conviction if isinstance(raw_llm_conviction, (int, float)) else 0
+    conviction = max(abs(composite), float(llm_conviction or 0), profile["min_conviction"])
     log_event("SIGNAL", "llm_decision", {
         "ticker": ticker,
         "composite": composite,
-        "action": llm_result.get("action"),
-        "conviction": llm_result.get("conviction"),
+        "deterministic_action": action,
+        "llm_action": suggested_action,
+        "conviction": conviction,
         "rationale": llm_result.get("rationale", ""),
     })
 
-    action = llm_result.get("action", "HOLD")
-    if action not in ("BUY", "SELL"):
-        log_event("INFO", "llm_hold", {"ticker": ticker, "result": llm_result})
-        return
-
-    conviction = llm_result.get("conviction", 0.5)
     if conviction < profile["min_conviction"]:
         log_event("INFO", "conviction_below_threshold", {
             "ticker": ticker,
@@ -265,7 +353,12 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # 6. Size and submit order
-    final_size = compute_position_size(portfolio_state["equity"], profile, conviction)
+    final_size = compute_position_size(capital_base, profile, conviction)
+    max_notional = _env_float(
+        "MAX_NOTIONAL_PER_TRADE_EUR",
+        profile.get("max_trade_notional_eur", final_size),
+    )
+    final_size = min(final_size, max_notional)
 
     import yfinance as yf
     bar = yf.download(ticker, period="1d", interval="1m",
@@ -280,7 +373,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         ticker       = ticker,
         side         = action.lower(),
         qty          = round(qty, 6),
-        stop_loss_pct= llm_result.get("stop_loss_pct", profile["stop_loss_pct"])
+        stop_loss_pct= llm_result.get("stop_loss_pct", profile["stop_loss_pct"]),
+        take_profit_pct= profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2),
+        current_price= current_price,
     )
 
     if "error" in order:
@@ -288,10 +383,18 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # Track open trade for exit monitoring
+    if action == "BUY":
+        stop_price = current_price * (1 - profile["stop_loss_pct"] / 100)
+        take_profit_price = current_price * (1 + profile.get("take_profit_pct", 2.0) / 100)
+    else:
+        stop_price = current_price * (1 + profile["stop_loss_pct"] / 100)
+        take_profit_price = current_price * (1 - profile.get("take_profit_pct", 2.0) / 100)
+
     _open_trades[ticker] = {
         "entry_time":    datetime.utcnow(),
         "entry_price":   current_price,
-        "stop_price":    current_price * (1 - profile["stop_loss_pct"] / 100),
+        "stop_price":    stop_price,
+        "take_profit_price": take_profit_price,
         "hold_minutes":  llm_result.get("hold_minutes", 30),
         "size_eur":      final_size,
         "side":          action,
@@ -302,11 +405,13 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
     }
+    save_open_trade(ticker, _open_trades[ticker])
 
     log_event("TRADE", "order_submitted", {
         "ticker": ticker, "side": action,
         "size_eur": round(final_size, 2), "conviction": conviction,
-        "composite": composite, "rationale": llm_result.get("rationale")
+        "composite": composite, "order_class": order.get("order_class"),
+        "rationale": llm_result.get("rationale")
     })
 
 
@@ -321,16 +426,20 @@ def _check_exits(portfolio_state, profile):
                              progress=False, auto_adjust=True)
             if bar.empty:
                 continue
-            current_price = float(bar["Close"].iloc[-1])
+            current_price = float(bar["Close"].squeeze().iloc[-1])
             entry_time    = trade["entry_time"]
             hold_elapsed  = (now - entry_time).seconds / 60
             stop_price    = trade["stop_price"]
             hold_target   = trade["hold_minutes"]
 
             exit_reason = None
-            if current_price <= stop_price:
+            if trade["side"] == "SELL":
+                if current_price >= stop_price:
+                    exit_reason = "stop_loss"
+            elif current_price <= stop_price:
                 exit_reason = "stop_loss"
-            elif hold_elapsed >= hold_target:
+
+            if hold_elapsed >= hold_target and exit_reason is None:
                 exit_reason = "time_exit"
 
             if exit_reason:
@@ -378,6 +487,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     }
 
     insert_trade(trade_record)
+    close_open_trade_record(ticker, exit_reason)
     del _open_trades[ticker]
 
     # Update learning engine
