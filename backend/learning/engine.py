@@ -155,11 +155,10 @@ def compute_expected_value(composite_score: float, size_eur: float,
     avg_gain  = sum(wins)   / len(wins)   if wins   else 0.0
     avg_loss  = abs(sum(losses) / len(losses)) if losses else 0.0
 
-    # Real costs
-    commission   = max(1.25, size_eur * 0.0005)
-    est_slippage = size_eur * 0.0008
-    llm_cost_eur = 0.002
-    total_cost_pct = (commission + est_slippage + llm_cost_eur) / size_eur * 100
+    # Alpaca charges $0 commission; only slippage + LLM cost apply
+    est_slippage   = size_eur * 0.0008
+    llm_cost_eur   = 0.002
+    total_cost_pct = (est_slippage + llm_cost_eur) / size_eur * 100
 
     gross_ev = (win_rate * avg_gain) - ((1 - win_rate) * avg_loss)
     net_ev   = gross_ev - total_cost_pct

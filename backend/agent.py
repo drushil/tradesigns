@@ -203,22 +203,20 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     # 6. Size and submit order
     final_size = compute_position_size(portfolio_state["equity"], profile, conviction)
-    account    = get_account()
-    price_approx = final_size   # rough — real qty computed by broker
-    qty = final_size / max(price_approx, 1)
 
-    # For ETFs buy fractional if broker supports, else round down
     import yfinance as yf
     bar = yf.download(ticker, period="1d", interval="1m",
                       progress=False, auto_adjust=True)
-    if not bar.empty:
-        current_price = float(bar["Close"].iloc[-1])
-        qty = final_size / current_price
+    if bar.empty:
+        log_event("WARN", "price_unavailable", {"ticker": ticker})
+        return
+    current_price = float(bar["Close"].squeeze().iloc[-1])
+    qty = final_size / current_price
 
     order = submit_market_order(
         ticker       = ticker,
         side         = llm_result["action"].lower(),
-        qty          = round(qty, 4),
+        qty          = round(qty, 6),
         stop_loss_pct= llm_result.get("stop_loss_pct", profile["stop_loss_pct"])
     )
 
@@ -288,11 +286,10 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     if trade["side"] == "SELL":
         pnl_pct = -pnl_pct
 
-    size_eur     = trade["size_eur"]
-    commission   = max(1.25, size_eur * 0.0005)
-    slippage     = size_eur * 0.0008
-    llm_cost     = 0.002
-    net_pnl_pct  = pnl_pct - (commission + slippage) / size_eur * 100
+    size_eur    = trade["size_eur"]
+    slippage    = size_eur * 0.0008   # Alpaca = $0 commission
+    llm_cost    = 0.002
+    net_pnl_pct = pnl_pct - (slippage + llm_cost) / size_eur * 100
 
     trade_record = {
         "ticker":          ticker,
@@ -310,7 +307,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "llm_conviction":  trade["llm_conviction"],
         "llm_rationale":   trade["llm_rationale"],
         "signals_json":    trade["signals_json"],
-        "commission_eur":  round(commission, 4),
+        "commission_eur":  0.0,
         "slippage_eur":    round(slippage, 4),
         "llm_cost_eur":    llm_cost,
         "risk_profile":    PROFILE.get("_name", "moderate"),

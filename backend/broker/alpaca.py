@@ -173,9 +173,6 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     if abs(composite_score) < profile["min_signal_score"]:
         return False, f"signal below threshold ({composite_score:.3f} < {profile['min_signal_score']})"
 
-    if ticker not in profile.get("allowed_instruments", []):
-        return False, f"{ticker} not in allowed instruments"
-
     if trades_today >= profile.get("max_trades_per_day", 8):
         return False, f"daily trade limit reached ({trades_today})"
 
