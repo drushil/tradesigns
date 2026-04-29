@@ -54,7 +54,16 @@ def get_trade_stats(days: int = 30) -> dict:
         db = get_client()
         result = db.table("trade_stats_30d").select("*").execute()
         if result.data:
-            return result.data[0]
+            r = result.data[0]
+            return {
+                "total":             r.get("total") or 0,
+                "wins":              r.get("wins") or 0,
+                "losses":            r.get("losses") or 0,
+                "win_rate":          r.get("win_rate") or 0,
+                "avg_pnl":           r.get("avg_pnl") or 0,
+                "total_pnl_eur":     r.get("total_pnl_eur") or 0,
+                "avg_hold_minutes":  r.get("avg_hold_minutes") or 0,
+            }
     except Exception:
         pass
     trades = get_recent_trades(days)
