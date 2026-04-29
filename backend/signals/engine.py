@@ -5,9 +5,11 @@ Returns a normalised composite score -1.0 to +1.0.
 """
 import os
 import time
+import requests
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -129,16 +131,32 @@ def vwap_deviation_score(ticker: str) -> tuple[float, dict]:
     }
 
 
-# ── Signal 3: News Sentiment (NewsAPI — 100 free req/day) ────────────────────
+# ── Signal 3: News Sentiment (yfinance + Finviz — free, no key) ──────────────
 
 _news_cache: dict = {}
 _NEWS_CACHE_TTL = 900  # 15 minutes
 
+_FINVIZ_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
+
+
+def _fetch_finviz_headlines(ticker: str) -> list:
+    """Scrape recent headlines from finviz.com/quote.ashx — no API key needed."""
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    resp = requests.get(url, headers=_FINVIZ_HEADERS, timeout=5)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    table = soup.find(id="news-table")
+    if not table:
+        return []
+    return [row.a.text.strip() for row in table.find_all("tr") if row.a][:10]
+
 
 def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     """
-    Fetches recent headlines via yfinance (free, no API key).
-    Counts positive/negative financial keywords.
+    Combines yfinance + Finviz headlines (both free, no API key).
+    Counts positive/negative financial keywords across all sources.
     Returns score -1 to +1.
     """
     cache_key = ticker
@@ -155,29 +173,48 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
                    "loss", "decline", "sell", "weak", "concern", "risk",
                    "drop", "underperform", "negative", "warning"]
 
+    headlines = []
+
+    # Source 1: yfinance
     try:
-        articles = yf.Ticker(ticker).news or []
+        for a in (yf.Ticker(ticker).news or [])[:5]:
+            title = (a.get("title") or "").strip()
+            if title:
+                headlines.append(title)
+    except Exception:
+        pass
 
-        pos_count = neg_count = 0
-        headlines = []
-        for a in articles[:5]:
-            title = (a.get("title") or "")
-            headlines.append(title[:80])
-            text = title.lower()
-            pos_count += sum(1 for kw in positive_kw if kw in text)
-            neg_count += sum(1 for kw in negative_kw if kw in text)
+    # Source 2: Finviz
+    try:
+        headlines.extend(_fetch_finviz_headlines(ticker))
+    except Exception:
+        pass
 
-        total = pos_count + neg_count
-        score = _clamp((pos_count - neg_count) / total) if total else 0.0
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for h in headlines:
+        key = h[:50].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(h)
+    headlines = unique
 
-        meta = {
-            "articles_found": len(articles),
-            "positive_hits":  pos_count,
-            "negative_hits":  neg_count,
-            "latest_headline": headlines[0] if headlines else "",
-        }
-    except Exception as e:
-        score, meta = 0.0, {"error": str(e)}
+    pos_count = neg_count = 0
+    for title in headlines:
+        text = title.lower()
+        pos_count += sum(1 for kw in positive_kw if kw in text)
+        neg_count += sum(1 for kw in negative_kw if kw in text)
+
+    total = pos_count + neg_count
+    score = _clamp((pos_count - neg_count) / total) if total else 0.0
+
+    meta = {
+        "articles_found":  len(headlines),
+        "positive_hits":   pos_count,
+        "negative_hits":   neg_count,
+        "latest_headline": headlines[0][:80] if headlines else "",
+    }
 
     _news_cache[cache_key] = (now, (score, meta))
     return score, meta
