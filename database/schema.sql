@@ -21,6 +21,8 @@ create table if not exists trades (
     entry_price     numeric(12,4),
     exit_price      numeric(12,4),
     quantity        numeric(14,6),
+    stop_price      numeric(12,4),
+    take_profit_price numeric(12,4),
     size_eur        numeric(10,2),
     pnl_pct         numeric(8,4),
     net_pnl_pct     numeric(8,4),
@@ -37,6 +39,9 @@ create table if not exists trades (
     llm_conviction  numeric(6,4) check (llm_conviction between 0 and 1),
     llm_rationale   text,
     signals_json    jsonb,
+    order_id        text,
+    close_order_id  text,
+    close_error     text,
     commission_eur  numeric(8,4) default 0,
     slippage_eur    numeric(8,4) default 0,
     llm_cost_eur    numeric(8,5) default 0,
@@ -60,8 +65,10 @@ create table if not exists open_trades (
     ticker              text not null unique,
     side                text not null check (side in ('BUY','SELL')),
     entry_price         numeric(12,4),
+    quantity            numeric(14,6),
     stop_price          numeric(12,4),
     take_profit_price   numeric(12,4),
+    hold_minutes        smallint,
     size_eur            numeric(10,2),
     order_id            text,
     status              text not null default 'open' check (status in ('open','closed')),
@@ -76,7 +83,9 @@ create table if not exists open_trades (
 create index if not exists idx_open_trades_status on open_trades (status, created_at desc);
 
 alter table if exists open_trades
-    add column if not exists entry_time timestamptz;
+    add column if not exists entry_time timestamptz,
+    add column if not exists quantity numeric(14,6),
+    add column if not exists hold_minutes smallint;
 
 -- 3. SIGNALS
 create table if not exists signals (
@@ -91,6 +100,9 @@ create table if not exists signals (
     vwap_deviation_score    real,
     macd_score              real,
     rel_strength_score      real,
+    bollinger_score         real,
+    put_call_score          real,
+    atr_pct                 numeric(6,4),
     earnings_days           smallint,
     earnings_mult           numeric(4,2) default 1.0,
     regime                  text,
@@ -179,6 +191,13 @@ alter table if exists signals
     add column if not exists bollinger_score  real,
     add column if not exists put_call_score   real,
     add column if not exists atr_pct          numeric(6,4);
+
+alter table if exists trades
+    add column if not exists stop_price numeric(12,4),
+    add column if not exists take_profit_price numeric(12,4),
+    add column if not exists order_id text,
+    add column if not exists close_order_id text,
+    add column if not exists close_error text;
 
 alter table if exists signal_weights
     add column if not exists bollinger_squeeze numeric(6,4) not null default 0.09 check (bollinger_squeeze between 0 and 1),

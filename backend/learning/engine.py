@@ -8,23 +8,30 @@ import os
 import json
 from datetime import datetime, timedelta, date
 from typing import Optional
-from groq import Groq
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv():
+        return False
 
 load_dotenv()
 
-MIN_TRADES_TO_UPDATE = 15   # lower for paper trading bootstrap
+MIN_TRADES_TO_UPDATE = int(os.getenv("MIN_TRADES_TO_UPDATE", "15"))
+EV_MIN_SAMPLE_SIZE   = int(os.getenv("EV_MIN_SAMPLE_SIZE", "8"))
+EV_SHRINKAGE_TRADES  = int(os.getenv("EV_SHRINKAGE_TRADES", "20"))
+EV_MIN_NET_PCT       = float(os.getenv("EV_MIN_NET_PCT", "0.03"))
 DECAY_FACTOR         = 0.94 # EWA decay (~17 trade half-life)
 LEARNING_RATE        = 0.05
 MAX_WEIGHT           = 0.55
 MIN_WEIGHT           = 0.03
 
-_client: Optional[Groq] = None
+_client = None
 
 
-def _get_client() -> Groq:
+def _get_client():
     global _client
     if _client is None:
+        from groq import Groq
         _client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     return _client
 
@@ -41,19 +48,21 @@ def attribute_signals(trade: dict) -> dict:
     outcome_magnitude = min(abs(net_pnl) / 1.0, 2.0)
 
     attributions = {}
+    trade_side = str(trade.get("side") or "BUY").upper()
     for signal_name, signal_data in signals_at_entry.items():
         if isinstance(signal_data, dict):
             signal_score = signal_data.get("score", 0.0)
         else:
             signal_score = float(signal_data)
 
-        signal_strength = abs(signal_score)
+        directional_score = signal_score if trade_side == "BUY" else -signal_score
+        signal_strength = abs(directional_score)
 
         # Did signal direction match outcome?
         if net_pnl > 0:
-            direction_match = 1.0 if signal_score > 0 else -0.5
+            direction_match = 1.0 if directional_score > 0 else -0.5
         else:
-            direction_match = -1.0 if signal_score > 0 else 0.3
+            direction_match = -1.0 if directional_score > 0 else 0.3
 
         raw_attr = signal_strength * direction_match * outcome_magnitude
         attributions[signal_name] = round(raw_attr, 4)
@@ -128,6 +137,24 @@ class RegimeAwareWeightEngine:
         return {r: self.engines[r].weights for r in self.REGIMES}
 
 
+def build_weight_engine_from_trades(priors: dict, trades: list) -> RegimeAwareWeightEngine:
+    """
+    Replays historical closed trades into a fresh engine.
+
+    GitHub Actions-style scheduled runs are short-lived processes, so in-memory
+    EWA history is not enough. Rebuilding from stored trades lets the learning
+    threshold and decay actually accumulate across runs.
+    """
+    engine = RegimeAwareWeightEngine(priors)
+    chronological = sorted(
+        [t for t in trades if t.get("signals_json") and t.get("net_pnl_pct") is not None],
+        key=lambda t: str(t.get("created_at") or ""),
+    )
+    for trade in chronological:
+        engine.update(attribute_signals(trade), trade.get("regime") or "global")
+    return engine
+
+
 # ── Expected Value Gate ───────────────────────────────────────────────────────
 
 def compute_expected_value(composite_score: float, size_eur: float,
@@ -137,16 +164,39 @@ def compute_expected_value(composite_score: float, size_eur: float,
     Blocks trades with negative EV.
     """
     # Filter similar historical trades (same regime, similar score)
+    if size_eur <= 0:
+        return {
+            "ev": None,
+            "decision": "block",
+            "reason": "position size must be positive",
+            "sample_size": 0,
+            "confidence": 0.0,
+            "exploration": False,
+        }
+
+    side = "BUY" if composite_score > 0 else "SELL"
     similar = [
         t for t in trades
         if t.get("regime") == regime
         and abs((t.get("composite_score") or 0) - composite_score) < 0.15
         and t.get("net_pnl_pct") is not None
+        and ("side" not in t or t.get("side") == side)
     ]
 
-    if len(similar) < 8:
+    if len(similar) < EV_MIN_SAMPLE_SIZE:
+        allow_exploration = os.getenv("EV_ALLOW_EXPLORATION", "true").strip().lower() != "false"
         return {"ev": None, "decision": "proceed",
-                "reason": f"insufficient history ({len(similar)} similar trades)"}
+                "sample_size": len(similar),
+                "exploration": True,
+                "confidence": 0.0,
+                "reason": f"insufficient history ({len(similar)} similar trades)"
+                } if allow_exploration else {
+                "ev": None, "decision": "block",
+                "sample_size": len(similar),
+                "exploration": False,
+                "confidence": 0.0,
+                "reason": f"insufficient history ({len(similar)} similar trades)"
+                }
 
     pnl_pcts  = [t["net_pnl_pct"] for t in similar]
     wins      = [p for p in pnl_pcts if p > 0]
@@ -161,6 +211,8 @@ def compute_expected_value(composite_score: float, size_eur: float,
     total_cost_pct = (est_slippage + llm_cost_eur) / size_eur * 100
 
     gross_ev = (win_rate * avg_gain) - ((1 - win_rate) * avg_loss)
+    shrinkage = len(similar) / (len(similar) + max(EV_SHRINKAGE_TRADES, 0))
+    gross_ev *= shrinkage
     net_ev   = gross_ev - total_cost_pct
 
     return {
@@ -171,8 +223,10 @@ def compute_expected_value(composite_score: float, size_eur: float,
         "total_cost_pct": round(total_cost_pct, 4),
         "net_ev_pct":     round(net_ev, 4),
         "sample_size":    len(similar),
-        "decision":       "proceed" if net_ev > 0.03 else "block",
-        "reason":         f"net EV {net_ev:.3f}% vs 0.03% threshold",
+        "confidence":     round(shrinkage, 3),
+        "exploration":    False,
+        "decision":       "proceed" if net_ev > EV_MIN_NET_PCT else "block",
+        "reason":         f"net EV {net_ev:.3f}% vs {EV_MIN_NET_PCT:.3f}% threshold",
     }
 
 

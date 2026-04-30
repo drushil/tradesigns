@@ -40,8 +40,24 @@ def get_client(write: bool = False) -> Client:
 
 def insert_trade(trade: dict) -> dict:
     db = get_client(write=True)
-    result = db.table("trades").insert(trade).execute()
-    return result.data[0] if result.data else {}
+    try:
+        result = db.table("trades").insert(trade).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        base_columns = {
+            "ticker", "side", "entry_price", "exit_price", "quantity",
+            "size_eur", "pnl_pct", "net_pnl_pct", "pnl_eur",
+            "entry_time", "exit_time", "hold_minutes", "exit_reason",
+            "regime", "composite_score", "llm_conviction", "llm_rationale",
+            "signals_json", "commission_eur", "slippage_eur", "llm_cost_eur",
+            "risk_profile", "horizon",
+        }
+        fallback = {k: v for k, v in trade.items() if k in base_columns}
+        try:
+            result = db.table("trades").insert(fallback).execute()
+            return result.data[0] if result.data else {}
+        except Exception:
+            return {"error": str(e)}
 
 
 def save_open_trade(ticker: str, trade: dict) -> dict:
@@ -53,8 +69,10 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "side": trade.get("side"),
             "entry_time": trade.get("entry_time").isoformat() if trade.get("entry_time") else None,
             "entry_price": trade.get("entry_price"),
+            "quantity": trade.get("quantity"),
             "stop_price": trade.get("stop_price"),
             "take_profit_price": trade.get("take_profit_price"),
+            "hold_minutes": trade.get("hold_minutes"),
             "size_eur": trade.get("size_eur"),
             "order_id": trade.get("order_id"),
             "regime": trade.get("regime"),
@@ -64,7 +82,14 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "signals_json": trade.get("signals_json", {}),
             "status": "open",
         }
-        result = db.table("open_trades").upsert(record, on_conflict="ticker").execute()
+        try:
+            result = db.table("open_trades").upsert(record, on_conflict="ticker").execute()
+        except Exception:
+            fallback = {
+                k: v for k, v in record.items()
+                if k not in {"quantity", "hold_minutes"}
+            }
+            result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}
     except Exception as e:
         print(f"[OPEN_TRADE_WRITE_FAILED] {str(e)[:200]}")
@@ -99,6 +124,9 @@ def close_open_trade_record(ticker: str, reason: str = None):
 def get_recent_trades(days: int = 30, ticker: str = None) -> list:
     db = get_client()
     q = db.table("trades").select("*").order("created_at", desc=True)
+    if days:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        q = q.gte("created_at", cutoff)
     if ticker:
         q = q.eq("ticker", ticker)
     result = q.limit(500).execute()
@@ -113,11 +141,11 @@ def get_trade_stats(days: int = 30) -> dict:
         if result.data:
             r = result.data[0]
             return {
-                "total":             r.get("total") or 0,
+                "total":             r.get("total") or r.get("total_trades") or 0,
                 "wins":              r.get("wins") or 0,
                 "losses":            r.get("losses") or 0,
-                "win_rate":          r.get("win_rate") or 0,
-                "avg_pnl":           r.get("avg_pnl") or 0,
+                "win_rate":          r.get("win_rate") or r.get("win_rate_pct") or 0,
+                "avg_pnl":           r.get("avg_pnl") or r.get("avg_net_pnl_pct") or 0,
                 "total_pnl_eur":     r.get("total_pnl_eur") or 0,
                 "avg_hold_minutes":  r.get("avg_hold_minutes") or 0,
             }

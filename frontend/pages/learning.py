@@ -13,9 +13,11 @@ SIGNAL_LABELS = {
     "vwap_deviation":  "VWAP Deviation",
     "macd_crossover":  "MACD Crossover",
     "relative_strength": "Relative Strength",
+    "bollinger_squeeze": "BB Squeeze",
+    "put_call_ratio": "Put/Call Ratio",
 }
 SIGNAL_COLORS = ["#00d4a0", "#6c63ff", "#ffd166", "#ff5c5c",
-                 "#4ecdc4", "#ef9f27", "#9b8cff"]
+                 "#4ecdc4", "#ef9f27", "#9b8cff", "#2dd4bf", "#f472b6"]
 
 
 def render():
@@ -45,6 +47,8 @@ def render():
             "VWAP Deviation":       latest.get("vwap_deviation", 0.10),
             "MACD Crossover":       latest.get("macd_crossover", 0.10),
             "Relative Strength":    latest.get("relative_strength", 0.08),
+            "BB Squeeze":           latest.get("bollinger_squeeze", 0.09),
+            "Put/Call Ratio":       latest.get("put_call_ratio", 0.05),
         }
         st.caption(f"Last updated: {latest.get('updated_at','—')[:19]} UTC · "
                    f"Trigger: `{latest.get('trigger','—')}` · "
@@ -63,6 +67,8 @@ def render():
             "VWAP Deviation":       sw.get("vwap_deviation", 0.10),
             "MACD Crossover":       sw.get("macd_crossover", 0.10),
             "Relative Strength":    sw.get("relative_strength", 0.08),
+            "BB Squeeze":           sw.get("bollinger_squeeze", 0.09),
+            "Put/Call Ratio":       sw.get("put_call_ratio", 0.05),
         }
         st.info("No weight updates yet — showing profile priors. Start trading to enable learning.")
 
@@ -128,6 +134,8 @@ def render():
             "vwap_deviation_score":   "VWAP Deviation",
             "macd_score":             "MACD Crossover",
             "rel_strength_score":     "Relative Strength",
+            "bollinger_score":         "BB Squeeze",
+            "put_call_score":          "Put/Call Ratio",
         }
 
         from database.client import get_recent_signals

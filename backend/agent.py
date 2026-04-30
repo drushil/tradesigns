@@ -18,7 +18,8 @@ from backend.broker.alpaca       import (get_account, get_positions, submit_mark
                                           close_position, pre_trade_gate, compute_position_size)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
-                                          generate_weekly_insights, llm_signal_decision)
+                                          generate_weekly_insights, llm_signal_decision,
+                                          build_weight_engine_from_trades)
 from database.client             import (insert_trade, insert_signal, get_recent_trades,
                                           save_signal_weights, get_latest_weights,
                                           save_snapshot, save_learning, log_event, get_logs,
@@ -62,6 +63,10 @@ _open_trades         = {}   # {ticker: {entry_price, entry_time, stop_price, hol
 def _init_learning_engine() -> RegimeAwareWeightEngine:
     """Load latest weights from DB or use profile priors."""
     saved = get_latest_weights("global")
+    trades = get_recent_trades(days=_env_int("LEARNING_LOOKBACK_DAYS", 120))
+    replayable = [t for t in trades if t.get("signals_json") and t.get("net_pnl_pct") is not None]
+    if replayable:
+        return build_weight_engine_from_trades(PROFILE["signal_weights"], replayable)
     priors = saved if saved else PROFILE["signal_weights"]
     return RegimeAwareWeightEngine(priors)
 
@@ -205,7 +210,7 @@ def _hydrate_open_trades():
             "entry_price": float(record.get("entry_price") or 0),
             "stop_price": float(record.get("stop_price") or 0),
             "take_profit_price": float(record.get("take_profit_price") or 0),
-            "hold_minutes": 30,
+            "hold_minutes": int(record.get("hold_minutes") or 30),
             "size_eur": float(record.get("size_eur") or 0),
             "side": record.get("side", "BUY"),
             "composite_score": float(record.get("composite_score") or 0),
@@ -279,6 +284,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     signal_result = compute_all_signals(ticker, weights)
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
+    atr_data       = signal_result.get("atr_data") or {}
     news_headline = (signals_snap.get("news_sentiment", {})
                     .get("meta", {}).get("latest_headline", ""))
 
@@ -300,6 +306,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "vwap_deviation_score":   signals_snap.get("vwap_deviation", {}).get("score", 0),
         "macd_score":             signals_snap.get("macd_crossover", {}).get("score", 0),
         "rel_strength_score":     signals_snap.get("relative_strength", {}).get("score", 0),
+        "bollinger_score":        signals_snap.get("bollinger_squeeze", {}).get("score", 0),
+        "put_call_score":         signals_snap.get("put_call_ratio", {}).get("score", 0),
+        "atr_pct":                atr_data.get("atr_pct"),
         "earnings_days":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("days_to_earnings"),
         "earnings_mult":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("earnings_multiplier", 1.0),
         "regime":                 regime,
@@ -330,7 +339,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     llm_result = llm_signal_decision(ticker, composite, regime, news_headline, profile)
     _record_llm_call()
-    suggested_action = llm_result.get("action", "HOLD")
+    suggested_action = str(llm_result.get("action", "HOLD")).upper()
     action = _deterministic_action(composite)
     raw_llm_conviction = llm_result.get("conviction", 0)
     llm_conviction = raw_llm_conviction if isinstance(raw_llm_conviction, (int, float)) else 0
@@ -344,6 +353,23 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "rationale": llm_result.get("rationale", ""),
     })
 
+    if suggested_action == "HOLD":
+        log_event("INFO", "llm_hold_veto", {
+            "ticker": ticker,
+            "composite": composite,
+            "rationale": llm_result.get("rationale", ""),
+        })
+        return
+    if suggested_action in {"BUY", "SELL"} and suggested_action != action:
+        log_event("INFO", "llm_direction_conflict", {
+            "ticker": ticker,
+            "composite": composite,
+            "deterministic_action": action,
+            "llm_action": suggested_action,
+            "rationale": llm_result.get("rationale", ""),
+        })
+        return
+
     if conviction < profile["min_conviction"]:
         log_event("INFO", "conviction_below_threshold", {
             "ticker": ticker,
@@ -353,7 +379,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # 6. Size and submit order
-    final_size = compute_position_size(capital_base, profile, conviction)
+    final_size = compute_position_size(capital_base, profile, conviction, atr_data)
     max_notional = _env_float(
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", final_size),
@@ -369,11 +395,22 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     current_price = float(bar["Close"].squeeze().iloc[-1])
     qty = final_size / current_price
 
+    raw_hold_minutes = llm_result.get("hold_minutes", 30)
+    try:
+        hold_minutes = int(raw_hold_minutes)
+    except (TypeError, ValueError):
+        hold_minutes = 30
+    hold_minutes = max(
+        int(profile.get("min_hold_minutes", 1)),
+        min(int(profile.get("max_hold_minutes", 60)), hold_minutes),
+    )
+    stop_loss_pct = float(llm_result.get("stop_loss_pct", profile["stop_loss_pct"]))
+
     order = submit_market_order(
         ticker       = ticker,
         side         = action.lower(),
         qty          = round(qty, 6),
-        stop_loss_pct= llm_result.get("stop_loss_pct", profile["stop_loss_pct"]),
+        stop_loss_pct= stop_loss_pct,
         take_profit_pct= profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2),
         current_price= current_price,
     )
@@ -384,18 +421,19 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     # Track open trade for exit monitoring
     if action == "BUY":
-        stop_price = current_price * (1 - profile["stop_loss_pct"] / 100)
+        stop_price = current_price * (1 - stop_loss_pct / 100)
         take_profit_price = current_price * (1 + profile.get("take_profit_pct", 2.0) / 100)
     else:
-        stop_price = current_price * (1 + profile["stop_loss_pct"] / 100)
+        stop_price = current_price * (1 + stop_loss_pct / 100)
         take_profit_price = current_price * (1 - profile.get("take_profit_pct", 2.0) / 100)
 
     _open_trades[ticker] = {
         "entry_time":    datetime.utcnow(),
         "entry_price":   current_price,
+        "quantity":      order.get("qty", round(qty, 6)),
         "stop_price":    stop_price,
         "take_profit_price": take_profit_price,
-        "hold_minutes":  llm_result.get("hold_minutes", 30),
+        "hold_minutes":  hold_minutes,
         "size_eur":      final_size,
         "side":          action,
         "composite_score": composite,
@@ -430,14 +468,19 @@ def _check_exits(portfolio_state, profile):
             entry_time    = trade["entry_time"]
             hold_elapsed  = (now - entry_time).seconds / 60
             stop_price    = trade["stop_price"]
+            take_profit_price = trade.get("take_profit_price")
             hold_target   = trade["hold_minutes"]
 
             exit_reason = None
             if trade["side"] == "SELL":
                 if current_price >= stop_price:
                     exit_reason = "stop_loss"
+                elif take_profit_price and current_price <= take_profit_price:
+                    exit_reason = "take_profit"
             elif current_price <= stop_price:
                 exit_reason = "stop_loss"
+            elif take_profit_price and current_price >= take_profit_price:
+                exit_reason = "take_profit"
 
             if hold_elapsed >= hold_target and exit_reason is None:
                 exit_reason = "time_exit"
@@ -453,6 +496,25 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     global _learning_engine
 
     result = close_position(ticker)
+    close_error = result.get("error")
+    if close_error:
+        if "position not found" in str(close_error).lower():
+            close_open_trade_record(ticker, "stale_no_position")
+            if ticker in _open_trades:
+                del _open_trades[ticker]
+            log_event("WARN", "stale_open_trade_removed", {
+                "ticker": ticker,
+                "exit_reason": exit_reason,
+                "error": close_error,
+                "note": "No closed trade was recorded because Alpaca has no matching position.",
+            })
+            return
+        log_event("WARN", "close_position_failed_recording_estimate", {
+            "ticker": ticker,
+            "error": close_error,
+            "exit_reason": exit_reason,
+        })
+        return
     entry_price = trade["entry_price"]
     pnl_pct     = (exit_price - entry_price) / entry_price * 100
     if trade["side"] == "SELL":
@@ -468,10 +530,13 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "side":            trade["side"],
         "entry_price":     round(entry_price, 4),
         "exit_price":      round(exit_price, 4),
+        "quantity":        trade.get("quantity"),
+        "stop_price":      round(float(trade.get("stop_price") or 0), 4),
+        "take_profit_price": round(float(trade.get("take_profit_price") or 0), 4),
         "size_eur":        round(size_eur, 2),
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
-        "pnl_eur":         round(pnl_pct / 100 * size_eur, 2),
+        "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
         "hold_minutes":    int((datetime.utcnow() - trade["entry_time"]).seconds / 60),
         "exit_reason":     exit_reason,
         "regime":          trade["regime"],
@@ -479,6 +544,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "llm_conviction":  trade["llm_conviction"],
         "llm_rationale":   trade["llm_rationale"],
         "signals_json":    trade["signals_json"],
+        "order_id":        trade.get("order_id"),
+        "close_order_id":  result.get("order_id"),
+        "close_error":     close_error,
         "commission_eur":  0.0,
         "slippage_eur":    round(slippage, 4),
         "llm_cost_eur":    llm_cost,
@@ -495,6 +563,12 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     if _learning_engine:
         _learning_engine.update(attributions, trade["regime"])
         weights = _learning_engine.all_weights()
+        save_signal_weights(
+            regime="global",
+            weights=weights["global"],
+            trade_count=sum(1 for _ in get_recent_trades(days=90)),
+            trigger="trade_update"
+        )
         save_signal_weights(
             regime=trade["regime"],
             weights=weights.get(trade["regime"], weights["global"]),

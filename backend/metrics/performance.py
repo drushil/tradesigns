@@ -7,6 +7,10 @@ import math
 from typing import Optional
 
 
+def _chronological(trades: list) -> list:
+    return sorted(trades, key=lambda t: str(t.get("created_at") or ""))
+
+
 def compute_expectancy(trades: list) -> Optional[float]:
     """Expected return per trade = win_rate × avg_win − loss_rate × avg_loss."""
     if not trades:
@@ -41,6 +45,7 @@ def compute_sharpe_ratio(trades: list, risk_free_rate: float = 0.0) -> Optional[
     """
     if len(trades) < 2:
         return None
+    trades = _chronological(trades)
     returns = [t.get("net_pnl_pct", 0) or 0 for t in trades]
     n       = len(returns)
     mean_r  = sum(returns) / n
@@ -55,6 +60,7 @@ def compute_calmar_ratio(trades: list) -> Optional[float]:
     """Annualized return / max drawdown (in pct units)."""
     if not trades:
         return None
+    trades = _chronological(trades)
     returns = [t.get("net_pnl_pct", 0) or 0 for t in trades]
     n       = len(returns)
 
@@ -84,6 +90,7 @@ def compute_rolling_sharpe(trades: list, window: int = 20) -> list:
     """
     if len(trades) < window:
         return []
+    trades = _chronological(trades)
     returns = [t.get("net_pnl_pct", 0) or 0 for t in trades]
     result  = []
     for i in range(window - 1, len(returns)):

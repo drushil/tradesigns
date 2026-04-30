@@ -63,6 +63,10 @@ def render():
         compute_calmar_ratio, compute_rolling_sharpe, compute_signal_attribution,
         compute_r_multiples,
     )
+    from backend.metrics.validation import (
+        walk_forward_splits, evaluate_score_thresholds,
+        signal_information_coefficients,
+    )
 
     expectancy    = compute_expectancy(trades)
     profit_factor = compute_profit_factor(trades)
@@ -116,6 +120,50 @@ def render():
               help="Annualized return / max drawdown")
     c5.metric("Avg R-Multiple", _fmt(avg_r, "+.3f"),
               help="Average R earned per trade (1R = initial stop distance)")
+
+    st.markdown("---")
+
+    # ── Validation checks ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Validation Checks</div>',
+                unsafe_allow_html=True)
+    st.caption("Retrospective checks on closed trades. Use these before promoting thresholds or weights.")
+
+    splits = walk_forward_splits(trades, train_size=40, test_size=20)
+    thresholds = evaluate_score_thresholds(trades)
+    ics = signal_information_coefficients(trades)
+
+    v1, v2 = st.columns(2)
+    with v1:
+        if splits:
+            last = splits[-1]
+            st.metric("Latest test expectancy",
+                      f"{last['test']['expectancy_pct']:+.4f}%")
+            st.caption(
+                f"{last['test']['trade_count']} out-of-sample trades · "
+                f"train expectancy {last['train']['expectancy_pct']:+.4f}%"
+            )
+        else:
+            st.info("Need at least 60 trades for walk-forward validation.")
+
+    with v2:
+        viable = [
+            r for r in thresholds
+            if r["trade_count"] >= 8 and r["expectancy_pct"] is not None
+        ]
+        if viable:
+            best = max(viable, key=lambda r: r["expectancy_pct"])
+            st.metric("Best observed threshold",
+                      f"|score| ≥ {best['threshold']:.2f}",
+                      f"{best['expectancy_pct']:+.4f}% exp.")
+        else:
+            st.info("Need more trades to compare score thresholds.")
+
+    if ics:
+        ic_rows = sorted(ics.items(), key=lambda item: item[1], reverse=True)
+        st.caption(
+            "Signal IC: "
+            + " · ".join(f"{name} {value:+.3f}" for name, value in ic_rows[:5])
+        )
 
     st.markdown("---")
 
