@@ -334,7 +334,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     action = _deterministic_action(composite)
     raw_llm_conviction = llm_result.get("conviction", 0)
     llm_conviction = raw_llm_conviction if isinstance(raw_llm_conviction, (int, float)) else 0
-    conviction = max(abs(composite), float(llm_conviction or 0), profile["min_conviction"])
+    conviction = max(abs(composite), float(llm_conviction or 0))
     log_event("SIGNAL", "llm_decision", {
         "ticker": ticker,
         "composite": composite,
