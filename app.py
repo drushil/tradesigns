@@ -45,6 +45,7 @@ PAGES = {
     "📊 Overview":    "overview",
     "📡 Live Signals": "signals",
     "🔄 Trades":      "trades",
+    "📈 Performance": "performance",
     "🧠 Learning":    "learning",
     "⚙️  Config":     "config_page",
     "📋 Agent Logs":  "logs",

@@ -139,6 +139,16 @@ alter table if exists signal_weights
     add column if not exists macd_crossover numeric(6,4) not null default 0.10 check (macd_crossover between 0 and 1),
     add column if not exists relative_strength numeric(6,4) not null default 0.08 check (relative_strength between 0 and 1);
 
+-- Phase 1 upgrade: Bollinger squeeze, Put/Call ratio, ATR columns.
+alter table if exists signals
+    add column if not exists bollinger_score  real,
+    add column if not exists put_call_score   real,
+    add column if not exists atr_pct          numeric(6,4);
+
+alter table if exists signal_weights
+    add column if not exists bollinger_squeeze numeric(6,4) not null default 0.09 check (bollinger_squeeze between 0 and 1),
+    add column if not exists put_call_ratio    numeric(6,4) not null default 0.05 check (put_call_ratio    between 0 and 1);
+
 -- 5. LEARNINGS
 create table if not exists learnings (
     id              bigint generated always as identity primary key,

@@ -154,6 +154,9 @@ def insert_signal(signal: dict) -> dict:
             "news_sentiment_score", "vwap_deviation_score", "regime",
             "vix", "volume_vs_avg", "gated", "gate_reason",
             "llm_called", "llm_action", "llm_conviction",
+            # Phase 1 additions
+            "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
+            "bollinger_score", "put_call_score", "atr_pct",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:
@@ -178,16 +181,18 @@ def get_recent_signals(hours: int = 24) -> list:
 def save_signal_weights(regime: str, weights: dict, trade_count: int, trigger: str):
     db = get_client(write=True)
     record = {
-        "regime":          regime,
-        "order_book":      round(weights.get("order_book_imbalance", 0.25), 4),
-        "tape_aggression": round(weights.get("tape_aggression", 0.25), 4),
-        "rsi_divergence":  round(weights.get("rsi_divergence", 0.20), 4),
-        "news_sentiment":  round(weights.get("news_sentiment", 0.20), 4),
-        "vwap_deviation":  round(weights.get("vwap_deviation", 0.10), 4),
-        "macd_crossover":  round(weights.get("macd_crossover", 0.10), 4),
+        "regime":            regime,
+        "order_book":        round(weights.get("order_book_imbalance", 0.25), 4),
+        "tape_aggression":   round(weights.get("tape_aggression", 0.25), 4),
+        "rsi_divergence":    round(weights.get("rsi_divergence", 0.20), 4),
+        "news_sentiment":    round(weights.get("news_sentiment", 0.20), 4),
+        "vwap_deviation":    round(weights.get("vwap_deviation", 0.10), 4),
+        "macd_crossover":    round(weights.get("macd_crossover", 0.10), 4),
         "relative_strength": round(weights.get("relative_strength", 0.08), 4),
-        "trade_count":     trade_count,
-        "trigger":         trigger,
+        "bollinger_squeeze": round(weights.get("bollinger_squeeze", 0.09), 4),
+        "put_call_ratio":    round(weights.get("put_call_ratio", 0.05), 4),
+        "trade_count":       trade_count,
+        "trigger":           trigger,
     }
     db.table("signal_weights").insert(record).execute()
 
@@ -210,6 +215,8 @@ def get_latest_weights(regime: str = "global") -> Optional[dict]:
                 "vwap_deviation":       r["vwap_deviation"],
                 "macd_crossover":       r.get("macd_crossover", 0.10),
                 "relative_strength":    r.get("relative_strength", 0.08),
+                "bollinger_squeeze":    r.get("bollinger_squeeze", 0.09),
+                "put_call_ratio":       r.get("put_call_ratio", 0.05),
             }
     except Exception:
         pass

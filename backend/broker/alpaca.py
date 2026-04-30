@@ -230,9 +230,20 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
 
 
 def compute_position_size(total_capital: float, profile: dict,
-                           conviction: float) -> float:
-    """Returns position size in EUR."""
-    base     = total_capital * profile["capital_per_trade_pct"] / 100
-    scalar   = min(conviction / max(profile["min_conviction"], 0.01), 1.5)
-    max_pos  = total_capital * profile["max_position_pct"] / 100
+                           conviction: float, atr_data: dict = None) -> float:
+    """
+    Returns position size in EUR.
+    When atr_data is provided, scales position inversely with stop width:
+    tighter ATR stop → larger position for the same dollar risk.
+    """
+    base    = total_capital * profile["capital_per_trade_pct"] / 100
+    scalar  = min(conviction / max(profile["min_conviction"], 0.01), 1.5)
+
+    profile_stop = profile.get("stop_loss_pct", 2.0)
+    if atr_data and atr_data.get("suggested_stop_pct"):
+        atr_stop   = atr_data["suggested_stop_pct"]
+        atr_scalar = min(profile_stop / max(atr_stop, 0.1), 2.0)
+        scalar    *= atr_scalar
+
+    max_pos = total_capital * profile["max_position_pct"] / 100
     return min(base * scalar, max_pos)

@@ -534,6 +534,178 @@ def earnings_proximity_signal(ticker: str) -> tuple[float, dict]:
     return result
 
 
+# ── ATR (Average True Range) ──────────────────────────────────────────────────
+
+def compute_atr(ticker: str, period: int = 14) -> dict:
+    """
+    Computes ATR on 5-min bars.
+    Returns atr_pct and suggested_stop_pct (1.5× ATR, clamped 0.5%–4%).
+    """
+    try:
+        df = _get_bars(ticker, period="5d", interval="5m")
+        if df is None or len(df) < period + 1:
+            return {"atr_pct": None, "suggested_stop_pct": None}
+
+        high  = df["High"].squeeze()
+        low   = df["Low"].squeeze()
+        close = df["Close"].squeeze()
+        prev_close = close.shift(1)
+
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+
+        atr = float(tr.rolling(period).mean().iloc[-1])
+        current_price = float(close.iloc[-1])
+
+        if current_price <= 0 or pd.isna(atr):
+            return {"atr_pct": None, "suggested_stop_pct": None}
+
+        atr_pct           = atr / current_price * 100
+        suggested_stop_pct = max(0.5, min(4.0, 1.5 * atr_pct))
+
+        return {
+            "atr_pct":           round(atr_pct, 4),
+            "suggested_stop_pct": round(suggested_stop_pct, 4),
+            "atr_raw":           round(atr, 6),
+        }
+    except Exception:
+        return {"atr_pct": None, "suggested_stop_pct": None}
+
+
+# ── Signal 9: Bollinger Band Squeeze ─────────────────────────────────────────
+
+_bollinger_cache: dict = {}
+_BOLLINGER_CACHE_TTL = 300  # 5 minutes
+
+
+def bollinger_squeeze_score(ticker: str) -> tuple[float, dict]:
+    """
+    20-bar Bollinger Bands on 5-min bars, 2 std devs.
+    Squeeze = band width < 50% of 50-bar average.
+    +0.7 breakout above, -0.7 below, +0.3 squeeze only, 0.0 no squeeze.
+    """
+    cache_key = ticker
+    now = time.time()
+    if cache_key in _bollinger_cache:
+        cached_time, cached_result = _bollinger_cache[cache_key]
+        if now - cached_time < _BOLLINGER_CACHE_TTL:
+            return cached_result
+
+    try:
+        df = _get_bars(ticker, period="5d", interval="5m")
+        if df is None or len(df) < 55:
+            result = (0.0, {"error": "insufficient_data"})
+            _bollinger_cache[cache_key] = (now, result)
+            return result
+
+        close = df["Close"].squeeze()
+        rolling_mean = close.rolling(20).mean()
+        rolling_std  = close.rolling(20).std()
+        upper_band   = rolling_mean + 2 * rolling_std
+        lower_band   = rolling_mean - 2 * rolling_std
+        band_width   = (upper_band - lower_band) / rolling_mean.replace(0, np.nan)
+        avg_bw       = band_width.rolling(50).mean()
+
+        latest_price  = float(close.iloc[-1])
+        latest_upper  = float(upper_band.iloc[-1])
+        latest_lower  = float(lower_band.iloc[-1])
+        latest_bw     = float(band_width.iloc[-1])
+        avg_bw_val    = float(avg_bw.iloc[-1])
+
+        if pd.isna(avg_bw_val) or avg_bw_val <= 0 or pd.isna(latest_bw):
+            result = (0.0, {"error": "insufficient_avg_data"})
+            _bollinger_cache[cache_key] = (now, result)
+            return result
+
+        squeeze = latest_bw < 0.5 * avg_bw_val
+
+        if squeeze:
+            if latest_price > latest_upper:
+                score = 0.7
+            elif latest_price < latest_lower:
+                score = -0.7
+            else:
+                score = 0.3
+        else:
+            score = 0.0
+
+        result = (score, {
+            "squeeze":        squeeze,
+            "band_width":     round(latest_bw, 4),
+            "avg_band_width": round(avg_bw_val, 4),
+            "bw_ratio":       round(latest_bw / avg_bw_val, 3),
+            "upper_band":     round(latest_upper, 4),
+            "lower_band":     round(latest_lower, 4),
+            "price":          round(latest_price, 4),
+        })
+    except Exception as e:
+        result = (0.0, {"error": str(e)[:80]})
+
+    _bollinger_cache[cache_key] = (now, result)
+    return result
+
+
+# ── Signal 10: Put/Call Ratio ─────────────────────────────────────────────────
+
+_pcr_cache: dict = {}
+_PCR_CACHE_TTL = 1800  # 30 minutes
+
+
+def put_call_ratio_score(ticker: str) -> tuple[float, dict]:
+    """
+    Put/call ratio from yfinance nearest expiry options.
+    >1.5 bearish (-0.5 to -0.8), <0.7 bullish (+0.4 to +0.7), neutral otherwise.
+    Returns 0.0 if no options exist.
+    """
+    cache_key = ticker
+    now = time.time()
+    if cache_key in _pcr_cache:
+        cached_time, cached_result = _pcr_cache[cache_key]
+        if now - cached_time < _PCR_CACHE_TTL:
+            return cached_result
+
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        expiries   = ticker_obj.options
+        if not expiries:
+            result = (0.0, {"error": "no_options"})
+            _pcr_cache[cache_key] = (now, result)
+            return result
+
+        opt      = ticker_obj.option_chain(expiries[0])
+        put_vol  = float(opt.puts["volume"].fillna(0).sum())
+        call_vol = float(opt.calls["volume"].fillna(0).sum())
+
+        if call_vol <= 0:
+            result = (0.0, {"error": "zero_call_volume"})
+            _pcr_cache[cache_key] = (now, result)
+            return result
+
+        pcr = put_vol / call_vol
+
+        if pcr > 1.5:
+            score = -(0.5 + min(0.3, (pcr - 1.5) / 1.0 * 0.3))
+        elif pcr < 0.7:
+            score = 0.4 + (0.7 - pcr) / 0.7 * 0.3
+        else:
+            score = 0.0
+
+        result = (_clamp(score), {
+            "pcr":         round(pcr, 3),
+            "put_volume":  int(put_vol),
+            "call_volume": int(call_vol),
+            "expiry":      expiries[0],
+        })
+    except Exception as e:
+        result = (0.0, {"error": str(e)[:80]})
+
+    _pcr_cache[cache_key] = (now, result)
+    return result
+
+
 # ── Regime Detection ──────────────────────────────────────────────────────────
 
 def detect_regime(ticker: str = "SPY") -> str:
@@ -575,38 +747,86 @@ def detect_regime(ticker: str = "SPY") -> str:
 
 def compute_all_signals(ticker: str, weights: dict) -> dict:
     """
-    Runs all 8 signals, applies profile weights, returns composite score
+    Runs all 10 signals + ATR, applies profile weights, returns composite score
     plus full metadata for logging and display.
     """
     results = {}
 
-    s1, m1 = rsi_divergence_score(ticker)
-    s2, m2 = vwap_deviation_score(ticker)
-    s3, m3 = news_sentiment_score(ticker)
-    s4, m4 = tape_aggression_score(ticker)
-    s5, m5 = order_book_score(ticker)
-    s6, m6 = macd_crossover_score(ticker)
-    s7, m7 = relative_strength_score(ticker)
-    s8, m8 = earnings_proximity_signal(ticker)
+    # Run all signals — failures return 0.0, never crash the cycle
+    try:
+        s1, m1 = rsi_divergence_score(ticker)
+    except Exception:
+        s1, m1 = 0.0, {"error": "signal_crashed"}
 
-    results["rsi_divergence"]       = {"score": s1, "meta": m1}
-    results["vwap_deviation"]        = {"score": s2, "meta": m2}
-    results["news_sentiment"]        = {"score": s3, "meta": m3}
-    results["tape_aggression"]       = {"score": s4, "meta": m4}
-    results["order_book_imbalance"]  = {"score": s5, "meta": m5}
-    results["macd_crossover"]        = {"score": s6, "meta": m6}
-    results["relative_strength"]     = {"score": s7, "meta": m7}
-    results["earnings_proximity"]    = {"score": s8, "meta": m8}
+    try:
+        s2, m2 = vwap_deviation_score(ticker)
+    except Exception:
+        s2, m2 = 0.0, {"error": "signal_crashed"}
 
-    # Weighted composite
+    try:
+        s3, m3 = news_sentiment_score(ticker)
+    except Exception:
+        s3, m3 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s4, m4 = tape_aggression_score(ticker)
+    except Exception:
+        s4, m4 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s5, m5 = order_book_score(ticker)
+    except Exception:
+        s5, m5 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s6, m6 = macd_crossover_score(ticker)
+    except Exception:
+        s6, m6 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s7, m7 = relative_strength_score(ticker)
+    except Exception:
+        s7, m7 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s8, m8 = earnings_proximity_signal(ticker)
+    except Exception:
+        s8, m8 = 0.0, {"earnings_multiplier": 1.0, "error": "signal_crashed"}
+
+    try:
+        s9, m9 = bollinger_squeeze_score(ticker)
+    except Exception:
+        s9, m9 = 0.0, {"error": "signal_crashed"}
+
+    try:
+        s10, m10 = put_call_ratio_score(ticker)
+    except Exception:
+        s10, m10 = 0.0, {"error": "signal_crashed"}
+
+    atr_data = compute_atr(ticker)
+
+    results["rsi_divergence"]      = {"score": s1,  "meta": m1}
+    results["vwap_deviation"]       = {"score": s2,  "meta": m2}
+    results["news_sentiment"]       = {"score": s3,  "meta": m3}
+    results["tape_aggression"]      = {"score": s4,  "meta": m4}
+    results["order_book_imbalance"] = {"score": s5,  "meta": m5}
+    results["macd_crossover"]       = {"score": s6,  "meta": m6}
+    results["relative_strength"]    = {"score": s7,  "meta": m7}
+    results["earnings_proximity"]   = {"score": s8,  "meta": m8}
+    results["bollinger_squeeze"]    = {"score": s9,  "meta": m9}
+    results["put_call_ratio"]       = {"score": s10, "meta": m10}
+
+    # Weighted composite (earnings_proximity is a multiplier, not a weight)
     weighted_signals = {
-        "rsi_divergence": s1,
-        "vwap_deviation": s2,
-        "news_sentiment": s3,
-        "tape_aggression": s4,
+        "rsi_divergence":      s1,
+        "vwap_deviation":      s2,
+        "news_sentiment":      s3,
+        "tape_aggression":     s4,
         "order_book_imbalance": s5,
-        "macd_crossover": s6,
-        "relative_strength": s7,
+        "macd_crossover":      s6,
+        "relative_strength":   s7,
+        "bollinger_squeeze":   s9,
+        "put_call_ratio":      s10,
     }
     weight_total = sum(max(0.0, weights.get(k, 0.0)) for k in weighted_signals)
     if weight_total <= 0:
@@ -622,11 +842,12 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
     regime = detect_regime()
 
     return {
-        "ticker":          ticker,
-        "composite_score": round(composite, 4),
-        "regime":          regime,
-        "signals":         results,
-        "weights_used":    weights,
+        "ticker":              ticker,
+        "composite_score":     round(composite, 4),
+        "regime":              regime,
+        "signals":             results,
+        "weights_used":        weights,
         "earnings_multiplier": earnings_multiplier,
-        "computed_at":     datetime.utcnow().isoformat(),
+        "atr_data":            atr_data,
+        "computed_at":         datetime.utcnow().isoformat(),
     }

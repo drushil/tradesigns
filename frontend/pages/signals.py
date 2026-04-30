@@ -1,10 +1,10 @@
-"""frontend/pages/signals.py — Live signal monitor (8-signal engine)."""
+"""frontend/pages/signals.py — Live signal monitor (10-signal engine)."""
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import os
 
-# ── All 8 signals with labels, descriptions, and display order ───────────────
+# ── All 10 signals + earnings multiplier ─────────────────────────────────────
 ALL_SIGNALS = {
     "order_book_imbalance": {
         "label": "Order Book",
@@ -40,26 +40,38 @@ ALL_SIGNALS = {
         "label": "MACD Crossover",
         "desc":  "Momentum direction on 5-min bars",
         "db_col": "macd_score",
-        "new": True,
+        "new": False,
     },
     "relative_strength": {
         "label": "Relative Strength",
         "desc":  "Performance vs SPY over 5/10/20 bars",
         "db_col": "rel_strength_score",
+        "new": False,
+    },
+    "bollinger_squeeze": {
+        "label": "BB Squeeze",
+        "desc":  "Bollinger Band squeeze breakout on 5-min bars",
+        "db_col": "bollinger_score",
+        "new": True,
+    },
+    "put_call_ratio": {
+        "label": "Put/Call Ratio",
+        "desc":  "Options sentiment from nearest expiry",
+        "db_col": "put_call_score",
         "new": True,
     },
     "earnings_proximity": {
         "label": "Earnings Proximity",
         "desc":  "Days to next earnings (multiplier signal)",
         "db_col": None,   # stored as earnings_days / earnings_mult, not a score column
-        "new": True,
+        "new": False,
     },
 }
 
 
 def render():
     st.title("📡 Live Signals")
-    st.caption("8-signal engine · Updates every 5 minutes during market hours")
+    st.caption("10-signal engine · Updates every 5 minutes during market hours")
 
     tickers = [t.strip() for t in os.getenv("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",")]
     profile_name = os.getenv("RISK_PROFILE", "moderate")
@@ -77,7 +89,7 @@ def render():
         st.info("Auto-refreshes every 5 min during market hours. Click to compute now.")
 
     # ── Signal legend ──────────────────────────────────────────────────────────
-    with st.expander("ℹ️ About these 8 signals", expanded=False):
+    with st.expander("ℹ️ About these 10 signals", expanded=False):
         cols = st.columns(2)
         for i, (key, meta) in enumerate(ALL_SIGNALS.items()):
             with cols[i % 2]:
@@ -122,21 +134,25 @@ def _compute_and_display_live(tickers, profile_name):
                 all_results[ticker] = result
                 sigs          = result["signals"]
                 earnings_meta = sigs.get("earnings_proximity", {}).get("meta", {})
+                atr_data = result.get("atr_data", {})
                 insert_signal({
-                    "ticker":               ticker,
-                    "composite_score":      result["composite_score"],
-                    "order_book_score":     sigs.get("order_book_imbalance", {}).get("score", 0),
-                    "tape_aggression_score":sigs.get("tape_aggression",      {}).get("score", 0),
-                    "rsi_divergence_score": sigs.get("rsi_divergence",       {}).get("score", 0),
-                    "news_sentiment_score": sigs.get("news_sentiment",       {}).get("score", 0),
-                    "vwap_deviation_score": sigs.get("vwap_deviation",       {}).get("score", 0),
-                    "macd_score":           sigs.get("macd_crossover",       {}).get("score", 0),
-                    "rel_strength_score":   sigs.get("relative_strength",    {}).get("score", 0),
-                    "earnings_days":        earnings_meta.get("days_to_earnings"),
-                    "earnings_mult":        earnings_meta.get("earnings_multiplier", 1.0),
-                    "regime":               regime,
-                    "gated":                False,
-                    "llm_called":           False,
+                    "ticker":                ticker,
+                    "composite_score":       result["composite_score"],
+                    "order_book_score":      sigs.get("order_book_imbalance", {}).get("score", 0),
+                    "tape_aggression_score": sigs.get("tape_aggression",      {}).get("score", 0),
+                    "rsi_divergence_score":  sigs.get("rsi_divergence",       {}).get("score", 0),
+                    "news_sentiment_score":  sigs.get("news_sentiment",       {}).get("score", 0),
+                    "vwap_deviation_score":  sigs.get("vwap_deviation",       {}).get("score", 0),
+                    "macd_score":            sigs.get("macd_crossover",       {}).get("score", 0),
+                    "rel_strength_score":    sigs.get("relative_strength",    {}).get("score", 0),
+                    "bollinger_score":       sigs.get("bollinger_squeeze",    {}).get("score", 0),
+                    "put_call_score":        sigs.get("put_call_ratio",       {}).get("score", 0),
+                    "atr_pct":               atr_data.get("atr_pct"),
+                    "earnings_days":         earnings_meta.get("days_to_earnings"),
+                    "earnings_mult":         earnings_meta.get("earnings_multiplier", 1.0),
+                    "regime":                regime,
+                    "gated":                 False,
+                    "llm_called":            False,
                 })
             except Exception as e:
                 all_results[ticker] = {"error": str(e)}
@@ -174,7 +190,10 @@ def _display_from_db(tickers):
 
 
 def _missing_new_signal_columns(rows) -> list:
-    required = ["macd_score", "rel_strength_score", "earnings_days", "earnings_mult"]
+    required = [
+        "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
+        "bollinger_score", "put_call_score", "atr_pct",
+    ]
     for row in rows:
         return [col for col in required if col not in row]
     return []
@@ -308,6 +327,21 @@ def _render_live_cards(results: dict, weights: dict):
                 elif macd_meta.get("crossed_down"):
                     st.caption("⚡ MACD bearish crossover detected")
 
+                # Bollinger squeeze context
+                bb_meta = sigs.get("bollinger_squeeze", {}).get("meta", {})
+                if bb_meta.get("squeeze"):
+                    bw_ratio = bb_meta.get("bw_ratio", 0)
+                    st.caption(f"🔵 BB squeeze active · band width {bw_ratio:.2f}× avg")
+
+                # Put/call context
+                pcr_meta = sigs.get("put_call_ratio", {}).get("meta", {})
+                pcr_val  = pcr_meta.get("pcr")
+                if pcr_val is not None:
+                    st.caption(
+                        f"📉 PCR {pcr_val:.2f} "
+                        f"(puts {pcr_meta.get('put_volume',0):,} / calls {pcr_meta.get('call_volume',0):,})"
+                    )
+
 
 # ── DB render (compact — 8 metrics in 2 rows) ─────────────────────────────────
 
@@ -332,23 +366,32 @@ def _render_db_cards(latest: dict):
             # Row 1: original 5
             st.markdown("**Original signals**")
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Order Book",    f"{row.get('order_book_score',    0) or 0:+.3f}")
-            c2.metric("Tape Aggrssn", f"{row.get('tape_aggression_score',0) or 0:+.3f}")
-            c3.metric("RSI Diverg",   f"{row.get('rsi_divergence_score', 0) or 0:+.3f}")
-            c4.metric("News Sntmnt",  f"{row.get('news_sentiment_score', 0) or 0:+.3f}")
-            c5.metric("VWAP Dev",     f"{row.get('vwap_deviation_score', 0) or 0:+.3f}")
+            c1.metric("Order Book",   f"{row.get('order_book_score',    0) or 0:+.3f}")
+            c2.metric("Tape Aggrssn",f"{row.get('tape_aggression_score',0) or 0:+.3f}")
+            c3.metric("RSI Diverg",  f"{row.get('rsi_divergence_score', 0) or 0:+.3f}")
+            c4.metric("News Sntmnt", f"{row.get('news_sentiment_score', 0) or 0:+.3f}")
+            c5.metric("VWAP Dev",    f"{row.get('vwap_deviation_score', 0) or 0:+.3f}")
 
-            # Row 2: new 3
+            # Row 2: MACD, RS, Bollinger, Put/Call
             st.markdown("**New signals 🆕**")
-            n1, n2, n3, _ = st.columns(4)
-            n1.metric("MACD", fmt_score(row, "macd_score"))
+            n1, n2, n3, n4 = st.columns(4)
+            n1.metric("MACD",         fmt_score(row, "macd_score"))
             n2.metric("Rel Strength", fmt_score(row, "rel_strength_score"))
-            n3.metric(
+            n3.metric("BB Squeeze",   fmt_score(row, "bollinger_score"))
+            n4.metric("Put/Call",     fmt_score(row, "put_call_score"))
+
+            # Row 3: earnings + ATR
+            st.markdown("**Multiplier & volatility**")
+            x1, x2, x3 = st.columns(3)
+            x1.metric(
                 "Earnings ×",
                 "not stored" if "earnings_mult" not in row else (
                     f"×{e_mult:.1f}" + (f" ({e_days}d)" if e_days is not None else "")
                 ),
             )
+            atr_val = row.get("atr_pct")
+            x2.metric("ATR %", f"{atr_val:.3f}%" if atr_val else "—")
+            x3.metric("Composite", f"{composite:+.3f}")
 
             if gated:
                 st.warning(f"Gated: {row.get('gate_reason', '—')}")
