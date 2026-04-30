@@ -7,10 +7,12 @@ import os
 import time
 import logging
 import requests
+import json
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from bs4 import BeautifulSoup
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 from dotenv import load_dotenv
@@ -21,6 +23,21 @@ NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 
 # yfinance prints its own error messages to stderr even when exceptions are caught
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
+
+@dataclass
+class RegimeState:
+    market_regime: str
+    intraday_regime: str
+    vix: float
+    sma200_price: float
+    price_vs_sma200_pct: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def __str__(self) -> str:
+        return self.intraday_regime
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -636,15 +653,27 @@ def earnings_proximity_signal(ticker: str) -> tuple[float, dict]:
 
 # ── ATR (Average True Range) ──────────────────────────────────────────────────
 
+_atr_cache: dict = {}
+_ATR_CACHE_TTL = 300  # 5 minutes
+
 def compute_atr(ticker: str, period: int = 14) -> dict:
     """
     Computes ATR on 5-min bars.
     Returns atr_pct and suggested_stop_pct (1.5× ATR, clamped 0.5%–4%).
     """
+    cache_key = (ticker.upper(), period)
+    now = time.time()
+    if cache_key in _atr_cache:
+        cached_ts, cached_result = _atr_cache[cache_key]
+        if now - cached_ts < _ATR_CACHE_TTL:
+            return cached_result
+
     try:
         df = _get_bars(ticker, period="5d", interval="5m")
         if df is None or len(df) < period + 1:
-            return {"atr_pct": None, "suggested_stop_pct": None}
+            result = {"atr_pct": None, "suggested_stop_pct": None}
+            _atr_cache[cache_key] = (now, result)
+            return result
 
         high  = df["High"].squeeze()
         low   = df["Low"].squeeze()
@@ -661,18 +690,24 @@ def compute_atr(ticker: str, period: int = 14) -> dict:
         current_price = float(close.iloc[-1])
 
         if current_price <= 0 or pd.isna(atr):
-            return {"atr_pct": None, "suggested_stop_pct": None}
+            result = {"atr_pct": None, "suggested_stop_pct": None}
+            _atr_cache[cache_key] = (now, result)
+            return result
 
         atr_pct           = atr / current_price * 100
         suggested_stop_pct = max(0.5, min(4.0, 1.5 * atr_pct))
 
-        return {
+        result = {
             "atr_pct":           round(atr_pct, 4),
             "suggested_stop_pct": round(suggested_stop_pct, 4),
             "atr_raw":           round(atr, 6),
         }
+        _atr_cache[cache_key] = (now, result)
+        return result
     except Exception:
-        return {"atr_pct": None, "suggested_stop_pct": None}
+        result = {"atr_pct": None, "suggested_stop_pct": None}
+        _atr_cache[cache_key] = (now, result)
+        return result
 
 
 # ── Signal 9: Bollinger Band Squeeze ─────────────────────────────────────────
@@ -875,6 +910,56 @@ def compute_swing_score(ticker: str) -> tuple[float, dict]:
         return 0.0, {"error": str(e)[:80]}
 
 
+# ── Mean reversion (bull-regime ETF swing signal) ─────────────────────────────
+
+def mean_reversion_score(ticker: str, regime_state: RegimeState) -> tuple[float, dict]:
+    """
+    Connors-style short-term ETF mean reversion.
+    It is deliberately disabled outside bull regimes.
+    """
+    ticker_up = ticker.upper()
+    if regime_state.market_regime != "bull":
+        return 0.0, {
+            "mean_reversion_signal": False,
+            "reason": f"disabled_in_{regime_state.market_regime}",
+        }
+    if ticker_up not in ETF_UNIVERSE:
+        return 0.0, {"mean_reversion_signal": False, "reason": "not_etf_universe"}
+
+    try:
+        df = yf.download(ticker_up, period="20d", interval="1d",
+                         progress=False, auto_adjust=True)
+        if df is None or df.empty or len(df) < 5:
+            return 0.0, {"mean_reversion_signal": False, "error": "insufficient_data"}
+
+        close = df["Close"].squeeze()
+        rsi_2 = compute_rsi(close, 2)
+        latest_rsi = float(rsi_2.iloc[-1])
+
+        down_days = 0
+        for i in range(len(close) - 1, 0, -1):
+            if float(close.iloc[i]) < float(close.iloc[i - 1]):
+                down_days += 1
+            else:
+                break
+
+        if latest_rsi < 15 and down_days >= 3:
+            score = min(0.85, (15 - latest_rsi) / 15 * 0.85)
+            return _clamp(score), {
+                "rsi_2": round(latest_rsi, 2),
+                "consecutive_down_days": down_days,
+                "mean_reversion_signal": True,
+                "hold_days": 2,
+            }
+        return 0.0, {
+            "rsi_2": round(latest_rsi, 2),
+            "consecutive_down_days": down_days,
+            "mean_reversion_signal": False,
+        }
+    except Exception as e:
+        return 0.0, {"mean_reversion_signal": False, "error": str(e)[:80]}
+
+
 # ── Macro regime classifier ───────────────────────────────────────────────────
 
 _macro_regime_cache: dict = {}
@@ -894,6 +979,25 @@ ENERGY_TICKERS   = {"XLE", "XOM", "USO", "CVX", "COP", "OXY"}
 TECH_TICKERS     = {"QQQ", "NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL"}
 MOMENTUM_TICKERS = {"QQQ", "NVDA", "COIN", "ARKK"}
 SAFE_TICKERS     = {"GLD", "TLT"}
+ETF_UNIVERSE     = {"SPY", "QQQ", "GLD", "TLT", "XLE", "XLV", "IWM", "XLF", "XLK"}
+_TICKER_SECTORS = {
+    "SPY": {"market", "equities", "broad_market"},
+    "QQQ": {"technology", "tech", "growth"},
+    "NVDA": {"technology", "tech", "semiconductors"},
+    "AAPL": {"technology", "tech"},
+    "MSFT": {"technology", "tech"},
+    "COIN": {"crypto", "risk_on"},
+    "IBIT": {"crypto", "bitcoin"},
+    "XLE": {"energy", "oil"},
+    "XOM": {"energy", "oil"},
+    "USO": {"energy", "oil"},
+    "GLD": {"gold", "safe_haven", "precious_metals"},
+    "TLT": {"bonds", "rates", "safe_haven"},
+    "XLV": {"healthcare", "defensive"},
+    "IWM": {"small_caps", "equities"},
+    "XLF": {"financials", "banks"},
+    "XLK": {"technology", "tech"},
+}
 
 
 def _pct_change_last_two(df: pd.DataFrame) -> float:
@@ -1047,14 +1151,190 @@ def detect_macro_regime(return_meta: bool = False):
     return result if return_meta else result[0]
 
 
+# ── LLM macro shock scanner ───────────────────────────────────────────────────
+
+_shock_scan_cache: dict = {}
+_SHOCK_SCAN_TTL = 900  # 15 minutes
+_shock_scan_calls: list[float] = []
+_last_shock_emit_key: str = ""
+
+
+def latest_macro_headlines(limit_per_ticker: int = 5) -> list[str]:
+    headlines = []
+    for ticker in ("SPY", "XLE", "GLD"):
+        try:
+            for item in (yf.Ticker(ticker).news or [])[:limit_per_ticker]:
+                title = (item.get("title") or "").strip()
+                if title:
+                    headlines.append(f"{ticker}: {title}")
+        except Exception:
+            continue
+    return headlines[:15]
+
+
+def _shock_scan_allowed(now_ts: float) -> bool:
+    global _shock_scan_calls
+    _shock_scan_calls = [ts for ts in _shock_scan_calls if now_ts - ts < 3600]
+    return len(_shock_scan_calls) < 4
+
+
+def _normal_shock_result(reason: str = "normal") -> dict:
+    return {
+        "shock_detected": False,
+        "classification": "NORMAL",
+        "affected_sectors": [],
+        "direction": "mixed",
+        "reason": reason,
+    }
+
+
+def _parse_jsonish(raw: str) -> dict:
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start:end + 1]
+    return json.loads(text)
+
+
+def scan_for_macro_shock(news_headlines: list[str]) -> dict:
+    """
+    Single cached Haiku-classification pass over macro headlines.
+    Falls back to NORMAL if the LLM provider is unavailable.
+    """
+    now_ts = time.time()
+    if "latest" in _shock_scan_cache:
+        cached_ts, cached_result = _shock_scan_cache["latest"]
+        if now_ts - cached_ts < _SHOCK_SCAN_TTL:
+            return cached_result
+
+    if not news_headlines:
+        result = _normal_shock_result("no_headlines")
+        _shock_scan_cache["latest"] = (now_ts, result)
+        return result
+
+    if not _shock_scan_allowed(now_ts):
+        result = _normal_shock_result("shock_scan_hourly_limit")
+        _shock_scan_cache["latest"] = (now_ts, result)
+        return result
+
+    prompt = (
+        "Classify headlines NORMAL, SIGNIFICANT, or SHOCK. "
+        "SHOCK=geopolitical conflict, circuit breaker, emergency central bank, pandemic. "
+        "JSON only: {classification,reason,affected_sectors,direction}. "
+        + " | ".join(news_headlines[:15])[:650]
+    )
+
+    try:
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if api_key:
+            from anthropic import Anthropic
+            client = Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=os.getenv("ANTHROPIC_HAIKU_MODEL", "claude-3-5-haiku-20241022"),
+                max_tokens=120,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text
+        else:
+            from groq import Groq
+            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+            response = client.chat.completions.create(
+                model=os.getenv("GROQ_HAIKU_MODEL", "llama-3.1-8b-instant"),
+                max_tokens=120,
+                messages=[
+                    {"role": "system", "content": "Return JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            raw = response.choices[0].message.content
+
+        parsed = _parse_jsonish(raw)
+        classification = str(parsed.get("classification", "NORMAL")).upper()
+        affected = parsed.get("affected_sectors") or []
+        if isinstance(affected, str):
+            affected = [affected]
+        result = {
+            "shock_detected": classification == "SHOCK",
+            "classification": classification,
+            "affected_sectors": [str(s).lower() for s in affected],
+            "direction": str(parsed.get("direction", "mixed")).lower(),
+            "reason": str(parsed.get("reason", ""))[:240],
+        }
+        _shock_scan_calls.append(now_ts)
+    except Exception as e:
+        result = _normal_shock_result(f"shock_scan_unavailable: {str(e)[:100]}")
+
+    _shock_scan_cache["latest"] = (now_ts, result)
+    return result
+
+
+def ticker_matches_shock(ticker: str, affected_sectors: list[str]) -> bool:
+    affected = {str(s).lower().replace(" ", "_") for s in affected_sectors or []}
+    ticker_up = ticker.upper()
+    sectors = _TICKER_SECTORS.get(ticker_up, set()) | {ticker_up.lower()}
+    return bool(affected & sectors)
+
+
+def _emit_shock_side_effects(shock_result: dict):
+    """Best-effort DB/Telegram emission, deduped per classification+reason."""
+    global _last_shock_emit_key
+    if not shock_result.get("shock_detected"):
+        return
+    key = f"{shock_result.get('classification')}:{shock_result.get('reason')}"
+    if key == _last_shock_emit_key:
+        return
+    _last_shock_emit_key = key
+    try:
+        from database.client import log_event
+        log_event("SIGNAL", "macro_shock_detected", shock_result)
+    except Exception:
+        pass
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if token and chat_id:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": (
+                        "Macro shock detected\n"
+                        f"Classification: {shock_result.get('classification')}\n"
+                        f"Direction: {shock_result.get('direction')}\n"
+                        f"Affected: {', '.join(shock_result.get('affected_sectors') or [])}\n"
+                        f"Reason: {shock_result.get('reason')}"
+                    ),
+                },
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+
 # ── Regime Detection ──────────────────────────────────────────────────────────
 
-def detect_regime(ticker: str = "SPY") -> str:
+_regime_state_cache: dict = {}
+_REGIME_STATE_TTL = 4 * 3600
+
+
+def detect_regime(ticker: str = "SPY") -> RegimeState:
     """
-    Classifies current market regime:
-    trending | ranging | high_vol | news_driven
-    Uses VIX proxy via ^VIX and ADX approximation.
+    Returns a richer market/intraday regime state.
+    Market regime uses SPY vs 200-day SMA; intraday regime preserves the
+    existing VIX/trend classifier.
     """
+    cache_key = ticker.upper()
+    now_ts = time.time()
+    if cache_key in _regime_state_cache:
+        cached_ts, cached_state = _regime_state_cache[cache_key]
+        if now_ts - cached_ts < _REGIME_STATE_TTL:
+            return cached_state
+
     try:
         vix_df = yf.download("^VIX", period="2d", interval="1h",
                              progress=False, auto_adjust=True)
@@ -1062,36 +1342,63 @@ def detect_regime(ticker: str = "SPY") -> str:
     except Exception:
         vix = 20.0
 
+    market_regime = "transitioning"
+    sma200_price = 0.0
+    price_vs_sma200_pct = 0.0
+    try:
+        spy_df = yf.download("SPY", period="1y", interval="1d",
+                             progress=False, auto_adjust=True)
+        if not spy_df.empty and len(spy_df) >= 200:
+            close = spy_df["Close"].squeeze()
+            spy_price = float(close.iloc[-1])
+            sma200_price = float(close.rolling(200).mean().iloc[-1])
+            if sma200_price > 0:
+                price_vs_sma200_pct = (spy_price - sma200_price) / sma200_price * 100
+            if price_vs_sma200_pct > 0:
+                market_regime = "bull"
+            elif price_vs_sma200_pct < -2:
+                market_regime = "bear"
+            else:
+                market_regime = "transitioning"
+    except Exception:
+        pass
+
     if vix > 30:
-        return "high_vol"
-
-    df = _get_bars(ticker, period="5d", interval="15m")
-    if df is None:
-        return "ranging"
-
-    close  = df["Close"].squeeze()
-    # ADX approximation: std dev of returns / mean abs return
-    returns   = close.pct_change().dropna()
-    std_ret   = float(returns.rolling(14).std().iloc[-1])
-    mean_ret  = float(returns.rolling(14).mean().iloc[-1])
-
-    # Simple trend strength
-    trend_score = abs(mean_ret) / (std_ret + 1e-9)
-
-    if trend_score > 1.5:
-        return "trending"
+        intraday_regime = "high_vol"
     else:
-        return "ranging"
+        df = _get_bars(ticker, period="5d", interval="15m")
+        if df is None:
+            intraday_regime = "ranging"
+        else:
+            close  = df["Close"].squeeze()
+            returns   = close.pct_change().dropna()
+            std_ret   = float(returns.rolling(14).std().iloc[-1])
+            mean_ret  = float(returns.rolling(14).mean().iloc[-1])
+            trend_score = abs(mean_ret) / (std_ret + 1e-9)
+            intraday_regime = "trending" if trend_score > 1.5 else "ranging"
+
+    state = RegimeState(
+        market_regime=market_regime,
+        intraday_regime=intraday_regime,
+        vix=round(vix, 2),
+        sma200_price=round(sma200_price, 4),
+        price_vs_sma200_pct=round(price_vs_sma200_pct, 3),
+    )
+    _regime_state_cache[cache_key] = (now_ts, state)
+    return state
 
 
 # ── Master signal composer ────────────────────────────────────────────────────
 
-def compute_all_signals(ticker: str, weights: dict) -> dict:
+def compute_all_signals(ticker: str, weights: dict,
+                        regime_state: RegimeState = None,
+                        shock_result: dict = None) -> dict:
     """
     Runs all 10 signals + ATR, applies profile weights, returns composite score
     plus full metadata for logging and display.
     """
     results = {}
+    regime_state = regime_state or detect_regime()
 
     # Run all signals — failures return 0.0, never crash the cycle
     try:
@@ -1139,6 +1446,11 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
     except Exception:
         s10, m10 = 0.0, {"error": "signal_crashed"}
 
+    try:
+        s11, m11 = mean_reversion_score(ticker, regime_state)
+    except Exception:
+        s11, m11 = 0.0, {"mean_reversion_signal": False, "error": "signal_crashed"}
+
     atr_data = compute_atr(ticker)
 
     pre_news_signals = {
@@ -1182,6 +1494,7 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
     results["earnings_proximity"]   = {"score": s8,  "meta": m8}
     results["bollinger_squeeze"]    = {"score": s9,  "meta": m9}
     results["put_call_ratio"]       = {"score": s10, "meta": m10}
+    results["mean_reversion"]       = {"score": s11, "meta": m11}
 
     # Weighted composite (earnings_proximity is a multiplier, not a weight)
     weighted_signals = {
@@ -1194,14 +1507,32 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
         "relative_strength":   s7,
         "bollinger_squeeze":   s9,
         "put_call_ratio":      s10,
+        "mean_reversion":      s11,
     }
-    weight_total = sum(max(0.0, weights.get(k, 0.0)) for k in weighted_signals)
+    effective_weights = dict(weights or {})
+    if regime_state.market_regime == "bull":
+        for key in ("tape_aggression", "macd_crossover", "relative_strength"):
+            effective_weights[key] = effective_weights.get(key, 0.0) * 1.2
+        effective_weights["mean_reversion"] = max(effective_weights.get("mean_reversion", 0.0), 0.12)
+    elif regime_state.market_regime == "bear":
+        for key in ("rsi_divergence", "vwap_deviation", "bollinger_squeeze"):
+            effective_weights[key] = effective_weights.get(key, 0.0) * 1.2
+        effective_weights["mean_reversion"] = 0.0
+    else:
+        effective_weights["mean_reversion"] = 0.0
+
+    high_vol_multiplier = 0.8 if regime_state.intraday_regime == "high_vol" else 1.0
+    if regime_state.intraday_regime == "high_vol":
+        effective_weights = {k: v * 0.8 for k, v in effective_weights.items()}
+
+    weight_total = sum(max(0.0, effective_weights.get(k, 0.0)) for k in weighted_signals)
     if weight_total <= 0:
         weight_total = 1.0
     composite = sum(
-        score * (max(0.0, weights.get(name, 0.0)) / weight_total)
+        score * (max(0.0, effective_weights.get(name, 0.0)) / weight_total)
         for name, score in weighted_signals.items()
     )
+    composite *= high_vol_multiplier
     earnings_multiplier = m8.get("earnings_multiplier", 1.0)
     composite *= earnings_multiplier
     composite = _clamp(composite)
@@ -1226,18 +1557,38 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
 
     composite = _clamp(composite * macro_multiplier)
 
-    regime = detect_regime()
+    shock_result = shock_result or _normal_shock_result()
+    shock_multiplier = 1.0
+    shock_override = False
+    if shock_result.get("shock_detected"):
+        _emit_shock_side_effects(shock_result)
+        shock_override = True
+        if ticker_matches_shock(ticker, shock_result.get("affected_sectors", [])):
+            shock_multiplier = 1.5
+        else:
+            shock_multiplier = 0.5
+        composite = _clamp(composite * shock_multiplier)
 
     return {
         "ticker":              ticker,
         "composite_score":     round(composite, 4),
-        "regime":              regime,
+        "regime":              regime_state.intraday_regime,
+        "regime_state":        regime_state.to_dict(),
+        "regime_bull_bear":    regime_state.market_regime,
         "macro_regime":        macro_regime,
         "macro_multiplier":    macro_multiplier,
         "macro_meta":          macro_meta,
+        "shock_detected":      bool(shock_result.get("shock_detected", False)),
+        "shock_classification": shock_result.get("classification", "NORMAL"),
+        "shock_result":        shock_result,
+        "shock_override":      shock_override,
+        "shock_multiplier":    shock_multiplier,
         "signals":             results,
-        "weights_used":        weights,
+        "weights_used":        effective_weights,
         "earnings_multiplier": earnings_multiplier,
         "atr_data":            atr_data,
+        "atr_stop_multiplier": 2.0 if regime_state.intraday_regime == "high_vol" else 1.5,
+        "mean_reversion_signal": bool(m11.get("mean_reversion_signal")),
+        "mean_reversion_meta": m11,
         "computed_at":         datetime.utcnow().isoformat(),
     }

@@ -61,6 +61,12 @@ ALL_SIGNALS = {
         "db_col": "put_call_score",
         "new": True,
     },
+    "mean_reversion": {
+        "label": "Mean Reversion",
+        "desc":  "Bull-regime ETF oversold swing setup",
+        "db_col": None,
+        "new": True,
+    },
     "earnings_proximity": {
         "label": "Earnings Proximity",
         "desc":  "Days to next earnings (multiplier signal)",
@@ -116,27 +122,45 @@ def render():
 
 def _compute_and_display_live(tickers, profile_name):
     from backend.signals.engine import compute_all_signals, detect_regime, detect_macro_regime
+    from backend.broker.alpaca import compute_position_size
     from database.client import get_latest_weights, insert_signal
     from config.risk_profiles import get_profile
 
     profile       = get_profile(profile_name)
     saved_weights = get_latest_weights("global")
     weights       = saved_weights if saved_weights else profile["signal_weights"]
-    regime        = detect_regime()
+    regime_state  = detect_regime()
+    regime        = regime_state.intraday_regime
     macro_regime  = detect_macro_regime()
 
-    st.markdown(f"**Regime:** `{regime}` · **Macro:** `{macro_regime}`")
+    st.markdown(
+        f"**Regime:** `{regime_state.market_regime.upper()}` · "
+        f"**Intraday:** `{regime}` · **VIX:** `{regime_state.vix:.1f}` · "
+        f"**Macro:** `{macro_regime}`"
+    )
     progress    = st.progress(0)
     all_results = {}
+    shock_banner = None
 
     for i, ticker in enumerate(tickers):
         with st.spinner(f"Computing {ticker}..."):
             try:
-                result = compute_all_signals(ticker, weights)
+                result = compute_all_signals(ticker, weights, regime_state=regime_state)
+                atr_data = result.get("atr_data", {})
+                sizing = compute_position_size(
+                    ticker,
+                    float(os.getenv("STARTING_CAPITAL_EUR", "100")),
+                    profile,
+                    0.7,
+                    atr_data,
+                    regime_state,
+                )
+                result["sizing_preview"] = sizing
+                if result.get("shock_detected") and not shock_banner:
+                    shock_banner = result.get("shock_result", {})
                 all_results[ticker] = result
                 sigs          = result["signals"]
                 earnings_meta = sigs.get("earnings_proximity", {}).get("meta", {})
-                atr_data = result.get("atr_data", {})
                 insert_signal({
                     "ticker":                ticker,
                     "composite_score":       result["composite_score"],
@@ -154,6 +178,9 @@ def _compute_and_display_live(tickers, profile_name):
                     "earnings_mult":         earnings_meta.get("earnings_multiplier", 1.0),
                     "macro_regime":          result.get("macro_regime"),
                     "macro_multiplier":      result.get("macro_multiplier", 1.0),
+                    "regime_bull_bear":      result.get("regime_bull_bear"),
+                    "shock_detected":        result.get("shock_detected", False),
+                    "shock_classification":  result.get("shock_classification"),
                     "regime":                regime,
                     "gated":                 False,
                     "llm_called":            False,
@@ -161,6 +188,12 @@ def _compute_and_display_live(tickers, profile_name):
             except Exception as e:
                 all_results[ticker] = {"error": str(e)}
         progress.progress((i + 1) / len(tickers))
+
+    if shock_banner:
+        st.error(
+            f"Macro shock: {shock_banner.get('reason', 'No reason supplied')} "
+            f"| affected: {', '.join(shock_banner.get('affected_sectors') or [])}"
+        )
 
     _render_live_cards(all_results, weights)
 
@@ -181,6 +214,12 @@ def _display_from_db(tickers):
             t = s.get("ticker")
             if t not in latest:
                 latest[t] = s
+        shock_rows = [s for s in latest.values() if s.get("shock_detected")]
+        if shock_rows:
+            row = shock_rows[0]
+            st.error(
+                f"Macro shock active: {row.get('shock_classification') or 'SHOCK'}"
+            )
         missing_cols = _missing_new_signal_columns(latest.values())
         if missing_cols:
             st.warning(
@@ -197,7 +236,8 @@ def _missing_new_signal_columns(rows) -> list:
     required = [
         "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
         "bollinger_score", "put_call_score", "atr_pct",
-        "macro_regime", "macro_multiplier",
+        "macro_regime", "macro_multiplier", "regime_bull_bear",
+        "shock_detected", "shock_classification",
     ]
     for row in rows:
         return [col for col in required if col not in row]
@@ -219,11 +259,15 @@ def _render_live_cards(results: dict, weights: dict):
         e_mult    = result.get("earnings_multiplier", 1.0)
         macro_regime = result.get("macro_regime", "normal")
         macro_mult = result.get("macro_multiplier", 1.0)
+        regime_state = result.get("regime_state", {})
+        market_regime = str(regime_state.get("market_regime", result.get("regime_bull_bear", "transitioning"))).upper()
+        shock = result.get("shock_detected", False)
+        regime_badge = "⚡ SHOCK" if shock else ("🐂 BULL" if market_regime == "BULL" else ("🐻 BEAR" if market_regime == "BEAR" else "TRANSITIONING"))
         e_days    = (result["signals"].get("earnings_proximity", {})
                      .get("meta", {}).get("days_to_earnings"))
 
         with st.expander(
-            f"**{ticker}** — `{composite:+.3f}` — {action} — macro `{macro_regime}` ×{macro_mult:.2f}"
+            f"**{ticker}** — `{composite:+.3f}` — {action} — {regime_badge} — macro `{macro_regime}` ×{macro_mult:.2f}"
             + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""),
             expanded=True
         ):
@@ -262,6 +306,12 @@ def _render_live_cards(results: dict, weights: dict):
                         f"Earnings multiplier ×{e_mult:.1f}</div>",
                         unsafe_allow_html=True
                     )
+                atr_data = result.get("atr_data", {})
+                sizing = result.get("sizing_preview", {})
+                st.metric("ATR", f"{atr_data.get('atr_pct', 0) or 0:.3f}%")
+                if sizing:
+                    st.metric("Size preview", f"EUR {sizing.get('size_eur', 0):,.2f}",
+                              delta=f"stop {sizing.get('stop_pct', 0):.2f}%")
 
             # 8-signal breakdown
             with col_signals:
@@ -370,9 +420,15 @@ def _render_db_cards(latest: dict):
         e_mult    = row.get("earnings_mult", 1.0) or 1.0
         macro_regime = row.get("macro_regime") or "normal"
         macro_mult = row.get("macro_multiplier", 1.0) or 1.0
+        market_regime = str(row.get("regime_bull_bear") or "transitioning").upper()
+        shock = bool(row.get("shock_detected"))
+        regime_badge = "⚡ SHOCK" if shock else ("🐂 BULL" if market_regime == "BULL" else ("🐻 BEAR" if market_regime == "BEAR" else "TRANSITIONING"))
+
+        if shock:
+            st.error(f"Macro shock active: {row.get('shock_classification') or 'SHOCK'}")
 
         header = (f"**{ticker}** — `{composite:+.3f}` — {action}"
-                  + f" — macro `{macro_regime}` ×{macro_mult:.2f}"
+                  + f" — {regime_badge} — macro `{macro_regime}` ×{macro_mult:.2f}"
                   + (" 🚫 GATED" if gated else "")
                   + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""))
 
@@ -409,7 +465,7 @@ def _render_db_cards(latest: dict):
             )
             atr_val = row.get("atr_pct")
             x2.metric("ATR %", f"{atr_val:.3f}%" if atr_val else "—")
-            x3.metric("Macro", f"{macro_regime} ×{macro_mult:.2f}")
+            x3.metric("Regime", f"{market_regime} | {macro_regime} ×{macro_mult:.2f}")
 
             if gated:
                 st.warning(f"Gated: {row.get('gate_reason', '—')}")

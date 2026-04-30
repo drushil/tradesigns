@@ -27,6 +27,11 @@ def render():
     cash   = account.get("cash", 0)
     start  = float(__import__('os').getenv("STARTING_CAPITAL_EUR", "100"))
     cum_pnl_pct = (equity - start) / start * 100 if start > 0 else 0
+    try:
+        from backend.signals.engine import detect_regime
+        regime_state = detect_regime()
+    except Exception:
+        regime_state = None
 
     # ── KPI row ────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -41,6 +46,17 @@ def render():
     c5.metric("Total P&L",
               f"€{trade_stats.get('total_pnl_eur', 0):+.2f}",
               delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade")
+
+    if regime_state:
+        label = regime_state.market_regime.upper()
+        icon = "🐂" if label == "BULL" else ("🐻" if label == "BEAR" else "↔")
+        st.markdown(f"""
+        <div style="margin:12px 0 4px;padding:12px 14px;border:1px solid #222;border-radius:8px;background:#101010">
+          <span style="font-size:22px;font-weight:700">{icon} {label}</span>
+          <span style="margin-left:16px;color:#aaa">VIX {regime_state.vix:.1f}</span>
+          <span style="margin-left:16px;color:#777">SPY vs SMA200 {regime_state.price_vs_sma200_pct:+.2f}%</span>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 

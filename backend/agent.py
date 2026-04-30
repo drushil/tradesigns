@@ -15,7 +15,8 @@ load_dotenv()
 from config.risk_profiles        import get_profile
 from backend.signals.engine      import (compute_all_signals, compute_swing_score,
                                           detect_regime, detect_macro_regime,
-                                          compute_atr)
+                                          compute_atr, latest_macro_headlines,
+                                          scan_for_macro_shock)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
                                           scan_for_extreme_dips)
@@ -63,6 +64,14 @@ _llm_calls_this_hour = 0
 _llm_hour_reset      = datetime.utcnow()
 _open_trades         = {}   # {ticker: {entry_price, entry_time, stop_price, hold_minutes, ...}}
 _swing_trades        = {}   # {ticker: {entry_price, entry_time, hold_days, ...}}
+_last_shock_refresh  = None
+_last_shock_result   = {
+    "shock_detected": False,
+    "classification": "NORMAL",
+    "affected_sectors": [],
+    "direction": "mixed",
+    "reason": "not_scanned",
+}
 
 
 def _allows_intraday() -> bool:
@@ -183,6 +192,48 @@ def _record_llm_call():
     _llm_calls_this_hour += 1
 
 
+def _send_telegram_alert(text: str) -> bool:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return False
+    try:
+        import requests
+        resp = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        return resp.ok
+    except Exception:
+        return False
+
+
+def _refresh_macro_shock_if_needed() -> dict:
+    global _last_shock_refresh, _last_shock_result
+    now = datetime.utcnow()
+    if _last_shock_refresh and (now - _last_shock_refresh).total_seconds() < 15 * 60:
+        return _last_shock_result
+
+    headlines = latest_macro_headlines(limit_per_ticker=5)
+    shock_result = scan_for_macro_shock(headlines)
+    _last_shock_refresh = now
+    _last_shock_result = shock_result
+
+    if shock_result.get("shock_detected"):
+        log_event("SIGNAL", "macro_shock_detected", shock_result)
+        _send_telegram_alert(
+            "Macro shock detected\n"
+            f"Classification: {shock_result.get('classification')}\n"
+            f"Direction: {shock_result.get('direction')}\n"
+            f"Affected: {', '.join(shock_result.get('affected_sectors') or [])}\n"
+            f"Reason: {shock_result.get('reason')}"
+        )
+    elif "unavailable" in str(shock_result.get("reason", "")):
+        log_event("WARN", "macro_shock_scan_unavailable", shock_result)
+    return shock_result
+
+
 def _missing_runtime_config() -> list[str]:
     required = [
         "ALPACA_API_KEY",
@@ -251,6 +302,9 @@ def _hydrate_open_trades():
             "macro_regime": record.get("macro_regime"),
             "macro_multiplier": float(record.get("macro_multiplier") or 1.0),
             "dip_type": record.get("dip_type"),
+            "sizing_json": record.get("sizing_json") or {},
+            "mean_reversion_trade": bool(record.get("mean_reversion_trade") or False),
+            "swing_trade": bool(record.get("swing_trade") or False),
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
             "order_id": record.get("order_id"),
@@ -280,7 +334,9 @@ def run_signal_cycle():
             "error": portfolio_state["broker_error"],
         })
         return
-    regime          = detect_regime()
+    regime_state    = detect_regime()
+    regime          = regime_state.intraday_regime
+    shock_result    = _refresh_macro_shock_if_needed()
     macro_regime, macro_meta = detect_macro_regime(return_meta=True)
     effective_profile = _apply_execution_overrides(
         get_effective_profile(PROFILE, portfolio_state)
@@ -294,6 +350,8 @@ def run_signal_cycle():
         "vix": portfolio_state["vix"], "tickers": TICKERS,
         "horizon": HORIZON, "macro_regime": macro_regime,
         "macro_meta": macro_meta,
+        "regime_state": regime_state.to_dict(),
+        "shock_result": shock_result,
     })
 
     if not TICKERS:
@@ -306,17 +364,19 @@ def run_signal_cycle():
         for ticker in TICKERS:
             try:
                 _process_ticker(ticker, regime, weights, effective_profile,
-                                portfolio_state, recent_trades)
+                                portfolio_state, recent_trades,
+                                regime_state, shock_result)
             except Exception as e:
                 log_event("ERROR", f"ticker_error_{ticker}", {"error": str(e)})
 
-    _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile)
+    _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile, regime_state)
 
     if _should_run_swing_recheck():
         run_swing_cycle(
             portfolio_state=portfolio_state,
             profile=effective_profile,
             regime=regime,
+            regime_state=regime_state,
             macro_regime=macro_regime,
         )
 
@@ -327,10 +387,13 @@ def run_signal_cycle():
     _save_snapshot(portfolio_state, regime)
 
 
-def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_trades):
+def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_trades,
+                    regime_state, shock_result):
     """Signal → gate → EV → LLM → order."""
     # 1. Compute signals
-    signal_result = compute_all_signals(ticker, weights)
+    signal_result = compute_all_signals(
+        ticker, weights, regime_state=regime_state, shock_result=shock_result
+    )
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
     atr_data       = signal_result.get("atr_data") or {}
@@ -339,7 +402,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     # 2. Pre-trade gate (hard rules)
     capital_base = _trading_capital(portfolio_state["equity"])
-    size_eur = compute_position_size(capital_base, profile, 0.7)
+    pre_size = compute_position_size(ticker, capital_base, profile, 0.7, atr_data, regime_state)
+    size_eur = pre_size["size_eur"]
     gate_ok, gate_reason = pre_trade_gate(
         ticker, _deterministic_action(composite).lower(), size_eur, composite, profile, portfolio_state
     )
@@ -362,6 +426,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "earnings_mult":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("earnings_multiplier", 1.0),
         "macro_regime":           signal_result.get("macro_regime"),
         "macro_multiplier":       signal_result.get("macro_multiplier", 1.0),
+        "regime_bull_bear":       signal_result.get("regime_bull_bear"),
+        "shock_detected":         signal_result.get("shock_detected", False),
+        "shock_classification":   signal_result.get("shock_classification"),
         "regime":                 regime,
         "vix":                    portfolio_state["vix"],
         "gated":                  not gate_ok,
@@ -430,12 +497,14 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # 6. Size and submit order
-    final_size = compute_position_size(capital_base, profile, conviction, atr_data)
+    sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, regime_state)
+    final_size = sizing["size_eur"]
     max_notional = _env_float(
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", final_size),
     )
     final_size = min(final_size, max_notional)
+    sizing["size_eur"] = round(final_size, 2)
 
     import yfinance as yf
     bar = yf.download(ticker, period="1d", interval="1m",
@@ -451,11 +520,20 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         hold_minutes = int(raw_hold_minutes)
     except (TypeError, ValueError):
         hold_minutes = 30
-    hold_minutes = max(
-        int(profile.get("min_hold_minutes", 1)),
-        min(int(profile.get("max_hold_minutes", 60)), hold_minutes),
-    )
-    stop_loss_pct = float(llm_result.get("stop_loss_pct", profile["stop_loss_pct"]))
+    mean_reversion_trade = bool(signal_result.get("mean_reversion_signal"))
+    if mean_reversion_trade:
+        hold_minutes = 2880
+    else:
+        hold_minutes = max(
+            int(profile.get("min_hold_minutes", 1)),
+            min(int(profile.get("max_hold_minutes", 60)), hold_minutes),
+        )
+
+    stop_loss_pct = sizing.get("stop_pct") or float(llm_result.get("stop_loss_pct", profile["stop_loss_pct"]))
+    if mean_reversion_trade:
+        raw_atr_pct = atr_data.get("atr_pct")
+        if raw_atr_pct:
+            stop_loss_pct = max(stop_loss_pct, round(float(raw_atr_pct) * 2.0, 3))
 
     order = submit_market_order(
         ticker       = ticker,
@@ -493,6 +571,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "macro_regime":  signal_result.get("macro_regime"),
         "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
         "horizon":       "short",
+        "sizing_json":   sizing,
+        "mean_reversion_trade": mean_reversion_trade,
+        "swing_trade":   mean_reversion_trade,
         "llm_conviction": conviction,
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
@@ -503,7 +584,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "ticker": ticker, "side": action,
         "size_eur": round(final_size, 2), "conviction": conviction,
         "composite": composite, "order_class": order.get("order_class"),
-        "rationale": llm_result.get("rationale")
+        "rationale": llm_result.get("rationale"),
+        "sizing": sizing,
+        "mean_reversion_trade": mean_reversion_trade,
     })
 
 
@@ -603,6 +686,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "llm_rationale":   trade["llm_rationale"],
         "signals_json":    trade["signals_json"],
         "dip_type":        trade.get("dip_type"),
+        "sizing_json":     trade.get("sizing_json"),
+        "mean_reversion_trade": bool(trade.get("mean_reversion_trade")),
+        "swing_trade":     bool(trade.get("swing_trade") or trade.get("horizon") == "swing"),
         "order_id":        trade.get("order_id"),
         "close_order_id":  result.get("order_id"),
         "close_error":     close_error,
@@ -679,14 +765,22 @@ def _submit_horizon_order(
     macro_regime: str = None,
     macro_multiplier: float = None,
     dip_type: str = None,
+    regime_state = None,
+    atr_data: dict = None,
+    sizing_json: dict = None,
 ) -> dict:
     capital_base = _trading_capital(portfolio_state["equity"])
-    size_eur = compute_position_size(capital_base, profile, conviction) * size_multiplier
+    regime_state = regime_state or detect_regime()
+    sizing = sizing_json or compute_position_size(
+        ticker, capital_base, profile, conviction, atr_data or {}, regime_state
+    )
+    size_eur = sizing["size_eur"] * size_multiplier
     max_notional = _env_float(
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", size_eur),
     )
     size_eur = min(size_eur, max_notional)
+    sizing["size_eur"] = round(size_eur, 2)
 
     current_price = _current_daily_price(ticker)
     if not current_price:
@@ -735,6 +829,9 @@ def _submit_horizon_order(
         "macro_multiplier": macro_multiplier,
         "horizon": horizon,
         "dip_type": dip_type,
+        "sizing_json": sizing,
+        "mean_reversion_trade": False,
+        "swing_trade": horizon == "swing",
         "llm_conviction": conviction,
         "llm_rationale": rationale,
         "order_id": order.get("order_id"),
@@ -752,11 +849,13 @@ def _submit_horizon_order(
         "order_class": order.get("order_class"),
         "rationale": rationale,
         "dip_type": dip_type,
+        "sizing": sizing,
     })
     return order
 
 
-def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: str, profile: dict):
+def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: str,
+                      profile: dict, regime_state=None):
     opportunities = scan_for_extreme_dips(tickers, portfolio_state, macro_regime)
     log_event("SIGNAL", "extreme_dip_scan_complete", {
         "macro_regime": macro_regime,
@@ -796,13 +895,16 @@ def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: s
             macro_regime=macro_regime,
             macro_multiplier=1.0,
             dip_type=opp.get("type"),
+            regime_state=regime_state,
+            atr_data=atr_data,
         )
         if "error" not in order:
             open_tickers.add(ticker)
 
 
 def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
-                    regime: str = None, macro_regime: str = None):
+                    regime: str = None, macro_regime: str = None,
+                    regime_state = None):
     """Daily swing re-evaluation and entry scan for SWING_TICKERS."""
     if not _allows_swing():
         return
@@ -817,7 +919,8 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
         return
 
     profile = profile or _apply_execution_overrides(get_effective_profile(PROFILE, portfolio_state))
-    regime = regime or detect_regime()
+    regime_state = regime_state or detect_regime()
+    regime = regime or regime_state.intraday_regime
     if macro_regime is None:
         macro_regime = detect_macro_regime()
 
@@ -900,6 +1003,8 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
             rationale="daily swing score entry",
             macro_regime=macro_regime,
             macro_multiplier=1.0,
+            regime_state=regime_state,
+            atr_data=atr_data,
         )
 
 

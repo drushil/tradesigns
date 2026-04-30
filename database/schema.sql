@@ -36,9 +36,12 @@ create table if not exists trades (
     regime          text check (regime in (
                         'trending','ranging','high_vol','news_driven')),
     macro_regime    text check (macro_regime in (
-                        'geopolitical_shock','rate_shift','normal','risk_off','risk_on',null)),
+                        'geopolitical_shock','rate_shift','normal','risk_off','risk_on')),
     macro_multiplier numeric(5,2),
     dip_type        text,
+    sizing_json     jsonb,
+    mean_reversion_trade boolean default false,
+    swing_trade     boolean default false,
     composite_score numeric(6,4) check (composite_score between -1 and 1),
     llm_conviction  numeric(6,4) check (llm_conviction between 0 and 1),
     llm_rationale   text,
@@ -83,6 +86,9 @@ create table if not exists open_trades (
     macro_regime        text,
     macro_multiplier    numeric(5,2),
     dip_type            text,
+    sizing_json         jsonb,
+    mean_reversion_trade boolean default false,
+    swing_trade         boolean default false,
     composite_score     numeric(6,4),
     llm_conviction      numeric(6,4),
     llm_rationale       text,
@@ -99,7 +105,10 @@ alter table if exists open_trades
     add column if not exists horizon text,
     add column if not exists macro_regime text,
     add column if not exists macro_multiplier numeric(5,2),
-    add column if not exists dip_type text;
+    add column if not exists dip_type text,
+    add column if not exists sizing_json jsonb,
+    add column if not exists mean_reversion_trade boolean default false,
+    add column if not exists swing_trade boolean default false;
 
 -- 3. SIGNALS
 create table if not exists signals (
@@ -121,8 +130,11 @@ create table if not exists signals (
     earnings_mult           numeric(4,2) default 1.0,
     regime                  text,
     macro_regime            text check (macro_regime in (
-                                'geopolitical_shock','rate_shift','normal','risk_off','risk_on',null)),
+                                'geopolitical_shock','rate_shift','normal','risk_off','risk_on')),
     macro_multiplier        numeric(5,2),
+    regime_bull_bear        text check (regime_bull_bear in ('bull','bear','transitioning')),
+    shock_detected          boolean default false,
+    shock_classification    text,
     vix                     numeric(6,2),
     volume_vs_avg           numeric(6,2),
     gated                   boolean not null default false,
@@ -219,7 +231,15 @@ alter table if exists trades
     add column if not exists close_error text,
     add column if not exists macro_regime text,
     add column if not exists macro_multiplier numeric(5,2),
-    add column if not exists dip_type text;
+    add column if not exists dip_type text,
+    add column if not exists sizing_json jsonb,
+    add column if not exists mean_reversion_trade boolean default false,
+    add column if not exists swing_trade boolean default false;
+
+alter table if exists signals
+    add column if not exists regime_bull_bear text,
+    add column if not exists shock_detected boolean default false,
+    add column if not exists shock_classification text;
 
 alter table if exists signal_weights
     add column if not exists bollinger_squeeze numeric(6,4) not null default 0.09 check (bollinger_squeeze between 0 and 1),

@@ -51,6 +51,7 @@ def insert_trade(trade: dict) -> dict:
             "size_eur", "pnl_pct", "net_pnl_pct", "pnl_eur",
             "entry_time", "exit_time", "hold_minutes", "exit_reason",
             "regime", "macro_regime", "macro_multiplier", "dip_type",
+            "sizing_json", "mean_reversion_trade", "swing_trade",
             "composite_score", "llm_conviction", "llm_rationale",
             "signals_json", "commission_eur", "slippage_eur", "llm_cost_eur",
             "risk_profile", "horizon",
@@ -84,6 +85,9 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "macro_regime": trade.get("macro_regime"),
             "macro_multiplier": trade.get("macro_multiplier"),
             "dip_type": trade.get("dip_type"),
+            "sizing_json": trade.get("sizing_json"),
+            "mean_reversion_trade": trade.get("mean_reversion_trade"),
+            "swing_trade": trade.get("swing_trade"),
             "composite_score": trade.get("composite_score"),
             "llm_conviction": trade.get("llm_conviction"),
             "llm_rationale": trade.get("llm_rationale"),
@@ -96,7 +100,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             fallback = {
                 k: v for k, v in record.items()
                 if k not in {"quantity", "hold_minutes", "hold_days", "horizon",
-                             "macro_regime", "macro_multiplier", "dip_type"}
+                             "macro_regime", "macro_multiplier", "dip_type",
+                             "sizing_json", "mean_reversion_trade", "swing_trade"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}
@@ -195,6 +200,7 @@ def insert_signal(signal: dict) -> dict:
             "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
             "bollinger_score", "put_call_score", "atr_pct",
             "macro_regime", "macro_multiplier",
+            "regime_bull_bear", "shock_detected", "shock_classification",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:

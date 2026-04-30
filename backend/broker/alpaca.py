@@ -314,21 +314,53 @@ def scan_for_extreme_dips(tickers: list, portfolio_state: dict = None,
     return sorted(opportunities, key=lambda x: x["dip_score"], reverse=True)
 
 
-def compute_position_size(total_capital: float, profile: dict,
-                           conviction: float, atr_data: dict = None) -> float:
+def compute_position_size(ticker: str, total_capital: float, profile: dict,
+                          conviction: float, atr_data: dict = None,
+                          regime_state=None) -> dict:
     """
-    Returns position size in EUR.
-    When atr_data is provided, scales position inversely with stop width:
-    tighter ATR stop → larger position for the same dollar risk.
+    ATR risk sizing. Returns the full sizing calculation for learning.
+    atr_pct is accepted from compute_atr as a percentage value.
     """
-    base    = total_capital * profile["capital_per_trade_pct"] / 100
-    scalar  = min(conviction / max(profile["min_conviction"], 0.01), 1.5)
+    atr_data = atr_data or {}
+    target_risk_eur = total_capital * 0.01
 
-    profile_stop = profile.get("stop_loss_pct", 2.0)
-    if atr_data and atr_data.get("suggested_stop_pct"):
-        atr_stop   = atr_data["suggested_stop_pct"]
-        atr_scalar = min(profile_stop / max(atr_stop, 0.1), 2.0)
-        scalar    *= atr_scalar
+    raw_atr_pct = atr_data.get("atr_pct")
+    if raw_atr_pct is None:
+        atr_fraction = float(profile.get("stop_loss_pct", 2.0)) / 100
+    else:
+        atr_fraction = float(raw_atr_pct) / 100
 
-    max_pos = total_capital * profile["max_position_pct"] / 100
-    return min(base * scalar, max_pos)
+    stop_multiplier = 2.0 if getattr(regime_state, "intraday_regime", "") == "high_vol" else 1.5
+    stop_distance_pct = max(0.001, atr_fraction * stop_multiplier)
+    base_size_eur = target_risk_eur / stop_distance_pct
+
+    conviction_scalar = 0.5 + max(0.0, min(float(conviction or 0), 1.0))
+    market_regime = getattr(regime_state, "market_regime", "bull")
+    intraday_regime = getattr(regime_state, "intraday_regime", "")
+    regime_scalar = {
+        "bull": 1.0,
+        "transitioning": 0.7,
+        "bear": 0.6,
+        "high_vol": 0.5,
+    }.get(market_regime, 1.0)
+    if intraday_regime == "high_vol":
+        regime_scalar = min(regime_scalar, 0.5)
+
+    vix = float(getattr(regime_state, "vix", 20.0) or 20.0)
+    vix_scalar = 1.0 if vix < 25 else max(0.4, 1 - (vix - 25) / 50)
+
+    final_size = base_size_eur * conviction_scalar * regime_scalar * vix_scalar
+    max_size = total_capital * profile["max_position_pct"] / 100
+    min_size = 5.0
+
+    return {
+        "ticker": ticker,
+        "size_eur": round(max(min_size, min(final_size, max_size)), 2),
+        "stop_pct": round(stop_distance_pct * 100, 3),
+        "target_risk_eur": round(target_risk_eur, 2),
+        "conviction_scalar": round(conviction_scalar, 2),
+        "regime_scalar": regime_scalar,
+        "vix_scalar": round(vix_scalar, 2),
+        "atr_pct": round(atr_fraction * 100, 3),
+        "stop_multiplier": stop_multiplier,
+    }
