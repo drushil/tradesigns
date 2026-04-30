@@ -13,9 +13,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from config.risk_profiles        import get_profile
-from backend.signals.engine      import compute_all_signals, detect_regime
+from backend.signals.engine      import (compute_all_signals, compute_swing_score,
+                                          detect_regime, detect_macro_regime,
+                                          compute_atr)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
-                                          close_position, pre_trade_gate, compute_position_size)
+                                          close_position, pre_trade_gate, compute_position_size,
+                                          scan_for_extreme_dips)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
@@ -48,6 +51,7 @@ def _env_float(key: str, default: float) -> float:
 
 
 TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",") if t.strip()]
+SWING_TICKERS = [t.strip().upper() for t in _env_value("SWING_TICKERS", "").split(",") if t.strip()]
 PROFILE  = get_profile(_env_value("RISK_PROFILE", "moderate"))
 HORIZON  = _env_value("INVESTMENT_HORIZON", "short")
 LLM_HOUR_LIMIT = _env_int("LLM_CALLS_PER_HOUR_LIMIT", 20)
@@ -58,6 +62,32 @@ _learning_engine: Optional[RegimeAwareWeightEngine] = None
 _llm_calls_this_hour = 0
 _llm_hour_reset      = datetime.utcnow()
 _open_trades         = {}   # {ticker: {entry_price, entry_time, stop_price, hold_minutes, ...}}
+_swing_trades        = {}   # {ticker: {entry_price, entry_time, hold_days, ...}}
+
+
+def _allows_intraday() -> bool:
+    return HORIZON in {"short", "intraday", "both"}
+
+
+def _allows_swing() -> bool:
+    return HORIZON in {"mid", "swing", "both"}
+
+
+def _open_position_tickers(portfolio_state: dict) -> set[str]:
+    return {str(p.get("ticker", "")).upper() for p in portfolio_state.get("positions", [])}
+
+
+def _should_run_swing_recheck(now: datetime = None) -> bool:
+    """Run swing re-evaluation once in the configured market-open window."""
+    if not _allows_swing():
+        return False
+    now = now or datetime.utcnow()
+    hour = _env_int("SWING_REEVAL_UTC_HOUR", 14)
+    minute = _env_int("SWING_REEVAL_UTC_MINUTE", 0)
+    window = _env_int("SWING_REEVAL_WINDOW_MINUTES", 5)
+    current = now.hour * 60 + now.minute
+    target = hour * 60 + minute
+    return 0 <= current - target < window
 
 
 def _init_learning_engine() -> RegimeAwareWeightEngine:
@@ -211,11 +241,16 @@ def _hydrate_open_trades():
             "stop_price": float(record.get("stop_price") or 0),
             "take_profit_price": float(record.get("take_profit_price") or 0),
             "hold_minutes": int(record.get("hold_minutes") or 30),
+            "hold_days": int(record.get("hold_days") or 0),
+            "horizon": record.get("horizon") or "short",
             "size_eur": float(record.get("size_eur") or 0),
             "side": record.get("side", "BUY"),
             "composite_score": float(record.get("composite_score") or 0),
             "signals_json": record.get("signals_json") or {},
             "regime": record.get("regime") or "ranging",
+            "macro_regime": record.get("macro_regime"),
+            "macro_multiplier": float(record.get("macro_multiplier") or 1.0),
+            "dip_type": record.get("dip_type"),
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
             "order_id": record.get("order_id"),
@@ -246,6 +281,7 @@ def run_signal_cycle():
         })
         return
     regime          = detect_regime()
+    macro_regime, macro_meta = detect_macro_regime(return_meta=True)
     effective_profile = _apply_execution_overrides(
         get_effective_profile(PROFILE, portfolio_state)
     )
@@ -255,7 +291,9 @@ def run_signal_cycle():
 
     log_event("INFO", "cycle_start", {
         "regime": regime, "equity": portfolio_state["equity"],
-        "vix": portfolio_state["vix"], "tickers": TICKERS
+        "vix": portfolio_state["vix"], "tickers": TICKERS,
+        "horizon": HORIZON, "macro_regime": macro_regime,
+        "macro_meta": macro_meta,
     })
 
     if not TICKERS:
@@ -264,12 +302,23 @@ def run_signal_cycle():
         })
         return
 
-    for ticker in TICKERS:
-        try:
-            _process_ticker(ticker, regime, weights, effective_profile,
-                            portfolio_state, recent_trades)
-        except Exception as e:
-            log_event("ERROR", f"ticker_error_{ticker}", {"error": str(e)})
+    if _allows_intraday():
+        for ticker in TICKERS:
+            try:
+                _process_ticker(ticker, regime, weights, effective_profile,
+                                portfolio_state, recent_trades)
+            except Exception as e:
+                log_event("ERROR", f"ticker_error_{ticker}", {"error": str(e)})
+
+    _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile)
+
+    if _should_run_swing_recheck():
+        run_swing_cycle(
+            portfolio_state=portfolio_state,
+            profile=effective_profile,
+            regime=regime,
+            macro_regime=macro_regime,
+        )
 
     # Check open trades for stop-loss / time exit
     _check_exits(portfolio_state, effective_profile)
@@ -311,6 +360,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "atr_pct":                atr_data.get("atr_pct"),
         "earnings_days":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("days_to_earnings"),
         "earnings_mult":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("earnings_multiplier", 1.0),
+        "macro_regime":           signal_result.get("macro_regime"),
+        "macro_multiplier":       signal_result.get("macro_multiplier", 1.0),
         "regime":                 regime,
         "vix":                    portfolio_state["vix"],
         "gated":                  not gate_ok,
@@ -439,6 +490,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
         "regime":        regime,
+        "macro_regime":  signal_result.get("macro_regime"),
+        "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
+        "horizon":       "short",
         "llm_conviction": conviction,
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
@@ -459,6 +513,8 @@ def _check_exits(portfolio_state, profile):
     now = datetime.utcnow()
 
     for ticker, trade in list(_open_trades.items()):
+        if trade.get("horizon") == "swing":
+            continue
         try:
             bar = yf.download(ticker, period="1d", interval="1m",
                              progress=False, auto_adjust=True)
@@ -466,7 +522,7 @@ def _check_exits(portfolio_state, profile):
                 continue
             current_price = float(bar["Close"].squeeze().iloc[-1])
             entry_time    = trade["entry_time"]
-            hold_elapsed  = (now - entry_time).seconds / 60
+            hold_elapsed  = (now - entry_time).total_seconds() / 60
             stop_price    = trade["stop_price"]
             take_profit_price = trade.get("take_profit_price")
             hold_target   = trade["hold_minutes"]
@@ -537,13 +593,16 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
         "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
-        "hold_minutes":    int((datetime.utcnow() - trade["entry_time"]).seconds / 60),
+        "hold_minutes":    int((datetime.utcnow() - trade["entry_time"]).total_seconds() / 60),
         "exit_reason":     exit_reason,
         "regime":          trade["regime"],
+        "macro_regime":    trade.get("macro_regime"),
+        "macro_multiplier": trade.get("macro_multiplier"),
         "composite_score": trade["composite_score"],
         "llm_conviction":  trade["llm_conviction"],
         "llm_rationale":   trade["llm_rationale"],
         "signals_json":    trade["signals_json"],
+        "dip_type":        trade.get("dip_type"),
         "order_id":        trade.get("order_id"),
         "close_order_id":  result.get("order_id"),
         "close_error":     close_error,
@@ -551,7 +610,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "slippage_eur":    round(slippage, 4),
         "llm_cost_eur":    llm_cost,
         "risk_profile":    PROFILE.get("_name", "moderate"),
-        "horizon":         HORIZON,
+        "horizon":         trade.get("horizon") or HORIZON,
     }
 
     insert_trade(trade_record)
@@ -580,6 +639,268 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "ticker": ticker, "net_pnl_pct": round(net_pnl_pct, 3),
         "exit_reason": exit_reason, "hold_min": trade_record["hold_minutes"]
     })
+
+
+def _current_daily_price(ticker: str) -> float | None:
+    try:
+        import yfinance as yf
+        bar = yf.download(ticker, period="5d", interval="1d",
+                          progress=False, auto_adjust=True)
+        if bar.empty:
+            return None
+        return float(bar["Close"].squeeze().iloc[-1])
+    except Exception:
+        return None
+
+
+def _stop_pct_from_atr(ticker: str, multiplier: float, fallback: float) -> tuple[float, dict]:
+    atr_data = compute_atr(ticker)
+    atr_pct = atr_data.get("atr_pct")
+    if atr_pct:
+        return max(0.5, min(12.0, float(atr_pct) * multiplier)), atr_data
+    return fallback, atr_data
+
+
+def _submit_horizon_order(
+    ticker: str,
+    side: str,
+    conviction: float,
+    profile: dict,
+    portfolio_state: dict,
+    regime: str,
+    horizon: str,
+    stop_loss_pct: float,
+    hold_days: int = None,
+    hold_minutes: int = None,
+    size_multiplier: float = 1.0,
+    composite_score: float = 0.0,
+    signals_json: dict = None,
+    rationale: str = "",
+    macro_regime: str = None,
+    macro_multiplier: float = None,
+    dip_type: str = None,
+) -> dict:
+    capital_base = _trading_capital(portfolio_state["equity"])
+    size_eur = compute_position_size(capital_base, profile, conviction) * size_multiplier
+    max_notional = _env_float(
+        "MAX_NOTIONAL_PER_TRADE_EUR",
+        profile.get("max_trade_notional_eur", size_eur),
+    )
+    size_eur = min(size_eur, max_notional)
+
+    current_price = _current_daily_price(ticker)
+    if not current_price:
+        log_event("WARN", "price_unavailable", {"ticker": ticker, "horizon": horizon})
+        return {"error": "price_unavailable"}
+
+    qty = size_eur / current_price
+    take_profit_pct = profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2)
+    order = submit_market_order(
+        ticker=ticker,
+        side=side.lower(),
+        qty=round(qty, 6),
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        current_price=current_price,
+    )
+    if "error" in order:
+        log_event("ERROR", "order_failed", {
+            "ticker": ticker,
+            "horizon": horizon,
+            "error": order["error"],
+        })
+        return order
+
+    if side.upper() == "BUY":
+        stop_price = current_price * (1 - stop_loss_pct / 100)
+        take_profit_price = current_price * (1 + take_profit_pct / 100)
+    else:
+        stop_price = current_price * (1 + stop_loss_pct / 100)
+        take_profit_price = current_price * (1 - take_profit_pct / 100)
+
+    record = {
+        "entry_time": datetime.utcnow(),
+        "entry_price": current_price,
+        "quantity": order.get("qty", round(qty, 6)),
+        "stop_price": stop_price,
+        "take_profit_price": take_profit_price,
+        "hold_minutes": hold_minutes or 0,
+        "hold_days": hold_days or 0,
+        "size_eur": size_eur,
+        "side": side.upper(),
+        "composite_score": composite_score,
+        "signals_json": signals_json or {},
+        "regime": regime,
+        "macro_regime": macro_regime,
+        "macro_multiplier": macro_multiplier,
+        "horizon": horizon,
+        "dip_type": dip_type,
+        "llm_conviction": conviction,
+        "llm_rationale": rationale,
+        "order_id": order.get("order_id"),
+    }
+    _open_trades[ticker] = record
+    save_open_trade(ticker, record)
+
+    log_event("TRADE", "order_submitted", {
+        "ticker": ticker,
+        "side": side.upper(),
+        "horizon": horizon,
+        "size_eur": round(size_eur, 2),
+        "conviction": conviction,
+        "composite": composite_score,
+        "order_class": order.get("order_class"),
+        "rationale": rationale,
+        "dip_type": dip_type,
+    })
+    return order
+
+
+def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: str, profile: dict):
+    opportunities = scan_for_extreme_dips(tickers, portfolio_state, macro_regime)
+    log_event("SIGNAL", "extreme_dip_scan_complete", {
+        "macro_regime": macro_regime,
+        "tickers_scanned": len(tickers),
+        "opportunities": len(opportunities),
+    })
+
+    open_tickers = _open_position_tickers(portfolio_state) | set(_open_trades.keys())
+    for opp in opportunities:
+        log_event("SIGNAL", "extreme_dip_detected", opp)
+        ticker = opp["ticker"]
+        if ticker in open_tickers:
+            log_event("INFO", "extreme_dip_skipped_open_position", {
+                "ticker": ticker,
+                "dip_score": opp.get("dip_score"),
+            })
+            continue
+        stop_pct, atr_data = _stop_pct_from_atr(
+            ticker,
+            multiplier=opp.get("stop_multiplier", 2.0),
+            fallback=profile.get("stop_loss_pct", 2.0) * 2,
+        )
+        order = _submit_horizon_order(
+            ticker=ticker,
+            side="BUY",
+            conviction=opp.get("conviction", 0.85),
+            profile=profile,
+            portfolio_state=portfolio_state,
+            regime="news_driven" if macro_regime == "geopolitical_shock" else "ranging",
+            horizon="swing",
+            stop_loss_pct=stop_pct,
+            hold_days=opp.get("hold_days", 3),
+            size_multiplier=opp.get("size_multiplier", 1.5),
+            composite_score=opp.get("dip_score", 0.0),
+            signals_json={"extreme_dip": {"score": opp.get("dip_score", 0.0), "meta": opp}},
+            rationale=f"{opp.get('type')} dip buy: {opp.get('pct_from_high')}% below 20d high, RSI {opp.get('rsi')}",
+            macro_regime=macro_regime,
+            macro_multiplier=1.0,
+            dip_type=opp.get("type"),
+        )
+        if "error" not in order:
+            open_tickers.add(ticker)
+
+
+def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
+                    regime: str = None, macro_regime: str = None):
+    """Daily swing re-evaluation and entry scan for SWING_TICKERS."""
+    if not _allows_swing():
+        return
+    if not SWING_TICKERS:
+        return
+
+    portfolio_state = portfolio_state or _get_portfolio_state()
+    if portfolio_state.get("broker_error"):
+        log_event("ERROR", "swing_broker_account_unavailable", {
+            "error": portfolio_state["broker_error"],
+        })
+        return
+
+    profile = profile or _apply_execution_overrides(get_effective_profile(PROFILE, portfolio_state))
+    regime = regime or detect_regime()
+    if macro_regime is None:
+        macro_regime = detect_macro_regime()
+
+    _hydrate_open_trades()
+    open_tickers = _open_position_tickers(portfolio_state) | set(_open_trades.keys())
+    log_event("INFO", "swing_cycle_start", {
+        "tickers": SWING_TICKERS,
+        "macro_regime": macro_regime,
+        "open_tickers": sorted(open_tickers),
+    })
+
+    # Re-evaluate existing swing positions.
+    for ticker, trade in list(_open_trades.items()):
+        if trade.get("horizon") != "swing":
+            continue
+        current_price = _current_daily_price(ticker)
+        if not current_price:
+            continue
+        score, meta = compute_swing_score(ticker)
+        elapsed_days = max(0, (datetime.utcnow() - trade["entry_time"]).days)
+        exit_reason = None
+        if trade["side"] == "BUY":
+            if current_price <= trade["stop_price"]:
+                exit_reason = "stop_loss"
+            elif trade.get("take_profit_price") and current_price >= trade["take_profit_price"]:
+                exit_reason = "take_profit"
+            elif score < -0.15:
+                exit_reason = "signal_reversal"
+        elif trade["side"] == "SELL" and score > 0.15:
+            exit_reason = "signal_reversal"
+        if elapsed_days >= int(trade.get("hold_days") or 3) and exit_reason is None:
+            exit_reason = "time_exit"
+        log_event("SIGNAL", "swing_recheck", {
+            "ticker": ticker,
+            "score": round(score, 4),
+            "elapsed_days": elapsed_days,
+            "hold_days": trade.get("hold_days"),
+            "exit_reason": exit_reason,
+            "meta": meta,
+        })
+        if exit_reason:
+            _close_trade(ticker, trade, current_price, exit_reason)
+
+    open_tickers = _open_position_tickers(portfolio_state) | set(_open_trades.keys())
+    for ticker in SWING_TICKERS:
+        if ticker in open_tickers:
+            continue
+        score, meta = compute_swing_score(ticker)
+        action = _deterministic_action(score)
+        if action == "SELL" and not profile.get("allow_short_selling", False):
+            log_event("INFO", "swing_short_gated", {"ticker": ticker, "score": score})
+            continue
+        min_score = float(os.getenv("SWING_MIN_SCORE", profile.get("min_signal_score", 0.25)))
+        if abs(score) < min_score:
+            log_event("INFO", "swing_signal_below_threshold", {
+                "ticker": ticker,
+                "score": round(score, 4),
+                "min_score": min_score,
+            })
+            continue
+        stop_pct, atr_data = _stop_pct_from_atr(
+            ticker,
+            multiplier=2.0,
+            fallback=profile.get("stop_loss_pct", 2.0) * 2,
+        )
+        conviction = max(0.65, min(0.90, abs(score)))
+        _submit_horizon_order(
+            ticker=ticker,
+            side=action,
+            conviction=conviction,
+            profile=profile,
+            portfolio_state=portfolio_state,
+            regime=regime,
+            horizon="swing",
+            stop_loss_pct=stop_pct,
+            hold_days=_env_int("SWING_HOLD_DAYS", 3),
+            size_multiplier=1.0,
+            composite_score=score,
+            signals_json={"swing_score": {"score": score, "meta": meta}, "atr": {"score": 0, "meta": atr_data}},
+            rationale="daily swing score entry",
+            macro_regime=macro_regime,
+            macro_multiplier=1.0,
+        )
 
 
 def _save_snapshot(portfolio_state, regime):

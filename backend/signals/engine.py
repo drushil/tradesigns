@@ -806,6 +806,247 @@ def put_call_ratio_score(ticker: str) -> tuple[float, dict]:
     return result
 
 
+# ── Swing score (daily bars — for multi-day holds) ────────────────────────────
+
+def compute_swing_score(ticker: str) -> tuple[float, dict]:
+    """
+    Daily-bar MACD + RSI + trend for multi-day swing positions.
+    Uses period='3mo', interval='1d'.  Returns score -1 to +1.
+    """
+    try:
+        df = _get_bars(ticker, period="3mo", interval="1d")
+        if df is None or len(df) < 30:
+            return 0.0, {"error": "insufficient_data"}
+
+        close = df["Close"].squeeze()
+
+        # Daily RSI
+        rsi       = compute_rsi(close, 14)
+        latest_rsi = float(rsi.iloc[-1])
+        if latest_rsi < 30:
+            rsi_score = 0.7
+        elif latest_rsi > 70:
+            rsi_score = -0.7
+        else:
+            rsi_score = (50 - latest_rsi) / 50 * 0.5
+
+        # Daily MACD
+        ema_fast = close.ewm(span=12, adjust=False).mean()
+        ema_slow = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        hist = macd_line - signal_line
+        latest_hist  = float(hist.iloc[-1])
+        prev_hist    = float(hist.iloc[-2]) if len(hist) > 1 else 0.0
+        latest_price = float(close.iloc[-1])
+        hist_pct     = latest_hist / latest_price * 100 if latest_price else 0.0
+        crossed_up   = prev_hist <= 0 < latest_hist
+        crossed_down = prev_hist >= 0 > latest_hist
+        macd_score   = _clamp(hist_pct / 0.5)
+        if crossed_up:
+            macd_score = _clamp(macd_score + 0.4)
+        elif crossed_down:
+            macd_score = _clamp(macd_score - 0.4)
+
+        # 20/50-day trend alignment
+        sma20 = float(close.rolling(20).mean().iloc[-1])
+        sma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else sma20
+        if latest_price > sma20 > sma50:
+            trend_score = 0.5
+        elif latest_price < sma20 < sma50:
+            trend_score = -0.5
+        else:
+            trend_score = 0.0
+
+        composite = _clamp(rsi_score * 0.35 + macd_score * 0.40 + trend_score * 0.25)
+        return composite, {
+            "rsi":          round(latest_rsi, 1),
+            "rsi_score":    round(rsi_score, 3),
+            "macd_hist":    round(latest_hist, 5),
+            "macd_score":   round(macd_score, 3),
+            "trend_score":  round(trend_score, 3),
+            "price":        round(latest_price, 4),
+            "sma20":        round(sma20, 4),
+            "sma50":        round(sma50, 4),
+            "crossed_up":   crossed_up,
+            "crossed_down": crossed_down,
+        }
+    except Exception as e:
+        return 0.0, {"error": str(e)[:80]}
+
+
+# ── Macro regime classifier ───────────────────────────────────────────────────
+
+_macro_regime_cache: dict = {}
+_MACRO_REGIME_TTL = 3600  # 1 hour
+
+# Known FOMC decision dates 2025-2026 (updated annually)
+_FOMC_DATES = [
+    "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18",
+    "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
+    "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
+    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+]
+
+_GEO_KEYWORDS    = ["war", "conflict", "sanctions", "blockade", "strait",
+                    "opec", "crisis", "attack", "invasion", "missile"]
+ENERGY_TICKERS   = {"XLE", "XOM", "USO", "CVX", "COP", "OXY"}
+TECH_TICKERS     = {"QQQ", "NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL"}
+MOMENTUM_TICKERS = {"QQQ", "NVDA", "COIN", "ARKK"}
+SAFE_TICKERS     = {"GLD", "TLT"}
+
+
+def _pct_change_last_two(df: pd.DataFrame) -> float:
+    close = df["Close"].squeeze()
+    if len(close) < 2:
+        return 0.0
+    prev = float(close.iloc[-2])
+    last = float(close.iloc[-1])
+    return (last - prev) / prev * 100 if prev else 0.0
+
+
+def _recent_geo_news_velocity() -> dict:
+    """
+    Approximate 24h geopolitical-news velocity from free yfinance headlines.
+    Baseline is configurable because free headline feeds do not expose enough
+    stable long-horizon history for a robust per-source baseline.
+    """
+    baseline = float(os.getenv("GEO_NEWS_BASELINE_24H", "1.0"))
+    now = datetime.utcnow()
+    recent_hits = 0
+    total_recent = 0
+
+    for proxy in ("XLE", "USO", "SPY", "QQQ"):
+        try:
+            for item in (yf.Ticker(proxy).news or [])[:20]:
+                title = (item.get("title") or "").lower()
+                provider_time = item.get("providerPublishTime") or item.get("provider_publish_time")
+                if provider_time:
+                    published = datetime.utcfromtimestamp(int(provider_time))
+                    if (now - published).total_seconds() > 24 * 3600:
+                        continue
+                total_recent += 1
+                if any(kw in title for kw in _GEO_KEYWORDS):
+                    recent_hits += 1
+        except Exception:
+            continue
+
+    velocity = recent_hits / max(baseline, 0.1)
+    return {
+        "geo_recent_hits_24h": recent_hits,
+        "geo_total_recent_headlines": total_recent,
+        "geo_baseline_24h": baseline,
+        "geo_velocity_ratio": round(velocity, 2),
+    }
+
+
+def _fomc_calendar_window() -> Optional[dict]:
+    """
+    Use FRED's public releases page opportunistically, with known FOMC dates as
+    fallback. The FRED page is HTML and needs no API key.
+    """
+    today = datetime.utcnow().date()
+    date_candidates = set(_FOMC_DATES)
+    try:
+        resp = requests.get("https://fred.stlouisfed.org/releases", timeout=5)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+        if "FOMC" in text or "Federal Open Market Committee" in text:
+            # The releases page does not consistently expose a structured FOMC
+            # calendar, so this confirms reachability and falls through to the
+            # maintained fallback dates.
+            pass
+    except Exception:
+        pass
+
+    for date_str in date_candidates:
+        try:
+            fomc_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        diff = (fomc_date - today).days
+        if -1 <= diff <= 1:
+            return {"fomc_date": date_str, "days_to_fomc": diff}
+    return None
+
+
+def detect_macro_regime(return_meta: bool = False):
+    """
+    Returns (regime, metadata) where regime is one of:
+    'geopolitical_shock' | 'rate_shift' | 'risk_off' | 'risk_on' | 'normal'
+
+    Checked in priority order; result is cached for 1 hour.
+    """
+    now_ts = time.time()
+    if "macro" in _macro_regime_cache:
+        cached_ts, cached_result = _macro_regime_cache["macro"]
+        if now_ts - cached_ts < _MACRO_REGIME_TTL:
+            return cached_result if return_meta else cached_result[0]
+
+    meta: dict = {}
+
+    # ── 1. Geopolitical shock: energy move + geo news keywords ────────────────
+    try:
+        uso_df = yf.download("USO", period="5d", interval="1d",
+                             progress=False, auto_adjust=True)
+        xle_df = yf.download("XLE", period="5d", interval="1d",
+                             progress=False, auto_adjust=True)
+        oil_ret = 0.0
+        if not uso_df.empty and len(uso_df) >= 2:
+            oil_ret = _pct_change_last_two(uso_df)
+        if abs(oil_ret) <= 5 and not xle_df.empty and len(xle_df) >= 2:
+            oil_ret = _pct_change_last_two(xle_df)
+        news_velocity = _recent_geo_news_velocity()
+        meta.update(news_velocity)
+        meta["oil_proxy_change_pct"] = round(oil_ret, 2)
+
+        if abs(oil_ret) > 5 and news_velocity["geo_velocity_ratio"] > 5:
+            result = ("geopolitical_shock", meta)
+            _macro_regime_cache["macro"] = (now_ts, result)
+            return result if return_meta else result[0]
+    except Exception:
+        pass
+
+    # ── 2. Rate shift: FOMC ±1 day ────────────────────────────────────────────
+    try:
+        fomc = _fomc_calendar_window()
+        if fomc:
+            meta.update(fomc)
+            result = ("rate_shift", meta)
+            _macro_regime_cache["macro"] = (now_ts, result)
+            return result if return_meta else result[0]
+    except Exception:
+        pass
+
+    # ── 3. Risk-off / risk-on: SPY vs TLT daily returns ──────────────────────
+    try:
+        spy_df = yf.download("SPY", period="5d", interval="1d",
+                             progress=False, auto_adjust=True)
+        tlt_df = yf.download("TLT", period="5d", interval="1d",
+                             progress=False, auto_adjust=True)
+        if len(spy_df) >= 2 and len(tlt_df) >= 2:
+            spy_ret = _pct_change_last_two(spy_df)
+            tlt_ret = _pct_change_last_two(tlt_df)
+            meta["spy_ret_pct"] = round(spy_ret, 2)
+            meta["tlt_ret_pct"] = round(tlt_ret, 2)
+
+            if tlt_ret > 1.0 and spy_ret < -1.0:
+                result = ("risk_off", meta)
+                _macro_regime_cache["macro"] = (now_ts, result)
+                return result if return_meta else result[0]
+            if spy_ret > 1.0 and tlt_ret <= 0.0:
+                result = ("risk_on", meta)
+                _macro_regime_cache["macro"] = (now_ts, result)
+                return result if return_meta else result[0]
+    except Exception:
+        pass
+
+    result = ("normal", meta)
+    _macro_regime_cache["macro"] = (now_ts, result)
+    return result if return_meta else result[0]
+
+
 # ── Regime Detection ──────────────────────────────────────────────────────────
 
 def detect_regime(ticker: str = "SPY") -> str:
@@ -817,7 +1058,7 @@ def detect_regime(ticker: str = "SPY") -> str:
     try:
         vix_df = yf.download("^VIX", period="2d", interval="1h",
                              progress=False, auto_adjust=True)
-        vix = float(vix_df["Close"].iloc[-1]) if not vix_df.empty else 20.0
+        vix = float(vix_df["Close"].squeeze().iloc[-1]) if not vix_df.empty else 20.0
     except Exception:
         vix = 20.0
 
@@ -965,12 +1206,35 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
     composite *= earnings_multiplier
     composite = _clamp(composite)
 
+    # Macro regime modifier
+    macro_regime, macro_meta = detect_macro_regime(return_meta=True)
+    macro_multiplier = 1.0
+    ticker_up = ticker.upper()
+    if macro_regime == "geopolitical_shock":
+        if ticker_up in ENERGY_TICKERS:
+            macro_multiplier = 1.4   # amplify energy signal in oil crisis
+        elif ticker_up in TECH_TICKERS:
+            macro_multiplier = 0.7   # dampen tech — capital rotating away
+    elif macro_regime == "risk_off":
+        if ticker_up in SAFE_TICKERS:
+            macro_multiplier = 1.3   # boost GLD / TLT
+        else:
+            macro_multiplier = 0.85
+    elif macro_regime == "risk_on":
+        if ticker_up in MOMENTUM_TICKERS:
+            macro_multiplier = 1.2   # boost QQQ, NVDA, COIN
+
+    composite = _clamp(composite * macro_multiplier)
+
     regime = detect_regime()
 
     return {
         "ticker":              ticker,
         "composite_score":     round(composite, 4),
         "regime":              regime,
+        "macro_regime":        macro_regime,
+        "macro_multiplier":    macro_multiplier,
+        "macro_meta":          macro_meta,
         "signals":             results,
         "weights_used":        weights,
         "earnings_multiplier": earnings_multiplier,

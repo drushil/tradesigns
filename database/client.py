@@ -46,9 +46,12 @@ def insert_trade(trade: dict) -> dict:
     except Exception as e:
         base_columns = {
             "ticker", "side", "entry_price", "exit_price", "quantity",
+            "stop_price", "take_profit_price", "order_id", "close_order_id",
+            "close_error",
             "size_eur", "pnl_pct", "net_pnl_pct", "pnl_eur",
             "entry_time", "exit_time", "hold_minutes", "exit_reason",
-            "regime", "composite_score", "llm_conviction", "llm_rationale",
+            "regime", "macro_regime", "macro_multiplier", "dip_type",
+            "composite_score", "llm_conviction", "llm_rationale",
             "signals_json", "commission_eur", "slippage_eur", "llm_cost_eur",
             "risk_profile", "horizon",
         }
@@ -73,9 +76,14 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "stop_price": trade.get("stop_price"),
             "take_profit_price": trade.get("take_profit_price"),
             "hold_minutes": trade.get("hold_minutes"),
+            "hold_days": trade.get("hold_days"),
+            "horizon": trade.get("horizon"),
             "size_eur": trade.get("size_eur"),
             "order_id": trade.get("order_id"),
             "regime": trade.get("regime"),
+            "macro_regime": trade.get("macro_regime"),
+            "macro_multiplier": trade.get("macro_multiplier"),
+            "dip_type": trade.get("dip_type"),
             "composite_score": trade.get("composite_score"),
             "llm_conviction": trade.get("llm_conviction"),
             "llm_rationale": trade.get("llm_rationale"),
@@ -87,7 +95,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
         except Exception:
             fallback = {
                 k: v for k, v in record.items()
-                if k not in {"quantity", "hold_minutes"}
+                if k not in {"quantity", "hold_minutes", "hold_days", "horizon",
+                             "macro_regime", "macro_multiplier", "dip_type"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}
@@ -185,6 +194,7 @@ def insert_signal(signal: dict) -> dict:
             # Phase 1 additions
             "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
             "bollinger_score", "put_call_score", "atr_pct",
+            "macro_regime", "macro_multiplier",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:

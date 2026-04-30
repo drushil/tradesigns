@@ -229,6 +229,91 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     return True, "pass"
 
 
+def scan_for_extreme_dips(tickers: list, portfolio_state: dict = None,
+                          macro_regime: str = "normal") -> list:
+    """
+    Scans tickers for extreme dip-buy setups using daily bars.
+
+    Returns list of opportunity dicts sorted by dip_score descending.
+    Each dict contains: ticker, type, pct_from_high, rsi, dip_score,
+    conviction, hold_days, stop_multiplier, size_multiplier.
+    """
+    import numpy as np
+    import yfinance as yf
+
+    _ENERGY_DIPS = {"XLE", "XOM", "USO", "GLD"}
+    opportunities = []
+
+    for ticker in tickers:
+        try:
+            df = yf.download(ticker, period="30d", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df is None or df.empty or len(df) < 20:
+                continue
+
+            close     = df["Close"].squeeze()
+            price_now = float(close.iloc[-1])
+            high_20d  = float(close.rolling(20).max().iloc[-1])
+            pct_down  = (high_20d - price_now) / high_20d * 100 if high_20d > 0 else 0.0
+
+            # Daily RSI
+            delta = close.diff()
+            gain  = delta.clip(lower=0).rolling(14).mean()
+            loss  = (-delta.clip(upper=0)).rolling(14).mean()
+            rs    = gain / loss.replace(0, np.nan)
+            rsi   = float((100 - 100 / (1 + rs)).iloc[-1])
+            if np.isnan(rsi):
+                continue
+
+            is_energy = ticker.upper() in _ENERGY_DIPS
+
+            scan_base = {
+                "ticker":        ticker,
+                "price":         round(price_now, 4),
+                "high_20d":      round(high_20d, 4),
+                "pct_from_high": round(pct_down, 2),
+                "rsi":           round(rsi, 1),
+                "macro_regime":  macro_regime,
+            }
+
+            # Special case: macro-backed energy dip (the Apr-9 XLE scenario)
+            if macro_regime == "geopolitical_shock" and is_energy and pct_down > 20:
+                dip_score = min(1.0, pct_down / 20 * 0.6 + max(0, 30 - rsi) / 30 * 0.4)
+                if dip_score > 0.3:
+                    opportunities.append({
+                        **scan_base,
+                        "type":            "macro_energy_dip",
+                        "dip_score":       round(dip_score, 3),
+                        "conviction":      0.90,
+                        "hold_days":       3,
+                        "stop_multiplier": 2.0,
+                        "size_multiplier": 1.5,
+                    })
+                continue
+
+            # Standard extreme dip: >25% from 20-day high AND RSI < 28
+            if pct_down > 25 and rsi < 28:
+                # Skip if macro is hostile to this ticker
+                if macro_regime == "geopolitical_shock" and not is_energy:
+                    continue
+
+                dip_score = min(1.0, (pct_down / 25) * max(0, 30 - rsi) / 30)
+                if dip_score > 0.6:
+                    opportunities.append({
+                        **scan_base,
+                        "type":            "extreme_dip",
+                        "dip_score":       round(dip_score, 3),
+                        "conviction":      0.85,
+                        "hold_days":       3,
+                        "stop_multiplier": 2.0,
+                        "size_multiplier": 1.5,
+                    })
+        except Exception:
+            continue
+
+    return sorted(opportunities, key=lambda x: x["dip_score"], reverse=True)
+
+
 def compute_position_size(total_capital: float, profile: dict,
                            conviction: float, atr_data: dict = None) -> float:
     """

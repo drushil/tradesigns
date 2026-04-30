@@ -35,6 +35,10 @@ create table if not exists trades (
                         'signal_reversal','manual','circuit_breaker')),
     regime          text check (regime in (
                         'trending','ranging','high_vol','news_driven')),
+    macro_regime    text check (macro_regime in (
+                        'geopolitical_shock','rate_shift','normal','risk_off','risk_on',null)),
+    macro_multiplier numeric(5,2),
+    dip_type        text,
     composite_score numeric(6,4) check (composite_score between -1 and 1),
     llm_conviction  numeric(6,4) check (llm_conviction between 0 and 1),
     llm_rationale   text,
@@ -46,7 +50,7 @@ create table if not exists trades (
     slippage_eur    numeric(8,4) default 0,
     llm_cost_eur    numeric(8,5) default 0,
     risk_profile    text,
-    horizon         text check (horizon in ('short','mid','both'))
+    horizon         text check (horizon in ('short','mid','both','swing','intraday'))
 );
 
 create index if not exists idx_trades_created_at  on trades (created_at desc);
@@ -69,11 +73,16 @@ create table if not exists open_trades (
     stop_price          numeric(12,4),
     take_profit_price   numeric(12,4),
     hold_minutes        smallint,
+    hold_days           smallint,
+    horizon             text check (horizon in ('short','mid','both','swing','intraday',null)),
     size_eur            numeric(10,2),
     order_id            text,
     status              text not null default 'open' check (status in ('open','closed')),
     close_reason        text,
     regime              text,
+    macro_regime        text,
+    macro_multiplier    numeric(5,2),
+    dip_type            text,
     composite_score     numeric(6,4),
     llm_conviction      numeric(6,4),
     llm_rationale       text,
@@ -85,7 +94,12 @@ create index if not exists idx_open_trades_status on open_trades (status, create
 alter table if exists open_trades
     add column if not exists entry_time timestamptz,
     add column if not exists quantity numeric(14,6),
-    add column if not exists hold_minutes smallint;
+    add column if not exists hold_minutes smallint,
+    add column if not exists hold_days smallint,
+    add column if not exists horizon text,
+    add column if not exists macro_regime text,
+    add column if not exists macro_multiplier numeric(5,2),
+    add column if not exists dip_type text;
 
 -- 3. SIGNALS
 create table if not exists signals (
@@ -106,6 +120,9 @@ create table if not exists signals (
     earnings_days           smallint,
     earnings_mult           numeric(4,2) default 1.0,
     regime                  text,
+    macro_regime            text check (macro_regime in (
+                                'geopolitical_shock','rate_shift','normal','risk_off','risk_on',null)),
+    macro_multiplier        numeric(5,2),
     vix                     numeric(6,2),
     volume_vs_avg           numeric(6,2),
     gated                   boolean not null default false,
@@ -190,14 +207,19 @@ alter table if exists signal_weights
 alter table if exists signals
     add column if not exists bollinger_score  real,
     add column if not exists put_call_score   real,
-    add column if not exists atr_pct          numeric(6,4);
+    add column if not exists atr_pct          numeric(6,4),
+    add column if not exists macro_regime     text,
+    add column if not exists macro_multiplier numeric(5,2);
 
 alter table if exists trades
     add column if not exists stop_price numeric(12,4),
     add column if not exists take_profit_price numeric(12,4),
     add column if not exists order_id text,
     add column if not exists close_order_id text,
-    add column if not exists close_error text;
+    add column if not exists close_error text,
+    add column if not exists macro_regime text,
+    add column if not exists macro_multiplier numeric(5,2),
+    add column if not exists dip_type text;
 
 alter table if exists signal_weights
     add column if not exists bollinger_squeeze numeric(6,4) not null default 0.09 check (bollinger_squeeze between 0 and 1),

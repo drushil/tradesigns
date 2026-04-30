@@ -115,7 +115,7 @@ def render():
 # ── Live compute path ─────────────────────────────────────────────────────────
 
 def _compute_and_display_live(tickers, profile_name):
-    from backend.signals.engine import compute_all_signals, detect_regime
+    from backend.signals.engine import compute_all_signals, detect_regime, detect_macro_regime
     from database.client import get_latest_weights, insert_signal
     from config.risk_profiles import get_profile
 
@@ -123,8 +123,9 @@ def _compute_and_display_live(tickers, profile_name):
     saved_weights = get_latest_weights("global")
     weights       = saved_weights if saved_weights else profile["signal_weights"]
     regime        = detect_regime()
+    macro_regime  = detect_macro_regime()
 
-    st.markdown(f"**Regime:** `{regime}`")
+    st.markdown(f"**Regime:** `{regime}` · **Macro:** `{macro_regime}`")
     progress    = st.progress(0)
     all_results = {}
 
@@ -151,6 +152,8 @@ def _compute_and_display_live(tickers, profile_name):
                     "atr_pct":               atr_data.get("atr_pct"),
                     "earnings_days":         earnings_meta.get("days_to_earnings"),
                     "earnings_mult":         earnings_meta.get("earnings_multiplier", 1.0),
+                    "macro_regime":          result.get("macro_regime"),
+                    "macro_multiplier":      result.get("macro_multiplier", 1.0),
                     "regime":                regime,
                     "gated":                 False,
                     "llm_called":            False,
@@ -194,6 +197,7 @@ def _missing_new_signal_columns(rows) -> list:
     required = [
         "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
         "bollinger_score", "put_call_score", "atr_pct",
+        "macro_regime", "macro_multiplier",
     ]
     for row in rows:
         return [col for col in required if col not in row]
@@ -213,11 +217,13 @@ def _render_live_cards(results: dict, weights: dict):
         composite = result["composite_score"]
         action    = "🟢 BULLISH" if composite > 0.35 else ("🔴 BEARISH" if composite < -0.35 else "⚪ NEUTRAL")
         e_mult    = result.get("earnings_multiplier", 1.0)
+        macro_regime = result.get("macro_regime", "normal")
+        macro_mult = result.get("macro_multiplier", 1.0)
         e_days    = (result["signals"].get("earnings_proximity", {})
                      .get("meta", {}).get("days_to_earnings"))
 
         with st.expander(
-            f"**{ticker}** — `{composite:+.3f}` — {action}"
+            f"**{ticker}** — `{composite:+.3f}` — {action} — macro `{macro_regime}` ×{macro_mult:.2f}"
             + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""),
             expanded=True
         ):
@@ -362,8 +368,11 @@ def _render_db_cards(latest: dict):
         gated     = row.get("gated", False)
         e_days    = row.get("earnings_days")
         e_mult    = row.get("earnings_mult", 1.0) or 1.0
+        macro_regime = row.get("macro_regime") or "normal"
+        macro_mult = row.get("macro_multiplier", 1.0) or 1.0
 
         header = (f"**{ticker}** — `{composite:+.3f}` — {action}"
+                  + f" — macro `{macro_regime}` ×{macro_mult:.2f}"
                   + (" 🚫 GATED" if gated else "")
                   + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""))
 
@@ -400,7 +409,7 @@ def _render_db_cards(latest: dict):
             )
             atr_val = row.get("atr_pct")
             x2.metric("ATR %", f"{atr_val:.3f}%" if atr_val else "—")
-            x3.metric("Composite", f"{composite:+.3f}")
+            x3.metric("Macro", f"{macro_regime} ×{macro_mult:.2f}")
 
             if gated:
                 st.warning(f"Gated: {row.get('gate_reason', '—')}")

@@ -11,10 +11,14 @@ import streamlit as st
 # ── Streamlit Cloud secrets → env vars ───────────────────────────────────────
 # Streamlit Cloud stores secrets in st.secrets, not os.environ.
 # This block pushes them into os.environ so all existing code works unchanged.
-if hasattr(st, "secrets"):
-    for k, v in st.secrets.items():
-        if isinstance(v, str):
-            os.environ.setdefault(k, v)
+try:
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, str):
+                os.environ.setdefault(k, v)
+except st.errors.StreamlitSecretNotFoundError:
+    # Local runs can rely on .env; Streamlit Cloud still injects st.secrets.
+    pass
 
 st.set_page_config(
     page_title="AI Trading Agent",
