@@ -697,15 +697,26 @@ def compute_atr(ticker: str, period: int = 14) -> dict:
         atr_pct           = atr / current_price * 100
         suggested_stop_pct = max(0.5, min(4.0, 1.5 * atr_pct))
 
+        if atr_pct < 0.5:
+            vol_regime = "low"
+        elif atr_pct < 2.0:
+            vol_regime = "normal"
+        elif atr_pct < 4.0:
+            vol_regime = "high"
+        else:
+            vol_regime = "extreme"
+
         result = {
-            "atr_pct":           round(atr_pct, 4),
+            "atr_pct":            round(atr_pct, 4),
             "suggested_stop_pct": round(suggested_stop_pct, 4),
-            "atr_raw":           round(atr, 6),
+            "atr_raw":            round(atr, 6),
+            "current_price":      round(current_price, 4),
+            "volatility_regime":  vol_regime,
         }
         _atr_cache[cache_key] = (now, result)
         return result
     except Exception:
-        result = {"atr_pct": None, "suggested_stop_pct": None}
+        result = {"atr_pct": None, "suggested_stop_pct": None, "volatility_regime": None}
         _atr_cache[cache_key] = (now, result)
         return result
 

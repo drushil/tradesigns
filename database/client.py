@@ -55,6 +55,7 @@ def insert_trade(trade: dict) -> dict:
             "composite_score", "llm_conviction", "llm_rationale",
             "signals_json", "commission_eur", "slippage_eur", "llm_cost_eur",
             "risk_profile", "horizon",
+            "atr_at_entry", "r_multiple", "stop_pct_used",
         }
         fallback = {k: v for k, v in trade.items() if k in base_columns}
         try:
@@ -199,6 +200,7 @@ def insert_signal(signal: dict) -> dict:
             # Phase 1 additions
             "macd_score", "rel_strength_score", "earnings_days", "earnings_mult",
             "bollinger_score", "put_call_score", "atr_pct",
+            "atr_stop_pct", "volatility_regime",
             "macro_regime", "macro_multiplier",
             "regime_bull_bear", "shock_detected", "shock_classification",
         }

@@ -424,6 +424,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "bollinger_score":        signals_snap.get("bollinger_squeeze", {}).get("score", 0),
         "put_call_score":         signals_snap.get("put_call_ratio", {}).get("score", 0),
         "atr_pct":                atr_data.get("atr_pct"),
+        "atr_stop_pct":           atr_data.get("suggested_stop_pct"),
+        "volatility_regime":      atr_data.get("volatility_regime"),
         "earnings_days":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("days_to_earnings"),
         "earnings_mult":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("earnings_multiplier", 1.0),
         "macro_regime":           signal_result.get("macro_regime"),
@@ -699,6 +701,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "llm_cost_eur":    llm_cost,
         "risk_profile":    PROFILE.get("_name", "moderate"),
         "horizon":         trade.get("horizon") or HORIZON,
+        "atr_at_entry":    trade.get("atr_pct"),
+        "stop_pct_used":   round(float(trade.get("stop_pct") or PROFILE.get("stop_loss_pct", 2.5)), 4),
+        "r_multiple":      round(net_pnl_pct / max(float(trade.get("stop_pct") or PROFILE.get("stop_loss_pct", 2.5)), 0.1), 4),
     }
 
     insert_trade(trade_record)
