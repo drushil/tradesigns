@@ -156,7 +156,7 @@ def render():
             yaxis=dict(title="Sharpe", gridcolor="#1a1a1a"),
             showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.info(f"Need at least 20 closed trades for rolling Sharpe. ({len(trades)} so far)")
 
@@ -190,7 +190,7 @@ def render():
             xaxis=dict(title="Avg contribution", gridcolor="#1a1a1a"),
             yaxis=dict(title="", gridcolor="#1a1a1a"),
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
     else:
         st.info("No signal attribution data yet — trades need a signals_json column populated.")
 
@@ -230,4 +230,4 @@ def render():
             yaxis=dict(title="Trades",     gridcolor="#1a1a1a"),
             showlegend=False,
         )
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")

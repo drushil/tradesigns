@@ -58,14 +58,14 @@ def render():
     if ticker_list:
         rows = []
         for ticker in ticker_list:
-            profile = get_ticker_profile(ticker)
+            ticker_profile = get_ticker_profile(ticker)
             rows.append({
                 "Ticker": ticker,
-                "Name": profile.get("name", "Unknown"),
-                "Type": profile.get("type", "Unknown"),
-                "Agent context": profile.get("agent_role", "No summary configured"),
+                "Name": ticker_profile.get("name", "Unknown"),
+                "Type": ticker_profile.get("type", "Unknown"),
+                "Agent context": ticker_profile.get("agent_role", "No summary configured"),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
         with st.expander("Ticker summaries", expanded=False):
             for ticker in ticker_list:
@@ -81,7 +81,10 @@ def render():
     st.markdown("### Signal Weights (current priors)")
     st.caption("7 weighted signal scores plus Earnings Proximity as an 8th multiplier signal.")
 
-    sw = profile["signal_weights"]
+    sw = profile.get("signal_weights", {})
+    if not sw:
+        st.warning(f"No signal weights configured for `{profile_name}`.")
+        sw = RISK_PROFILES["moderate"].get("signal_weights", {})
     for sig, w in sw.items():
         st.markdown(f"""
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">

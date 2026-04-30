@@ -82,7 +82,7 @@ def render():
         xaxis=dict(tickformat=".0%", range=[0, 0.6], gridcolor="#1a1a1a"),
         yaxis=dict(gridcolor="rgba(0,0,0,0)"),
     )
-    st.plotly_chart(fig_w, use_container_width=True)
+    st.plotly_chart(fig_w, width="stretch")
 
     # ── Weight evolution chart ─────────────────────────────────────────────
     if len(weight_history) > 3:
@@ -110,7 +110,7 @@ def render():
             xaxis=dict(gridcolor="#1a1a1a"),
             legend=dict(orientation="h", y=-0.2),
         )
-        st.plotly_chart(fig_evo, use_container_width=True)
+        st.plotly_chart(fig_evo, width="stretch")
 
     st.markdown("---")
 
@@ -166,7 +166,7 @@ def render():
 
     col_gen, _ = st.columns([1, 3])
     with col_gen:
-        if st.button("🧠 Generate Insights Now", use_container_width=True):
+        if st.button("🧠 Generate Insights Now", width="stretch"):
             if trades and len(trades) >= 5:
                 with st.spinner("Claude Sonnet is analysing your trade history..."):
                     from backend.learning.engine import generate_weekly_insights

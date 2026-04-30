@@ -76,7 +76,7 @@ def render():
                 yaxis=dict(gridcolor="#1a1a1a"),
                 xaxis=dict(gridcolor="#1a1a1a"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("No portfolio history yet. Start the agent to begin trading.")
 
@@ -118,7 +118,7 @@ def render():
             yaxis=dict(gridcolor="#1a1a1a", ticksuffix="%"),
             xaxis=dict(gridcolor="#1a1a1a"),
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # ── Regime & signal breakdown ──────────────────────────────────────────
     from database.client import get_recent_trades

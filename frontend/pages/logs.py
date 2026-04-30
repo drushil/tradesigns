@@ -31,7 +31,7 @@ def render():
         limit = st.selectbox("Show", [50, 100, 200, 500], index=1)
     with col_ref:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh = st.button("🔄 Refresh", use_container_width=True)
+        refresh = st.button("🔄 Refresh", width="stretch")
 
     level_filter = None if sel_level == "All" else sel_level
     logs = get_logs(level=level_filter, limit=limit)

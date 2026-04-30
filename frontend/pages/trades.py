@@ -84,7 +84,7 @@ def render():
             fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
                               plot_bgcolor="rgba(0,0,0,0)", height=300,
                               margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     with col_exit:
         st.markdown("##### Exit Reason Breakdown")
@@ -96,7 +96,7 @@ def render():
                           color_discrete_sequence=["#00d4a0", "#ff5c5c", "#ffd166", "#888"])
             fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=300,
                                margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
     # ── Trade table ────────────────────────────────────────────────────────
     st.markdown("##### All Trades")
@@ -115,6 +115,6 @@ def render():
 
     st.dataframe(
         show_df.style.map(highlight_pnl, subset=["net_pnl_pct"] if "net_pnl_pct" in show_df.columns else []),
-        use_container_width=True,
+        width="stretch",
         height=400,
     )
