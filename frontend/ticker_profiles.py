@@ -32,6 +32,14 @@ TICKER_PROFILES = {
         "source": "iShares",
         "url": "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf",
     },
+    "IVV": {
+        "name": "iShares Core S&P 500 ETF",
+        "type": "Core US large-cap equity",
+        "summary": "Seeks to track the S&P 500 Index, giving low-cost exposure to large-capitalization US equities.",
+        "agent_role": "Core market beta, large-cap breadth, and SPY cross-check signal.",
+        "source": "iShares",
+        "url": "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf",
+    },
     "GLD": {
         "name": "SPDR Gold Shares",
         "type": "Gold commodity trust",
@@ -80,6 +88,14 @@ TICKER_PROFILES = {
         "source": "State Street",
         "url": "https://www.ssga.com/us/en/intermediary/etfs/the-energy-select-sector-spdr-fund-xle",
     },
+    "XOP": {
+        "name": "SPDR S&P Oil & Gas Exploration & Production ETF",
+        "type": "US oil and gas exploration and production",
+        "summary": "Tracks a modified equal-weighted index of US oil and gas exploration, production, refining, and marketing companies.",
+        "agent_role": "High-beta upstream energy, oil supply shock, and commodity-cycle signal.",
+        "source": "State Street",
+        "url": "https://www.ssga.com/us/en/individual/etfs/funds/spdr-s-p-oil-gas-exploration-production-etf-xop",
+    },
     "XLF": {
         "name": "Financial Select Sector SPDR ETF",
         "type": "S&P 500 financials sector",
@@ -95,6 +111,14 @@ TICKER_PROFILES = {
         "agent_role": "Concentrated AI hardware and chip-cycle momentum signal.",
         "source": "iShares",
         "url": "https://www.ishares.com/us/products/239705/ishares-phlx-semiconductor-etf",
+    },
+    "SMH": {
+        "name": "VanEck Semiconductor ETF",
+        "type": "Global semiconductor equity",
+        "summary": "Seeks to track US-listed companies involved in semiconductor production and equipment, with a bias toward large liquid industry leaders.",
+        "agent_role": "AI hardware, chip-cycle breadth, and semiconductor leadership signal.",
+        "source": "VanEck",
+        "url": "https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/",
     },
     "ARKK": {
         "name": "ARK Innovation ETF",
@@ -112,6 +136,14 @@ TICKER_PROFILES = {
         "source": "NVIDIA",
         "url": "https://www.nvidia.com/en-us/about-nvidia/",
     },
+    "AVGO": {
+        "name": "Broadcom",
+        "type": "Semiconductors and infrastructure software",
+        "summary": "Designs and supplies semiconductor devices and infrastructure software used across networking, broadband, wireless, storage, and enterprise infrastructure.",
+        "agent_role": "Custom AI silicon, networking, VMware software, and hyperscale infrastructure demand signal.",
+        "source": "Broadcom",
+        "url": "https://www.broadcom.com/company/about-us",
+    },
     "TSLA": {
         "name": "Tesla",
         "type": "Electric vehicles and energy",
@@ -127,6 +159,14 @@ TICKER_PROFILES = {
         "agent_role": "Digital ads, social engagement, AI capex, and mega-cap communication-services signal.",
         "source": "Meta",
         "url": "https://about.meta.com/company-info/",
+    },
+    "PLTR": {
+        "name": "Palantir Technologies",
+        "type": "AI software and data operations",
+        "summary": "Provides AIP, Foundry, and Apollo platforms for AI-driven decision-making, data operations, and software deployment across government and commercial customers.",
+        "agent_role": "AI software, government demand, defense technology, and enterprise operational-AI signal.",
+        "source": "Palantir",
+        "url": "https://www.palantir.com/docs/foundry/platform-overview/overview/",
     },
     "AAPL": {
         "name": "Apple",
@@ -191,6 +231,14 @@ TICKER_PROFILES = {
         "agent_role": "Global equity backdrop and US-vs-world risk comparison.",
         "source": "Vanguard",
         "url": "https://investor.vanguard.com/investment-products/etfs/profile/vt",
+    },
+    "VXUS": {
+        "name": "Vanguard Total International Stock ETF",
+        "type": "Total international equity market",
+        "summary": "Holds thousands of non-US stocks across developed and emerging markets for broad international equity exposure.",
+        "agent_role": "International diversification, dollar sensitivity, and US-vs-ex-US relative-strength signal.",
+        "source": "Vanguard",
+        "url": "https://investor.vanguard.com/investment-products/etfs/profile/vxus",
     },
     "VTI": {
         "name": "Vanguard Total Stock Market ETF",
