@@ -64,6 +64,14 @@ TICKER_PROFILES = {
         "source": "State Street",
         "url": "https://www.ssga.com/us/en/intermediary/etfs/the-technology-select-sector-spdr-fund-xlk",
     },
+    "VGT": {
+        "name": "Vanguard Information Technology ETF",
+        "type": "US information technology sector ETF",
+        "summary": "Tracks a market-cap-weighted index of US information technology companies across software, hardware, semiconductors, and IT services.",
+        "agent_role": "Broad technology sector momentum, AI infrastructure, software, and semiconductor cycle signal.",
+        "source": "Vanguard",
+        "url": "https://investor.vanguard.com/investment-products/etfs/profile/vgt",
+    },
     "XLE": {
         "name": "Energy Select Sector SPDR ETF",
         "type": "S&P 500 energy sector",
@@ -135,6 +143,22 @@ TICKER_PROFILES = {
         "agent_role": "Consumer demand, cloud growth, logistics, and mega-cap discretionary signal.",
         "source": "Amazon",
         "url": "https://www.aboutamazon.com/about-us/",
+    },
+    "GEV": {
+        "name": "GE Vernova",
+        "type": "Power, wind, and electrification",
+        "summary": "Provides technologies and services that generate, transfer, convert, store, and orchestrate electricity across power, wind, and electrification markets.",
+        "agent_role": "Grid buildout, power-generation demand, electrification, energy transition, and AI data-center power signal.",
+        "source": "GE Vernova",
+        "url": "https://www.gevernova.com/about",
+    },
+    "CAT": {
+        "name": "Caterpillar",
+        "type": "Construction, mining, and power equipment",
+        "summary": "Manufactures construction and mining equipment, off-highway engines, industrial gas turbines, and diesel-electric locomotives.",
+        "agent_role": "Industrial cycle, infrastructure capex, mining, energy, and data-center power equipment demand signal.",
+        "source": "Caterpillar",
+        "url": "https://www.caterpillar.com/en/company/strategy-purpose/about-caterpillar.html",
     },
     "COIN": {
         "name": "Coinbase",
