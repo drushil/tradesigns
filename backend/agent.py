@@ -127,11 +127,18 @@ def _get_portfolio_state() -> dict:
     except Exception:
         vix = 20.0
 
-    # Drawdown today: compare to yesterday's equity snapshot
+    # Drawdown: measured against STARTING_CAPITAL_EUR when a ceiling is set,
+    # otherwise day-over-day from yesterday's snapshot.
     from database.client import get_snapshots
-    snaps = get_snapshots(days=2)
-    prev_equity = snaps[1]["total_value_eur"] if len(snaps) >= 2 else equity
-    drawdown = max(0, (prev_equity - equity) / prev_equity * 100)
+    start_eur = float(os.getenv("STARTING_CAPITAL_EUR", "100"))
+    ceiling_eur = float(os.getenv("MAX_CAPITAL_DEPLOYED_EUR", "0") or "0")
+    if ceiling_eur > 0:
+        start_usd = start_eur * 1.08
+        drawdown = max(0, (start_usd - equity) / start_usd * 100)
+    else:
+        snaps = get_snapshots(days=2)
+        prev_equity = snaps[1]["total_value_eur"] if len(snaps) >= 2 else equity
+        drawdown = max(0, (prev_equity - equity) / prev_equity * 100)
 
     return {
         "equity":       round(equity, 2),

@@ -40,13 +40,25 @@ def get_account() -> dict:
     try:
         client  = _get_trading_client()
         account = client.get_account()
+
+        max_capital_eur = float(os.getenv("MAX_CAPITAL_DEPLOYED_EUR", "0") or "0")
+        alpaca_actual   = float(account.portfolio_value)
+        if max_capital_eur > 0:
+            max_capital_usd = max_capital_eur * 1.08
+            effective       = min(alpaca_actual, max_capital_usd)
+        else:
+            effective       = alpaca_actual
+            max_capital_usd = alpaca_actual
+
         return {
-            "cash":           float(account.cash),
-            "portfolio_value": float(account.portfolio_value),
-            "equity":          float(account.equity),
-            "buying_power":    float(account.buying_power),
-            "currency":        account.currency,
-            "status":          account.status,
+            "cash":               min(float(account.cash),        max_capital_usd),
+            "portfolio_value":    effective,
+            "equity":             effective,
+            "buying_power":       min(float(account.buying_power), max_capital_usd),
+            "currency":           account.currency,
+            "status":             account.status,
+            "alpaca_actual":      alpaca_actual,
+            "capital_ceiling_eur": max_capital_eur if max_capital_eur > 0 else None,
         }
     except Exception as e:
         return {"error": str(e)}
