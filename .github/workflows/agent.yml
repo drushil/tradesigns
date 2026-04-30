@@ -69,8 +69,7 @@ jobs:
           REDDIT_CLIENT_ID:     "${{ secrets.REDDIT_CLIENT_ID }}"
           REDDIT_CLIENT_SECRET: "${{ secrets.REDDIT_CLIENT_SECRET }}"
           REDDIT_USER_AGENT:    "${{ secrets.REDDIT_USER_AGENT }}"
-          TELEGRAM_BOT_TOKEN:   "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          TELEGRAM_CHAT_ID:     "${{ secrets.TELEGRAM_CHAT_ID }}"
+          DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
           RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
           INVESTMENT_HORIZON:   "${{ vars.INVESTMENT_HORIZON }}"
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
@@ -90,11 +89,10 @@ jobs:
               run_signal_cycle()
           PY
 
-      - name: Send Telegram summary
+      - name: Send Discord summary
         if: always()
         env:
           PYTHONPATH: "."
-          TELEGRAM_BOT_TOKEN: "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          TELEGRAM_CHAT_ID:   "${{ secrets.TELEGRAM_CHAT_ID }}"
+          DISCORD_WEBHOOK_URL: "${{ secrets.DISCORD_WEBHOOK_URL }}"
         run: |
-          python scripts/telegram_notify.py
+          python scripts/discord_notify.py

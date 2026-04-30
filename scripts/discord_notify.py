@@ -1,32 +1,25 @@
 """
-scripts/telegram_notify.py
-Sends a daily summary to Telegram after each agent cycle.
-Called by GitHub Actions after the agent run.
+scripts/discord_notify.py
+Sends a cycle summary to a Discord channel via webhook.
+Called by GitHub Actions after each agent run.
 """
 import os
 import requests
 from datetime import datetime
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 
 def send_message(text: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram not configured — skipping notification")
+    if not WEBHOOK_URL:
+        print("Discord webhook not configured — skipping notification")
         return
-    url  = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    resp = requests.post(url, json={
-        "chat_id":    CHAT_ID,
-        "text":       text,
-        "parse_mode": "Markdown",
-    }, timeout=10)
+    resp = requests.post(WEBHOOK_URL, json={"content": text}, timeout=10)
     return resp.ok
 
 
 def build_summary() -> str:
     try:
-        from database.client import get_account as _a
         from backend.broker.alpaca import get_account, get_positions
         from database.client import get_trade_stats, get_recent_trades
 
@@ -40,10 +33,10 @@ def build_summary() -> str:
         cum_pnl  = (equity - start) / start * 100
 
         lines = [
-            f"🤖 *Trading Agent — Cycle Update*",
+            f"🤖 **Trading Agent — Cycle Update**",
             f"🕐 {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
             f"",
-            f"💰 Portfolio: *€{equity:.2f}* ({cum_pnl:+.2f}% all-time)",
+            f"💰 Portfolio: **€{equity:.2f}** ({cum_pnl:+.2f}% all-time)",
             f"💵 Cash: €{cash:.2f}",
             f"📊 Trades today: {stats.get('total', 0)}",
             f"✅ Win rate: {stats.get('win_rate', 0):.0f}%",
@@ -52,7 +45,7 @@ def build_summary() -> str:
 
         if trades:
             lines.append("")
-            lines.append("*Recent trades:*")
+            lines.append("**Recent trades:**")
             for t in trades[:3]:
                 pnl   = t.get("net_pnl_pct", 0) or 0
                 emoji = "🟢" if pnl > 0 else "🔴"
