@@ -117,10 +117,13 @@ def render():
 
     st.markdown("---")
     st.markdown("### How to change configuration")
-    st.code("""# Edit your .env file:
-RISK_PROFILE=moderate        # conservative|cautious|moderate|growth|aggressive
-INVESTMENT_HORIZON=short     # short|mid|both
-TICKER_UNIVERSE=SPY,QQQ,GLD  # comma-separated tickers
-STARTING_CAPITAL_EUR=100     # your paper trading amount
+    st.caption("Current values shown below. Edit them in `.env`, GitHub Secrets, or Streamlit Cloud Secrets.")
+    st.code(f"""# Active configuration
+RISK_PROFILE={profile_name}        # conservative|cautious|moderate|growth|aggressive
+INVESTMENT_HORIZON={horizon}       # short|mid|both
+TICKER_UNIVERSE={tickers}          # comma-separated tickers
+STARTING_CAPITAL_EUR={capital}     # your paper trading amount
 
-# Then restart the agent:  python backend/agent.py""", language="bash")
+# New ticker summaries are auto-fetched, then cached in Supabase.
+# Local agent restart: python backend/agent.py
+# Streamlit Cloud/GitHub Actions: update secrets, then rerun/redeploy.""", language="bash")
