@@ -3,6 +3,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+from frontend.ticker_profiles import ticker_profile_html
 
 
 def render():
@@ -45,6 +46,11 @@ def render():
         fdf = fdf[fdf["net_pnl_pct"] > 0]
     elif sel_outcome == "Losses only":
         fdf = fdf[fdf["net_pnl_pct"] <= 0]
+
+    if sel_ticker != "All":
+        profile_html = ticker_profile_html(sel_ticker, compact=True)
+        if profile_html:
+            st.markdown(profile_html, unsafe_allow_html=True)
 
     st.markdown("---")
 

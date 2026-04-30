@@ -4,7 +4,7 @@ Supabase client wrapper. All DB operations go through here.
 Reads credentials from os.environ (which app.py populates from st.secrets).
 """
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 from supabase import create_client, Client
 
@@ -174,6 +174,104 @@ def get_recent_signals(hours: int = 24) -> list:
                .limit(200)
                .execute())
     return result.data or []
+
+
+# ── News sentiment cache ──────────────────────────────────────────────────────
+
+def get_news_cache(ticker: str, max_age_minutes: int = 15) -> Optional[dict]:
+    """
+    Persistent cache for news-derived sentiment.
+    Scheduled GitHub Action runs do not share process memory, so this preserves
+    the intended freshness window without repeatedly spending NewsAPI quota.
+    """
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("news_cache")
+                   .select("*")
+                   .eq("ticker", ticker.upper())
+                   .gte("fetched_at", cutoff)
+                   .order("fetched_at", desc=True)
+                   .limit(1)
+                   .execute())
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"[NEWS_CACHE_READ_FAILED] {str(e)[:200]}")
+        return None
+
+
+def upsert_news_cache(ticker: str, score: float, meta: dict, headlines: list) -> dict:
+    try:
+        db = get_client(write=True)
+        record = {
+            "ticker": ticker.upper(),
+            "sentiment_score": round(float(score), 4),
+            "meta_json": meta or {},
+            "headlines_json": headlines or [],
+            "fetched_at": datetime.utcnow().isoformat() + "Z",
+        }
+        result = db.table("news_cache").upsert(record, on_conflict="ticker").execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[NEWS_CACHE_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def record_newsapi_usage(ticker: str, calls: int = 1):
+    """Best-effort daily usage ledger for NewsAPI quota visibility."""
+    if calls <= 0:
+        return
+    try:
+        today = datetime.utcnow().date().isoformat()
+        db = get_client(write=True)
+        existing = (db.table("newsapi_usage")
+                     .select("calls")
+                     .eq("usage_date", today)
+                     .eq("ticker", ticker.upper())
+                     .limit(1)
+                     .execute())
+        total_calls = calls
+        if existing.data:
+            total_calls += int(existing.data[0].get("calls") or 0)
+        db.table("newsapi_usage").upsert({
+            "usage_date": today,
+            "ticker": ticker.upper(),
+            "calls": total_calls,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }, on_conflict="usage_date,ticker").execute()
+    except Exception as e:
+        print(f"[NEWSAPI_USAGE_WRITE_FAILED] {str(e)[:200]}")
+
+
+# ── Ticker profile cache ──────────────────────────────────────────────────────
+
+def get_ticker_profile_cache(ticker: str) -> Optional[dict]:
+    try:
+        db = get_client()
+        result = (db.table("ticker_profiles")
+                   .select("profile_json")
+                   .eq("ticker", ticker.upper())
+                   .limit(1)
+                   .execute())
+        if result.data:
+            return result.data[0].get("profile_json") or None
+    except Exception as e:
+        print(f"[TICKER_PROFILE_READ_FAILED] {str(e)[:200]}")
+    return None
+
+
+def upsert_ticker_profile_cache(ticker: str, profile: dict) -> dict:
+    try:
+        db = get_client(write=True)
+        result = db.table("ticker_profiles").upsert({
+            "ticker": ticker.upper(),
+            "profile_json": profile or {},
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }, on_conflict="ticker").execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[TICKER_PROFILE_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
 
 
 # ── Signal weights ────────────────────────────────────────────────────────────

@@ -141,6 +141,9 @@ def vwap_deviation_score(ticker: str) -> tuple[float, dict]:
 
 _news_cache: dict = {}
 _NEWS_CACHE_TTL = 900  # 15 minutes
+_NEWS_STALE_MAX_AGE = 12 * 60  # minutes
+_NEWS_FORCE_REFRESH_COMPOSITE = float(os.getenv("NEWS_FORCE_REFRESH_COMPOSITE", "0.18"))
+_NEWS_FORCE_REFRESH_SIGNAL = float(os.getenv("NEWS_FORCE_REFRESH_SIGNAL", "0.55"))
 
 _FINVIZ_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -163,6 +166,11 @@ def _fetch_newsapi_headlines(ticker: str) -> list:
         timeout=5,
     )
     resp.raise_for_status()
+    try:
+        from database.client import record_newsapi_usage
+        record_newsapi_usage(ticker)
+    except Exception:
+        pass
     articles = resp.json().get("articles", [])
     return [(a.get("title") or "").strip() for a in articles[:10] if a.get("title")]
 
@@ -203,19 +211,88 @@ def _fetch_stocktwits(ticker: str) -> tuple[list, int, int]:
     return bodies, bullish, bearish
 
 
-def news_sentiment_score(ticker: str) -> tuple[float, dict]:
+def _cached_news_result(ticker: str, max_age_minutes: int, force_refresh: bool) -> Optional[tuple[float, dict]]:
+    if force_refresh:
+        return None
+    try:
+        from database.client import get_news_cache
+        row = get_news_cache(ticker, max_age_minutes=max_age_minutes)
+    except Exception:
+        row = None
+    if not row:
+        return None
+
+    meta = dict(row.get("meta_json") or {})
+    meta.update({
+        "cache_hit": "supabase",
+        "cache_age_minutes": _cache_age_minutes(row.get("fetched_at")),
+        "stale_news": False,
+    })
+    return float(row.get("sentiment_score") or 0.0), meta
+
+
+def _stale_news_result(ticker: str) -> Optional[tuple[float, dict]]:
+    try:
+        from database.client import get_news_cache
+        row = get_news_cache(ticker, max_age_minutes=_NEWS_STALE_MAX_AGE)
+    except Exception:
+        row = None
+    if not row:
+        return None
+
+    meta = dict(row.get("meta_json") or {})
+    meta.update({
+        "cache_hit": "supabase_stale",
+        "cache_age_minutes": _cache_age_minutes(row.get("fetched_at")),
+        "stale_news": True,
+    })
+    return float(row.get("sentiment_score") or 0.0), meta
+
+
+def _cache_age_minutes(value) -> Optional[int]:
+    if not value:
+        return None
+    try:
+        fetched = datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        return max(0, int((datetime.utcnow() - fetched).total_seconds() // 60))
+    except ValueError:
+        return None
+
+
+def _save_news_result(ticker: str, score: float, meta: dict, headlines: list):
+    try:
+        from database.client import upsert_news_cache
+        upsert_news_cache(ticker, score, meta, headlines)
+    except Exception:
+        pass
+
+
+def news_sentiment_score(
+    ticker: str,
+    force_refresh: bool = False,
+    cache_ttl_seconds: int = _NEWS_CACHE_TTL,
+) -> tuple[float, dict]:
     """
     Combines yfinance + Finviz headlines + StockTwits messages (all free, no key).
     StockTwits explicit Bullish/Bearish tags are counted as direct signal;
     all text sources are also keyword-scored.
     Returns score -1 to +1.
     """
-    cache_key = ticker
+    cache_key = ticker.upper()
     now = time.time()
-    if cache_key in _news_cache:
+    if not force_refresh and cache_key in _news_cache:
         cached_time, cached_result = _news_cache[cache_key]
-        if now - cached_time < _NEWS_CACHE_TTL:
+        if now - cached_time < cache_ttl_seconds:
             return cached_result
+
+    cached = _cached_news_result(
+        cache_key,
+        max_age_minutes=max(1, int(cache_ttl_seconds / 60)),
+        force_refresh=force_refresh,
+    )
+    if cached:
+        _news_cache[cache_key] = (now, cached)
+        return cached
 
     positive_kw = ["surge", "soar", "rally", "beat", "record", "upgrade",
                    "bullish", "growth", "profit", "revenue", "strong",
@@ -225,6 +302,7 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
                    "drop", "underperform", "negative", "warning"]
 
     texts = []
+    sources = []
     st_bullish = st_bearish = 0
 
     # Source 1: yfinance; Source 1b: NewsAPI backup when yfinance returns nothing
@@ -233,17 +311,25 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
             title = (a.get("title") or "").strip()
             if title:
                 texts.append(title)
+        if texts:
+            sources.append("yfinance")
     except Exception:
         pass
     if not texts:
         try:
-            texts.extend(_fetch_newsapi_headlines(ticker))
+            newsapi_texts = _fetch_newsapi_headlines(ticker)
+            texts.extend(newsapi_texts)
+            if newsapi_texts:
+                sources.append("newsapi")
         except Exception:
             pass
 
     # Source 2: Finviz
     try:
-        texts.extend(_fetch_finviz_headlines(ticker))
+        finviz_texts = _fetch_finviz_headlines(ticker)
+        texts.extend(finviz_texts)
+        if finviz_texts:
+            sources.append("finviz")
     except Exception:
         pass
 
@@ -251,6 +337,8 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     try:
         bodies, st_bullish, st_bearish = _fetch_stocktwits(ticker)
         texts.extend(bodies)
+        if bodies or st_bullish or st_bearish:
+            sources.append("stocktwits")
     except Exception:
         pass
 
@@ -276,16 +364,28 @@ def news_sentiment_score(ticker: str) -> tuple[float, dict]:
     total = pos_count + neg_count
     score = _clamp((pos_count - neg_count) / total) if total else 0.0
 
+    if not unique:
+        stale = _stale_news_result(cache_key)
+        if stale:
+            _news_cache[cache_key] = (now, stale)
+            return stale
+
     meta = {
         "articles_found":   len(unique),
         "positive_hits":    pos_count,
         "negative_hits":    neg_count,
         "st_bullish":       st_bullish,
         "st_bearish":       st_bearish,
+        "sources":          sources,
         "latest_headline":  unique[0][:80] if unique else "",
+        "cache_hit":        False,
+        "stale_news":       False,
+        "force_refreshed":  force_refresh,
     }
 
     _news_cache[cache_key] = (now, (score, meta))
+    if unique:
+        _save_news_result(cache_key, score, meta, unique[:25])
     return score, meta
 
 
@@ -764,11 +864,6 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
         s2, m2 = 0.0, {"error": "signal_crashed"}
 
     try:
-        s3, m3 = news_sentiment_score(ticker)
-    except Exception:
-        s3, m3 = 0.0, {"error": "signal_crashed"}
-
-    try:
         s4, m4 = tape_aggression_score(ticker)
     except Exception:
         s4, m4 = 0.0, {"error": "signal_crashed"}
@@ -804,6 +899,37 @@ def compute_all_signals(ticker: str, weights: dict) -> dict:
         s10, m10 = 0.0, {"error": "signal_crashed"}
 
     atr_data = compute_atr(ticker)
+
+    pre_news_signals = {
+        "rsi_divergence":       s1,
+        "vwap_deviation":       s2,
+        "tape_aggression":      s4,
+        "order_book_imbalance": s5,
+        "macd_crossover":       s6,
+        "relative_strength":    s7,
+        "bollinger_squeeze":    s9,
+        "put_call_ratio":       s10,
+    }
+    pre_news_weight_total = sum(max(0.0, weights.get(k, 0.0)) for k in pre_news_signals)
+    if pre_news_weight_total <= 0:
+        pre_news_weight_total = 1.0
+    pre_news_composite = sum(
+        score * (max(0.0, weights.get(name, 0.0)) / pre_news_weight_total)
+        for name, score in pre_news_signals.items()
+    )
+    pre_news_composite *= m8.get("earnings_multiplier", 1.0)
+    pre_news_composite = _clamp(pre_news_composite)
+
+    force_news_refresh = (
+        abs(pre_news_composite) >= _NEWS_FORCE_REFRESH_COMPOSITE
+        or max(abs(s1), abs(s2), abs(s4), abs(s5)) >= _NEWS_FORCE_REFRESH_SIGNAL
+    )
+
+    try:
+        s3, m3 = news_sentiment_score(ticker, force_refresh=force_news_refresh)
+        m3["pre_news_composite"] = round(pre_news_composite, 4)
+    except Exception:
+        s3, m3 = 0.0, {"error": "signal_crashed"}
 
     results["rsi_divergence"]      = {"score": s1,  "meta": m1}
     results["vwap_deviation"]       = {"score": s2,  "meta": m2}

@@ -3,6 +3,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import os
+from frontend.ticker_profiles import ticker_profile_html
 
 # ── All 10 signals + earnings multiplier ─────────────────────────────────────
 ALL_SIGNALS = {
@@ -220,6 +221,10 @@ def _render_live_cards(results: dict, weights: dict):
             + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""),
             expanded=True
         ):
+            profile_html = ticker_profile_html(ticker, compact=True)
+            if profile_html:
+                st.markdown(profile_html, unsafe_allow_html=True)
+
             col_gauge, col_signals = st.columns([1, 2])
 
             # Gauge
@@ -363,6 +368,10 @@ def _render_db_cards(latest: dict):
                   + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""))
 
         with st.expander(header, expanded=False):
+            profile_html = ticker_profile_html(ticker, compact=True)
+            if profile_html:
+                st.markdown(profile_html, unsafe_allow_html=True)
+
             # Row 1: original 5
             st.markdown("**Original signals**")
             c1, c2, c3, c4, c5 = st.columns(5)

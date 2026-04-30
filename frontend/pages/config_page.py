@@ -1,6 +1,7 @@
 """frontend/pages/config_page.py — Live configuration viewer."""
 import streamlit as st
 import os
+from frontend.ticker_profiles import get_ticker_profile, ticker_profile_html
 
 
 def render():
@@ -48,6 +49,33 @@ def render():
               <span style="color:#888">{k}</span>
               <span style="color:#eee;font-family:'DM Mono',monospace">{v}</span>
             </div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("### Ticker Universe")
+    st.caption("What each symbol represents and why it is useful for signal learning.")
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if ticker_list:
+        rows = []
+        for ticker in ticker_list:
+            profile = get_ticker_profile(ticker)
+            rows.append({
+                "Ticker": ticker,
+                "Name": profile.get("name", "Unknown"),
+                "Type": profile.get("type", "Unknown"),
+                "Agent context": profile.get("agent_role", "No summary configured"),
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        with st.expander("Ticker summaries", expanded=False):
+            for ticker in ticker_list:
+                profile_html = ticker_profile_html(ticker, compact=True)
+                if profile_html:
+                    st.markdown(profile_html, unsafe_allow_html=True)
+                else:
+                    st.caption(f"{ticker}: no summary configured yet.")
+    else:
+        st.warning("No tickers configured.")
 
     st.markdown("---")
     st.markdown("### Signal Weights (current priors)")

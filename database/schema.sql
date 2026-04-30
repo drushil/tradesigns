@@ -108,7 +108,42 @@ create index if not exists idx_signals_ticker_time on signals (ticker, created_a
 create index if not exists idx_signals_active      on signals (created_at desc)
     where gated = false;
 
--- 4. SIGNAL_WEIGHTS
+-- 4. NEWS_CACHE
+create table if not exists news_cache (
+    id                bigint generated always as identity primary key,
+    ticker            text not null unique,
+    fetched_at        timestamptz not null default now(),
+    sentiment_score   numeric(6,4) not null check (sentiment_score between -1 and 1),
+    meta_json         jsonb not null default '{}'::jsonb,
+    headlines_json    jsonb not null default '[]'::jsonb
+);
+
+create index if not exists idx_news_cache_ticker_time
+    on news_cache (ticker, fetched_at desc);
+
+create table if not exists newsapi_usage (
+    id            bigint generated always as identity primary key,
+    usage_date    date not null,
+    ticker        text not null,
+    calls         integer not null default 0 check (calls >= 0),
+    updated_at    timestamptz not null default now(),
+    unique (usage_date, ticker)
+);
+
+create index if not exists idx_newsapi_usage_date
+    on newsapi_usage (usage_date desc);
+
+create table if not exists ticker_profiles (
+    id              bigint generated always as identity primary key,
+    ticker          text not null unique,
+    updated_at      timestamptz not null default now(),
+    profile_json    jsonb not null default '{}'::jsonb
+);
+
+create index if not exists idx_ticker_profiles_ticker
+    on ticker_profiles (ticker);
+
+-- 5. SIGNAL_WEIGHTS
 create table if not exists signal_weights (
     id              bigint generated always as identity primary key,
     updated_at      timestamptz not null default now(),
@@ -149,7 +184,7 @@ alter table if exists signal_weights
     add column if not exists bollinger_squeeze numeric(6,4) not null default 0.09 check (bollinger_squeeze between 0 and 1),
     add column if not exists put_call_ratio    numeric(6,4) not null default 0.05 check (put_call_ratio    between 0 and 1);
 
--- 5. LEARNINGS
+-- 6. LEARNINGS
 create table if not exists learnings (
     id              bigint generated always as identity primary key,
     created_at      timestamptz not null default now(),
@@ -161,7 +196,7 @@ create table if not exists learnings (
 
 create index if not exists idx_learnings_week on learnings (week_start desc);
 
--- 6. PORTFOLIO_SNAPSHOTS
+-- 7. PORTFOLIO_SNAPSHOTS
 create table if not exists portfolio_snapshots (
     id                  bigint generated always as identity primary key,
     snapshot_at         timestamptz not null default now(),
@@ -180,7 +215,7 @@ create table if not exists portfolio_snapshots (
 
 create index if not exists idx_snapshots_at on portfolio_snapshots (snapshot_at desc);
 
--- 7. AGENT_LOGS
+-- 8. AGENT_LOGS
 create table if not exists agent_logs (
     id          bigint generated always as identity primary key,
     logged_at   timestamptz not null default now(),
@@ -203,6 +238,9 @@ alter table trades              enable row level security;
 alter table open_trades         enable row level security;
 alter table signals             enable row level security;
 alter table signal_weights      enable row level security;
+alter table news_cache          enable row level security;
+alter table newsapi_usage       enable row level security;
+alter table ticker_profiles     enable row level security;
 alter table learnings           enable row level security;
 alter table portfolio_snapshots enable row level security;
 alter table agent_logs          enable row level security;
@@ -211,6 +249,9 @@ create policy "anon read trades"             on trades             for select to
 create policy "anon read open_trades"        on open_trades        for select to anon using (true);
 create policy "anon read signals"            on signals            for select to anon using (true);
 create policy "anon read signal_weights"     on signal_weights     for select to anon using (true);
+create policy "anon read news_cache"         on news_cache         for select to anon using (true);
+create policy "anon read newsapi_usage"      on newsapi_usage      for select to anon using (true);
+create policy "anon read ticker_profiles"    on ticker_profiles    for select to anon using (true);
 create policy "anon read learnings"          on learnings          for select to anon using (true);
 create policy "anon read portfolio_snapshots" on portfolio_snapshots for select to anon using (true);
 create policy "anon read agent_logs"         on agent_logs         for select to anon using (true);
