@@ -248,11 +248,22 @@ order by avg_net_pnl_pct desc;
 
 grant select on regime_performance to anon;
 
-create or replace view latest_signal_weights as
+drop view if exists latest_signal_weights;
+
+create view latest_signal_weights as
 select distinct on (regime)
-    regime, order_book, tape_aggression, rsi_divergence,
-    news_sentiment, vwap_deviation, macd_crossover, relative_strength,
-    trade_count, updated_at
+    regime,
+    order_book,
+    tape_aggression,
+    rsi_divergence,
+    news_sentiment,
+    vwap_deviation,
+    coalesce(macd_crossover,    0.10) as macd_crossover,
+    coalesce(relative_strength,  0.08) as relative_strength,
+    coalesce(bollinger_squeeze,  0.09) as bollinger_squeeze,
+    coalesce(put_call_ratio,     0.05) as put_call_ratio,
+    trade_count,
+    updated_at
 from signal_weights
 order by regime, updated_at desc;
 
