@@ -41,24 +41,27 @@ def get_account() -> dict:
         client  = _get_trading_client()
         account = client.get_account()
 
-        max_capital_eur = float(os.getenv("MAX_CAPITAL_DEPLOYED_EUR", "0") or "0")
-        alpaca_actual   = float(account.portfolio_value)
-        if max_capital_eur > 0:
-            max_capital_usd = max_capital_eur * 1.08
-            effective       = min(alpaca_actual, max_capital_usd)
-        else:
-            effective       = alpaca_actual
-            max_capital_usd = alpaca_actual
+        max_capital_eur = float(os.getenv("MAX_CAPITAL_DEPLOYED_EUR", "3000") or "3000")
+        fx_rate         = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+        max_capital_usd = max_capital_eur * fx_rate
+
+        alpaca_actual_usd = float(account.portfolio_value)
+        real_cash         = float(account.cash)
+
+        effective_portfolio = min(alpaca_actual_usd, max_capital_usd)
+        effective_cash      = min(real_cash, max_capital_usd)
 
         return {
-            "cash":               min(float(account.cash),        max_capital_usd),
-            "portfolio_value":    effective,
-            "equity":             effective,
-            "buying_power":       min(float(account.buying_power), max_capital_usd),
-            "currency":           account.currency,
-            "status":             account.status,
-            "alpaca_actual":      alpaca_actual,
-            "capital_ceiling_eur": max_capital_eur if max_capital_eur > 0 else None,
+            "cash":                round(effective_cash, 2),
+            "portfolio_value":     round(effective_portfolio, 2),
+            "equity":              round(effective_portfolio, 2),
+            "buying_power":        round(min(float(account.buying_power), max_capital_usd), 2),
+            "currency":            account.currency,
+            "status":              str(account.status),
+            "alpaca_actual_usd":   round(alpaca_actual_usd, 2),
+            "capital_ceiling_eur": max_capital_eur,
+            "capital_ceiling_usd": round(max_capital_usd, 2),
+            "fx_rate_used":        fx_rate,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -365,14 +368,26 @@ def compute_position_size(ticker: str, total_capital: float, profile: dict,
     max_size = total_capital * profile["max_position_pct"] / 100
     min_size = 5.0
 
-    return {
-        "ticker": ticker,
-        "size_eur": round(max(min_size, min(final_size, max_size)), 2),
-        "stop_pct": round(stop_distance_pct * 100, 3),
-        "target_risk_eur": round(target_risk_eur, 2),
+    size_eur = round(max(min_size, min(final_size, max_size)), 2)
+    fx_rate  = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+    result = {
+        "ticker":           ticker,
+        "size_eur":         size_eur,
+        "stop_pct":         round(stop_distance_pct * 100, 3),
+        "target_risk_eur":  round(target_risk_eur, 2),
         "conviction_scalar": round(conviction_scalar, 2),
-        "regime_scalar": regime_scalar,
-        "vix_scalar": round(vix_scalar, 2),
-        "atr_pct": round(atr_fraction * 100, 3),
-        "stop_multiplier": stop_multiplier,
+        "regime_scalar":    regime_scalar,
+        "vix_scalar":       round(vix_scalar, 2),
+        "atr_pct":          round(atr_fraction * 100, 3),
+        "stop_multiplier":  stop_multiplier,
     }
+    try:
+        import logging
+        logging.getLogger(__name__).info(
+            "position_sized ticker=%s size_eur=%.2f capital_base_eur=%.0f pct_of_capital=%.1f%%",
+            ticker, size_eur, total_capital / fx_rate,
+            size_eur / total_capital * 100 if total_capital else 0,
+        )
+    except Exception:
+        pass
+    return result

@@ -24,14 +24,15 @@ def render():
         return
 
     import os
-    equity  = account.get("portfolio_value", 0)
-    cash    = account.get("cash", 0)
-    start   = float(os.getenv("STARTING_CAPITAL_EUR", "100"))
-    ceiling = account.get("capital_ceiling_eur")
-    alpaca_actual = account.get("alpaca_actual")
-    # P&L base: convert EUR start to USD when ceiling is active, else use raw equity
-    start_base = start * 1.08 if ceiling else start
-    cum_pnl_pct = (equity - start_base) / start_base * 100 if start_base > 0 else 0
+    equity        = account.get("portfolio_value", 0)
+    cash          = account.get("cash", 0)
+    start         = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
+    fx_rate       = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+    ceiling       = account.get("capital_ceiling_eur")
+    alpaca_actual = account.get("alpaca_actual_usd")
+    # P&L base: equity is USD-capped, so compare against EUR start × fx_rate
+    start_base    = start * fx_rate if ceiling else start
+    cum_pnl_pct   = (equity - start_base) / start_base * 100 if start_base > 0 else 0
     try:
         from backend.signals.engine import detect_regime
         regime_state = detect_regime()
@@ -53,9 +54,10 @@ def render():
               delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade")
 
     if ceiling and alpaca_actual:
-        st.caption(
-            f"Capital ceiling active: agent uses €{ceiling:,.0f} "
-            f"(≈ ${ceiling * 1.08:,.0f}) · Alpaca account holds ${alpaca_actual:,.0f}"
+        st.info(
+            f"Simulating €{ceiling:,.0f} of the Alpaca paper account. "
+            f"Actual Alpaca balance: ${alpaca_actual:,.0f} "
+            f"(not used — ceiling applied at €{ceiling:,.0f} ≈ ${ceiling * fx_rate:,.0f})"
         )
 
     if regime_state:

@@ -127,18 +127,13 @@ def _get_portfolio_state() -> dict:
     except Exception:
         vix = 20.0
 
-    # Drawdown: measured against STARTING_CAPITAL_EUR when a ceiling is set,
-    # otherwise day-over-day from yesterday's snapshot.
-    from database.client import get_snapshots
-    start_eur = float(os.getenv("STARTING_CAPITAL_EUR", "100"))
-    ceiling_eur = float(os.getenv("MAX_CAPITAL_DEPLOYED_EUR", "0") or "0")
-    if ceiling_eur > 0:
-        start_usd = start_eur * 1.08
-        drawdown = max(0, (start_usd - equity) / start_usd * 100)
-    else:
-        snaps = get_snapshots(days=2)
-        prev_equity = snaps[1]["total_value_eur"] if len(snaps) >= 2 else equity
-        drawdown = max(0, (prev_equity - equity) / prev_equity * 100)
+    # Drawdown always measured against STARTING_CAPITAL_EUR converted to USD.
+    # This ensures the circuit breaker fires at the correct EUR loss amount
+    # regardless of the Alpaca paper account's $100k default.
+    start_eur = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
+    fx_rate   = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+    start_usd = start_eur * fx_rate
+    drawdown  = max(0.0, (start_usd - equity) / start_usd * 100)
 
     return {
         "equity":       round(equity, 2),
@@ -1020,19 +1015,13 @@ def _save_snapshot(portfolio_state, regime):
     snaps = get_snapshots(days=1)
     equity = portfolio_state["equity"]
 
-    # Safely handle None, empty strings, or missing keys. If starting capital is
-    # unset, anchor to current equity so a 100k Alpaca paper account does not
-    # look like a 99,900% gain from the old 100 EUR default.
-    raw_capital = os.getenv("STARTING_CAPITAL_EUR", "100")
-    if not raw_capital or raw_capital.strip() == "":
-        start_equity = equity
-    else:
-        start_equity = float(raw_capital)
-    if snaps:
-        start_equity = max(start_equity,
-                           snaps[-1].get("total_value_eur", start_equity))
+    # Baseline is STARTING_CAPITAL_EUR converted to USD so the comparison is
+    # apples-to-apples: equity (USD-capped) vs start_usd.
+    raw_capital = os.getenv("STARTING_CAPITAL_EUR", "3000")
+    fx_rate     = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+    start_equity_usd = float(raw_capital) * fx_rate if raw_capital and raw_capital.strip() else equity
 
-    cum_pnl = (equity - start_equity) / start_equity * 100 if start_equity else 0.0
+    cum_pnl = (equity - start_equity_usd) / start_equity_usd * 100 if start_equity_usd else 0.0
     cum_pnl = max(-9999.0, min(9999.0, cum_pnl))
 
     save_snapshot({
