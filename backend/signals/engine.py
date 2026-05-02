@@ -1241,28 +1241,18 @@ def scan_for_macro_shock(news_headlines: list[str]) -> dict:
     )
 
     try:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            from anthropic import Anthropic
-            client = Anthropic(api_key=api_key)
-            response = client.messages.create(
-                model=os.getenv("ANTHROPIC_HAIKU_MODEL", "claude-3-5-haiku-20241022"),
-                max_tokens=120,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content[0].text
-        else:
-            from groq import Groq
-            client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-            response = client.chat.completions.create(
-                model=os.getenv("GROQ_HAIKU_MODEL", "llama-3.1-8b-instant"),
-                max_tokens=120,
-                messages=[
-                    {"role": "system", "content": "Return JSON only."},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            raw = response.choices[0].message.content
+        from groq import Groq
+        client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        response = client.chat.completions.create(
+            model=os.getenv("GROQ_SHOCK_MODEL", "llama-3.1-8b-instant"),
+            max_tokens=120,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": "Return JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        raw = response.choices[0].message.content
 
         parsed = _parse_jsonish(raw)
         classification = str(parsed.get("classification", "NORMAL")).upper()
