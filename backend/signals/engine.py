@@ -990,7 +990,7 @@ ENERGY_TICKERS   = {"XLE", "XOM", "USO", "CVX", "COP", "OXY"}
 TECH_TICKERS     = {"QQQ", "NVDA", "MSFT", "GOOGL", "META", "AMZN", "AAPL"}
 MOMENTUM_TICKERS = {"QQQ", "NVDA", "COIN", "ARKK"}
 SAFE_TICKERS     = {"GLD", "TLT"}
-ETF_UNIVERSE     = {"SPY", "QQQ", "GLD", "TLT", "XLE", "XLV", "IWM", "XLF", "XLK"}
+ETF_UNIVERSE     = {"SPY", "QQQ", "VGT", "IWM", "GLD", "TLT", "XOP", "XLF", "XLV", "SMH"}
 _TICKER_SECTORS = {
     "SPY": {"market", "equities", "broad_market"},
     "QQQ": {"technology", "tech", "growth"},
