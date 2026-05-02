@@ -202,7 +202,7 @@ def insert_signal(signal: dict) -> dict:
             "bollinger_score", "put_call_score", "atr_pct",
             "atr_stop_pct", "volatility_regime",
             "macro_regime", "macro_multiplier",
-            "regime_bull_bear", "shock_detected", "shock_classification",
+            "market_regime", "regime_bull_bear", "shock_detected", "shock_classification",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:

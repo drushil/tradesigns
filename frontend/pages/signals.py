@@ -178,7 +178,7 @@ def _compute_and_display_live(tickers, profile_name):
                     "earnings_mult":         earnings_meta.get("earnings_multiplier", 1.0),
                     "macro_regime":          result.get("macro_regime"),
                     "macro_multiplier":      result.get("macro_multiplier", 1.0),
-                    "regime_bull_bear":      result.get("regime_bull_bear"),
+                    "market_regime":         result.get("market_regime") or result.get("regime_bull_bear"),
                     "shock_detected":        result.get("shock_detected", False),
                     "shock_classification":  result.get("shock_classification"),
                     "regime":                regime,
@@ -265,10 +265,13 @@ def _render_live_cards(results: dict, weights: dict):
         regime_badge = "⚡ SHOCK" if shock else ("🐂 BULL" if market_regime == "BULL" else ("🐻 BEAR" if market_regime == "BEAR" else "TRANSITIONING"))
         e_days    = (result["signals"].get("earnings_proximity", {})
                      .get("meta", {}).get("days_to_earnings"))
+        mr_meta   = result["signals"].get("mean_reversion", {}).get("meta", {})
+        mr_active = mr_meta.get("mean_reversion_signal", False)
 
         with st.expander(
             f"**{ticker}** — `{composite:+.3f}` — {action} — {regime_badge} — macro `{macro_regime}` ×{macro_mult:.2f}"
-            + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""),
+            + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else "")
+            + (" 🔄 MR" if mr_active else ""),
             expanded=True
         ):
             profile_html = ticker_profile_html(ticker, compact=True)
@@ -403,6 +406,14 @@ def _render_live_cards(results: dict, weights: dict):
                         f"(puts {pcr_meta.get('put_volume',0):,} / calls {pcr_meta.get('call_volume',0):,})"
                     )
 
+                # Mean reversion context
+                if mr_active:
+                    st.caption(
+                        f"🔄 Mean reversion: RSI2={mr_meta.get('rsi_2', '?')}, "
+                        f"{mr_meta.get('consecutive_down_days', '?')} down days · "
+                        f"Hold target: {mr_meta.get('hold_days', 2)} days"
+                    )
+
 
 # ── DB render (compact — 8 metrics in 2 rows) ─────────────────────────────────
 
@@ -420,8 +431,9 @@ def _render_db_cards(latest: dict):
         e_mult    = row.get("earnings_mult", 1.0) or 1.0
         macro_regime = row.get("macro_regime") or "normal"
         macro_mult = row.get("macro_multiplier", 1.0) or 1.0
-        market_regime = str(row.get("regime_bull_bear") or "transitioning").upper()
+        market_regime = str(row.get("market_regime") or row.get("regime_bull_bear") or "transitioning").upper()
         shock = bool(row.get("shock_detected"))
+        mr_active = bool(row.get("mean_rev_signal", False))
         regime_badge = "⚡ SHOCK" if shock else ("🐂 BULL" if market_regime == "BULL" else ("🐻 BEAR" if market_regime == "BEAR" else "TRANSITIONING"))
 
         if shock:
@@ -430,7 +442,8 @@ def _render_db_cards(latest: dict):
         header = (f"**{ticker}** — `{composite:+.3f}` — {action}"
                   + f" — {regime_badge} — macro `{macro_regime}` ×{macro_mult:.2f}"
                   + (" 🚫 GATED" if gated else "")
-                  + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else ""))
+                  + (f" 📅 Earnings in {e_days}d" if e_days is not None and e_days <= 5 else "")
+                  + (" 🔄 MR" if mr_active else ""))
 
         with st.expander(header, expanded=False):
             profile_html = ticker_profile_html(ticker, compact=True)
