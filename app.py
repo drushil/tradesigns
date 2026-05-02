@@ -51,6 +51,7 @@ PAGES = {
     "🔄 Trades":      "trades",
     "📈 Performance": "performance",
     "🧠 Learning":    "learning",
+    "💰 Yield & Sweep": "yield",
     "⚙️  Config":     "config_page",
     "📋 Agent Logs":  "logs",
 }

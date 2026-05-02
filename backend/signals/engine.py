@@ -1570,6 +1570,20 @@ def compute_all_signals(ticker: str, weights: dict,
             shock_multiplier = 0.5
         composite = _clamp(composite * shock_multiplier)
 
+    # Dividend proximity overlay — advisory, read from 1hr cache (no re-fetch per ticker)
+    div_opportunity = None
+    try:
+        from backend.dividends.scanner import get_cached_dividend_scan
+        div_opps  = get_cached_dividend_scan()
+        div_match = next((d for d in div_opps if d["ticker"] == ticker), None)
+        if div_match:
+            div_opportunity = div_match
+            # Mild positive lean when composite already bullish — never forces a buy
+            if composite > 0.2:
+                composite = min(1.0, composite * (1 + div_match["opportunity_score"] * 0.15))
+    except Exception:
+        pass
+
     return {
         "ticker":              ticker,
         "composite_score":     round(composite, 4),
@@ -1591,5 +1605,6 @@ def compute_all_signals(ticker: str, weights: dict,
         "atr_stop_multiplier": 2.0 if regime_state.intraday_regime == "high_vol" else 1.5,
         "mean_reversion_signal": bool(m11.get("mean_reversion_signal")),
         "mean_reversion_meta": m11,
+        "dividend_opportunity": div_opportunity,
         "computed_at":         datetime.utcnow().isoformat(),
     }

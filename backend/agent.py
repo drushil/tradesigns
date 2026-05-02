@@ -29,6 +29,9 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           save_snapshot, save_learning, log_event, get_logs,
                                           save_open_trade, get_open_trade_records,
                                           close_open_trade_record)
+from backend.sweep.agent         import (compute_sweep_plan, execute_sweep,
+                                          recall_sweep, has_active_sweep)
+from backend.dividends.scanner   import (scan_dividend_calendar, log_dividend_opportunity)
 
 def _env_value(key: str, default: str) -> str:
     value = os.getenv(key)
@@ -361,6 +364,23 @@ def run_signal_cycle():
             "hint": "Set TICKER_UNIVERSE or leave it unset to use SPY,QQQ,GLD"
         })
         return
+
+    # Recall sweep if cash was parked and we're about to trade
+    if has_active_sweep():
+        recall_result = recall_sweep(reason="signal_cycle_starting")
+        if recall_result.get("mode") == "simulation":
+            log_event("INFO", "recall_simulated", recall_result)
+
+    # Dividend opportunity scan (1hr cache — does not re-fetch per-ticker)
+    if os.getenv("DIVIDEND_SCAN_ENABLED", "true").lower() == "true":
+        try:
+            div_opps = scan_dividend_calendar(TICKERS)
+            for opp in div_opps:
+                if opp.get("opportunity_score", 0) > 0.5:
+                    log_dividend_opportunity(opp)
+                    log_event("INFO", "dividend_opportunity", opp)
+        except Exception as e:
+            log_event("WARN", "dividend_scan_failed", {"error": str(e)[:100]})
 
     if _allows_intraday():
         for ticker in TICKERS:
@@ -1042,6 +1062,40 @@ def _save_snapshot(portfolio_state, regime):
     })
 
 
+# ── Nightly sweep (after US market close) ────────────────────────────────────
+
+def run_nightly_sweep():
+    """Runs after US market close every weekday. Simulation on alpaca_paper, live on ibkr_live."""
+    try:
+        account = get_account()
+        if "error" in account:
+            log_event("ERROR", "nightly_sweep_account_error", {"error": account["error"]})
+            return
+
+        fx_rate = _env_float("EURUSD_RATE", 1.08)
+        positions = get_positions()
+        portfolio_state = {
+            "equity_eur":      round(account.get("portfolio_value", 0) / fx_rate, 2),
+            "cash_eur":        round(account.get("cash", 0) / fx_rate, 2),
+            "open_positions":  len(positions),
+            "pending_signals": 0,
+        }
+
+        plan   = compute_sweep_plan(portfolio_state)
+        result = execute_sweep(plan)
+
+        log_event("INFO", "nightly_sweep", result)
+
+        if result.get("mode") == "simulation" and result.get("should_sweep"):
+            _send_telegram_alert(
+                f"💰 Sweep simulation: Would park "
+                f"€{plan['sweepable_eur']:.0f} in {plan['sweep_ticker']}. "
+                f"Est. daily yield: €{plan['est_daily_yield']:.2f}"
+            )
+    except Exception as e:
+        log_event("ERROR", "nightly_sweep_failed", {"error": str(e)[:100]})
+
+
 # ── Weekly digest (called by scheduler) ──────────────────────────────────────
 
 def run_weekly_digest():
@@ -1078,10 +1132,22 @@ def start_scheduler():
     scheduler.add_job(run_weekly_digest, "cron",
                       day_of_week="sun", hour=18, minute=0)
 
+    # Nightly cash sweep: after US market close Mon-Fri
+    scheduler.add_job(run_nightly_sweep, "cron",
+                      day_of_week="mon-fri", hour=21, minute=5)
+
     log_event("INFO", "scheduler_started", {"tickers": TICKERS, "profile": PROFILE.get("_name")})
     print(f"Agent started | Profile: {PROFILE['display_name']} | Tickers: {TICKERS}")
     scheduler.start()
 
 
 if __name__ == "__main__":
-    start_scheduler()
+    mode = os.getenv("AGENT_MODE", "scheduler")
+    if mode == "sweep":
+        run_nightly_sweep()
+    elif mode == "digest":
+        run_weekly_digest()
+    elif mode == "signal":
+        run_signal_cycle()
+    else:
+        start_scheduler()
