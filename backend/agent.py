@@ -6,9 +6,19 @@ signals → risk gate → EV check → LLM decision → execution → learning �
 import os
 import time
 import asyncio
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
+
+try:
+    from zoneinfo import ZoneInfo
+    NY_TZ = ZoneInfo("America/New_York")
+except Exception:
+    try:
+        import pytz
+        NY_TZ = pytz.timezone("America/New_York")
+    except Exception:
+        NY_TZ = None
 
 load_dotenv()
 
@@ -75,6 +85,45 @@ _last_shock_result   = {
     "direction": "mixed",
     "reason": "not_scanned",
 }
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + (occurrence - 1) * 7)
+
+
+def _to_new_york_time(now: datetime) -> datetime:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if NY_TZ is not None:
+        return now.astimezone(NY_TZ)
+
+    utc_now = now.astimezone(timezone.utc)
+    year = utc_now.year
+    dst_start = datetime.combine(
+        _nth_weekday(year, 3, 6, 2), datetime.min.time(), timezone.utc
+    ).replace(hour=7)
+    dst_end = datetime.combine(
+        _nth_weekday(year, 11, 6, 1), datetime.min.time(), timezone.utc
+    ).replace(hour=6)
+    offset = -4 if dst_start <= utc_now < dst_end else -5
+    return utc_now.astimezone(timezone(timedelta(hours=offset)))
+
+
+def is_regular_us_market_hours(now: datetime = None) -> bool:
+    """Return True during regular US equity hours: Mon-Fri, 09:30-16:00 New York time."""
+    now = now or datetime.now(timezone.utc)
+    ny_now = _to_new_york_time(now)
+    if ny_now.weekday() >= 5:
+        return False
+    market_open = ny_now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = ny_now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= ny_now < market_close
+
+
+def _run_signal_cycle_if_market_open():
+    if is_regular_us_market_hours():
+        run_signal_cycle()
 
 
 def _allows_intraday() -> bool:
@@ -1118,23 +1167,34 @@ def run_weekly_digest():
 
 def start_scheduler():
     from apscheduler.schedulers.blocking import BlockingScheduler
-    import pytz
 
-    scheduler = BlockingScheduler(timezone=pytz.utc)
+    scheduler = BlockingScheduler(timezone=NY_TZ or timezone.utc)
 
-    # Main signal cycle: every 5 minutes during market hours
-    scheduler.add_job(run_signal_cycle, "cron",
-                      day_of_week="mon-fri",
-                      hour="14-20",          # 14-20 UTC = 9am-3pm EST
-                      minute="*/5")
+    # Main signal cycle: every 5 minutes during regular US market hours.
+    # Scheduling in New York time keeps the window correct across DST changes.
+    if NY_TZ is not None:
+        scheduler.add_job(run_signal_cycle, "cron",
+                          day_of_week="mon-fri",
+                          hour=9,
+                          minute="30-59/5")
+        scheduler.add_job(run_signal_cycle, "cron",
+                          day_of_week="mon-fri",
+                          hour="10-15",
+                          minute="*/5")
+    else:
+        scheduler.add_job(_run_signal_cycle_if_market_open, "cron",
+                          day_of_week="mon-fri",
+                          hour="13-21",
+                          minute="*/5")
 
     # Weekly digest: Sunday evening
     scheduler.add_job(run_weekly_digest, "cron",
-                      day_of_week="sun", hour=18, minute=0)
+                      day_of_week="sun", hour=18, minute=0,
+                      timezone=timezone.utc)
 
     # Nightly cash sweep: after US market close Mon-Fri
     scheduler.add_job(run_nightly_sweep, "cron",
-                      day_of_week="mon-fri", hour=21, minute=5)
+                      day_of_week="mon-fri", hour=16, minute=5)
 
     log_event("INFO", "scheduler_started", {"tickers": TICKERS, "profile": PROFILE.get("_name")})
     print(f"Agent started | Profile: {PROFILE['display_name']} | Tickers: {TICKERS}")

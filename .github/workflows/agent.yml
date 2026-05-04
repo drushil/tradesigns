@@ -2,8 +2,9 @@ name: Trading Agent - Signal Cycle
 
 on:
   schedule:
-    # Every 5 minutes Mon-Fri 14:00-21:00 UTC (9am-4pm EST)
-    - cron: '*/5 14-20 * * 1-5'
+    # Wake every 5 minutes across both EST and EDT market windows.
+    # Python gates actual trading to 09:30-16:00 America/New_York.
+    - cron: '*/5 13-21 * * 1-5'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
     # Off-hours macro/dip alert scan (no trading)
@@ -91,7 +92,12 @@ jobs:
         run: |
           python <<'PY'
           from datetime import datetime, timezone
-          from backend.agent import run_signal_cycle, run_weekly_digest, run_nightly_sweep
+          from backend.agent import (
+              is_regular_us_market_hours,
+              run_signal_cycle,
+              run_weekly_digest,
+              run_nightly_sweep,
+          )
 
           now = datetime.now(timezone.utc)
           if now.weekday() == 6 and now.hour == 18:
@@ -100,7 +106,7 @@ jobs:
           elif now.weekday() < 5 and now.hour == 21 and now.minute < 10:
               print("Running nightly sweep...")
               run_nightly_sweep()
-          elif now.weekday() < 5 and 14 <= now.hour <= 20:
+          elif is_regular_us_market_hours(now):
               print("Running signal cycle...")
               run_signal_cycle()
           else:
