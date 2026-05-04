@@ -2,9 +2,9 @@ name: Trading Agent - Signal Cycle
 
 on:
   schedule:
-    # Wake every 5 minutes across both EST and EDT market windows.
-    # Python gates actual trading to 09:30-16:00 America/New_York.
-    - cron: '*/5 13-21 * * 1-5'
+    # Wake every 15 minutes across both EST and EDT market windows.
+    # Python runs an internal 5-minute cadence while the runner is alive.
+    - cron: '*/15 13-21 * * 1-5'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
     # Off-hours macro/dip alert scan (no trading)
@@ -16,10 +16,14 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
+concurrency:
+  group: trading-agent-cycle
+  cancel-in-progress: false
+
 jobs:
   run-agent-cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +95,9 @@ jobs:
           DIVIDEND_MIN_YIELD_PCT: "${{ vars.DIVIDEND_MIN_YIELD_PCT }}"
         run: |
           python <<'PY'
-          from datetime import datetime, timezone
+          import os
+          import time
+          from datetime import datetime, timedelta, timezone
           from backend.agent import (
               is_regular_us_market_hours,
               run_signal_cycle,
@@ -107,8 +113,30 @@ jobs:
               print("Running nightly sweep...")
               run_nightly_sweep()
           elif is_regular_us_market_hours(now):
-              print("Running signal cycle...")
-              run_signal_cycle()
+              runner_minutes = int(os.getenv("MARKET_CYCLE_RUNNER_MINUTES", "15"))
+              deadline = now + timedelta(minutes=runner_minutes)
+              print(f"Running market cycle loop until {deadline:%Y-%m-%d %H:%M:%S} UTC...")
+
+              while is_regular_us_market_hours(datetime.now(timezone.utc)):
+                  cycle_started = datetime.now(timezone.utc)
+                  print(f"Running signal cycle at {cycle_started:%Y-%m-%d %H:%M:%S} UTC...")
+                  run_signal_cycle()
+
+                  after_cycle = datetime.now(timezone.utc)
+                  next_minute = ((after_cycle.minute // 5) + 1) * 5
+                  next_slot = after_cycle.replace(second=0, microsecond=0)
+                  if next_minute >= 60:
+                      next_slot = next_slot.replace(minute=0) + timedelta(hours=1)
+                  else:
+                      next_slot = next_slot.replace(minute=next_minute)
+
+                  if next_slot >= deadline:
+                      print("Market cycle loop complete.")
+                      break
+
+                  sleep_seconds = max(0, (next_slot - datetime.now(timezone.utc)).total_seconds())
+                  print(f"Sleeping {sleep_seconds:.0f}s until {next_slot:%Y-%m-%d %H:%M:%S} UTC...")
+                  time.sleep(sleep_seconds)
           else:
               print("Outside trading window; Telegram step will run dip-alert scan only.")
           PY
