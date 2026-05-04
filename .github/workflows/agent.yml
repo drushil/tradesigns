@@ -4,7 +4,7 @@ on:
   schedule:
     # Wake every 15 minutes across both EST and EDT market windows.
     # Python gates actual trading to 09:30-16:00 America/New_York.
-    - cron: '*/15 13-21 * * 1-5'
+    - cron: '*/5 13-21 * * 1-5'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
     # Off-hours macro/dip alert scan (no trading)
