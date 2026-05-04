@@ -29,7 +29,7 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
                                           scan_for_macro_shock)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
-                                          scan_for_extreme_dips)
+                                          scan_for_extreme_dips, get_order_by_id)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
@@ -528,7 +528,15 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         log_event("WARN", "llm_limit_hit", {"ticker": ticker})
         return
 
-    llm_result = llm_signal_decision(ticker, composite, regime, news_headline, profile)
+    llm_result = llm_signal_decision(
+        ticker, composite, regime, news_headline, profile,
+        signal_scores   = signals_snap,
+        atr_data        = atr_data,
+        regime_context  = {
+            "market_regime": getattr(regime_state, "market_regime", ""),
+            "vix":           portfolio_state.get("vix", ""),
+        },
+    )
     _record_llm_call()
     suggested_action = str(llm_result.get("action", "HOLD")).upper()
     action = _deterministic_action(composite)
@@ -703,6 +711,38 @@ def _check_exits(portfolio_state, profile):
             log_event("ERROR", f"exit_check_{ticker}", {"error": str(e)})
 
 
+def _recover_bracket_fill(trade: dict) -> Optional[dict]:
+    """
+    Query Alpaca order history to recover exit price when a bracket leg
+    (stop-loss or take-profit) was triggered autonomously by Alpaca.
+    Returns {"exit_price", "exit_reason", "close_order_id"} or None.
+    """
+    order_id = trade.get("order_id")
+    if not order_id:
+        return None
+    try:
+        order = get_order_by_id(str(order_id))
+        if "error" in order:
+            return None
+        for leg in order.get("legs", []):
+            if "filled" not in str(leg.get("status", "")).lower():
+                continue
+            price = float(leg.get("filled_price") or 0)
+            if not price:
+                continue
+            order_type = str(leg.get("type", "")).lower()
+            # limit leg = take-profit; stop leg = stop-loss
+            reason = "take_profit" if "limit" in order_type else "stop_loss"
+            return {
+                "exit_price":     price,
+                "exit_reason":    reason,
+                "close_order_id": leg.get("id"),
+            }
+    except Exception:
+        pass
+    return None
+
+
 def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     """Close a position and record the trade outcome for learning."""
     global _learning_engine
@@ -711,22 +751,38 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     close_error = result.get("error")
     if close_error:
         if "position not found" in str(close_error).lower():
-            close_open_trade_record(ticker, "stale_no_position")
-            if ticker in _open_trades:
-                del _open_trades[ticker]
-            log_event("WARN", "stale_open_trade_removed", {
+            # Position was closed by Alpaca's bracket mechanism — try to recover fill price
+            recovered = _recover_bracket_fill(trade)
+            if recovered:
+                exit_price  = recovered["exit_price"]
+                exit_reason = recovered["exit_reason"]
+                close_error = None
+                result      = {"order_id": recovered.get("close_order_id")}
+                log_event("INFO", "bracket_fill_recovered", {
+                    "ticker":       ticker,
+                    "exit_price":   exit_price,
+                    "exit_reason":  exit_reason,
+                    "close_order":  recovered.get("close_order_id"),
+                })
+                # Fall through to normal trade recording below
+            else:
+                close_open_trade_record(ticker, "stale_no_position")
+                if ticker in _open_trades:
+                    del _open_trades[ticker]
+                log_event("WARN", "stale_open_trade_unrecoverable", {
+                    "ticker":      ticker,
+                    "exit_reason": exit_reason,
+                    "error":       close_error,
+                    "note":        "Position not found and bracket fill could not be recovered.",
+                })
+                return
+        else:
+            log_event("WARN", "close_position_failed_recording_estimate", {
                 "ticker": ticker,
-                "exit_reason": exit_reason,
                 "error": close_error,
-                "note": "No closed trade was recorded because Alpaca has no matching position.",
+                "exit_reason": exit_reason,
             })
             return
-        log_event("WARN", "close_position_failed_recording_estimate", {
-            "ticker": ticker,
-            "error": close_error,
-            "exit_reason": exit_reason,
-        })
-        return
     entry_price = trade["entry_price"]
     pnl_pct     = (exit_price - entry_price) / entry_price * 100
     if trade["side"] == "SELL":

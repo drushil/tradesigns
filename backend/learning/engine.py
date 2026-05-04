@@ -344,43 +344,84 @@ Output ONLY a valid JSON array, no other text:
 
 def llm_signal_decision(ticker: str, composite_score: float,
                          regime: str, news_headline: str,
-                         profile: dict) -> dict:
+                         profile: dict,
+                         signal_scores: dict = None,
+                         atr_data: dict = None,
+                         regime_context: dict = None) -> dict:
     """
-    Fast Haiku call for signal interpretation.
-    Cost: ~€0.001 per call. Gated by pre-trade rules.
+    Signal interpretation via Groq llama-3.1-8b-instant.
+    Conviction is set by the model based on signal alignment, not a canned value.
     """
+    max_hold     = profile.get("max_hold_minutes", 60)
+    stop_default = profile.get("stop_loss_pct", 2.0)
+
+    # Individual signal breakdown
+    signal_lines = ""
+    if signal_scores:
+        rows = []
+        for sig, data in signal_scores.items():
+            if sig == "earnings_proximity":
+                continue
+            score = data.get("score", 0) if isinstance(data, dict) else data
+            if score is not None:
+                rows.append(f"  {sig}: {float(score):+.3f}")
+        if rows:
+            signal_lines = "\nIndividual signals (each -1 to +1):\n" + "\n".join(rows)
+
+    # Regime and volatility context
+    market_regime = (regime_context or {}).get("market_regime", "")
+    vix           = (regime_context or {}).get("vix", "")
+    vix_str       = f"\nVIX: {vix}" if vix else ""
+    regime_str    = f"Intraday: {regime}" + (f" | Market: {market_regime}" if market_regime else "")
+    atr_str       = ""
+    if atr_data:
+        atr_pct = atr_data.get("atr_pct")
+        vol_reg = atr_data.get("volatility_regime", "")
+        if atr_pct:
+            atr_str = f"\nATR: {float(atr_pct):.3f}% volatility ({vol_reg})"
+
     prompt = f"""Ticker: {ticker}
-Signal score: {composite_score:.3f} (range -1 to +1, positive=bullish)
-Regime: {regime}
-News: {news_headline[:120] if news_headline else 'none'}
-Risk profile: {profile.get('display_name','moderate')}
-Max hold: {profile.get('max_hold_minutes',60)} minutes
-Stop loss: {profile.get('stop_loss_pct',2.0)}%
+Composite score: {composite_score:+.3f}  (scale: -1 bearish → +1 bullish){signal_lines}
+Regime: {regime_str}{vix_str}{atr_str}
+News: {news_headline[:150] if news_headline else 'none'}
+Profile: {profile.get('display_name', 'moderate')} | Max hold: {max_hold} min | Default stop: {stop_default}%
 
-Decision rule: BUY for strong positive scores, SELL for strong negative scores,
-HOLD only when the setup is unclear or conviction is below threshold.
+Task: decide whether to act on this signal.
+1. Count how many individual signals agree with the composite direction.
+2. Set conviction proportional to agreement strength:
+   - 0.2-0.4 = weak (1-2 signals align, rest flat)
+   - 0.5-0.6 = moderate (majority align)
+   - 0.7-0.85 = strong (most signals agree, composite > 0.25)
+3. Return HOLD if signals conflict, composite is near zero, or VIX is high with weak alignment.
+4. Set hold_minutes and stop_loss_pct based on ATR and volatility regime.
 
-Reply ONLY with valid JSON, no other text:
-{{"action":"BUY","conviction":0.72,"hold_minutes":30,"stop_loss_pct":2.0,"rationale":"momentum with news support"}}"""
+Reply with ONLY this JSON (no markdown, no other text):
+{{"action":"BUY|SELL|HOLD","conviction":0.0,"hold_minutes":0,"stop_loss_pct":0.0,"rationale":"one sentence"}}"""
 
     try:
         response = _get_client().chat.completions.create(
             model="llama-3.1-8b-instant",
-            max_tokens=120,
+            max_tokens=150,
+            temperature=0.2,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You are a trading signal interpreter. "
-                        "Reply ONLY with the exact JSON format requested. "
-                        "No explanation, no markdown, just JSON."
+                        "You are a quantitative trading signal interpreter. "
+                        "Analyse signal alignment carefully and calibrate conviction accordingly. "
+                        "Reply ONLY with the JSON format specified — no markdown, no explanation."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
         )
         raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
+        # Strip markdown code fences if the model adds them despite instructions
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        return json.loads(raw.strip())
     except Exception as e:
         return {"action": "HOLD", "conviction": 0.0,
                 "hold_minutes": 0, "rationale": f"llm_error: {str(e)[:50]}"}

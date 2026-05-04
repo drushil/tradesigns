@@ -113,6 +113,38 @@ def get_orders(status: str = "all", limit: int = 50) -> list:
         return []
 
 
+def get_order_by_id(order_id: str) -> dict:
+    """
+    Fetch a single order by ID including bracket legs.
+    Used to recover exit price when Alpaca closes a bracket autonomously.
+    """
+    try:
+        from alpaca.trading.requests import GetOrderByIdRequest
+        client = _get_trading_client()
+        order  = client.get_order_by_id(order_id, GetOrderByIdRequest(nested=True))
+        legs   = []
+        if hasattr(order, "legs") and order.legs:
+            for leg in order.legs:
+                legs.append({
+                    "id":           str(leg.id),
+                    "type":         str(leg.order_type),
+                    "status":       str(leg.status),
+                    "filled_price": float(leg.filled_avg_price or 0),
+                    "filled_qty":   float(leg.filled_qty or 0),
+                    "side":         str(leg.side),
+                })
+        return {
+            "id":           str(order.id),
+            "ticker":       str(order.symbol),
+            "status":       str(order.status),
+            "filled_price": float(order.filled_avg_price or 0),
+            "filled_qty":   float(order.filled_qty or 0),
+            "legs":         legs,
+        }
+    except Exception as e:
+        return {"error": str(e)[:120]}
+
+
 # ── Order submission ──────────────────────────────────────────────────────────
 
 def _round_price(price: float) -> float:
