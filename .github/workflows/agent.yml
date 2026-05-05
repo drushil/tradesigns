@@ -2,7 +2,7 @@ name: Trading Agent - Signal Cycle
 
 on:
   schedule:
-    # Wake every 15 minutes across both EST and EDT market windows.
+    # Wake every 5 minutes across both EST and EDT market windows.
     # Python gates actual trading to 09:30-16:00 America/New_York.
     - cron: '*/5 13-21 * * 1-5'
     # Weekly digest: Sunday 18:00 UTC
@@ -79,8 +79,6 @@ jobs:
           REDDIT_CLIENT_SECRET: "${{ secrets.REDDIT_CLIENT_SECRET }}"
           REDDIT_USER_AGENT:    "${{ secrets.REDDIT_USER_AGENT }}"
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
-          TELEGRAM_BOT_TOKEN:   "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          TELEGRAM_CHAT_ID:     "${{ secrets.TELEGRAM_CHAT_ID }}"
           RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
           INVESTMENT_HORIZON:   "${{ vars.INVESTMENT_HORIZON }}"
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
@@ -114,7 +112,7 @@ jobs:
               print("Running signal cycle...")
               run_signal_cycle()
           else:
-              print("Outside trading window; Telegram step will run dip-alert scan only.")
+              print("Outside trading window — no action.")
           PY
 
       - name: Send Discord summary
@@ -132,16 +130,3 @@ jobs:
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
         run: |
           python scripts/discord_notify.py
-
-      - name: Send Telegram summary
-        if: always()
-        env:
-          PYTHONPATH: "."
-          TELEGRAM_BOT_TOKEN:   "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          TELEGRAM_CHAT_ID:     "${{ secrets.TELEGRAM_CHAT_ID }}"
-          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
-          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
-          TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
-          TELEGRAM_SCAN_DIPS:   "true"
-        run: |
-          python scripts/telegram_notify.py

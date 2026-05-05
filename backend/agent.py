@@ -246,18 +246,13 @@ def _record_llm_call():
     _llm_calls_this_hour += 1
 
 
-def _send_telegram_alert(text: str) -> bool:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not token or not chat_id:
+def _send_discord_alert(text: str) -> bool:
+    webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
+    if not webhook:
         return False
     try:
         import requests
-        resp = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
+        resp = requests.post(webhook, json={"content": text}, timeout=10)
         return resp.ok
     except Exception:
         return False
@@ -276,7 +271,7 @@ def _refresh_macro_shock_if_needed() -> dict:
 
     if shock_result.get("shock_detected"):
         log_event("SIGNAL", "macro_shock_detected", shock_result)
-        _send_telegram_alert(
+        _send_discord_alert(
             "Macro shock detected\n"
             f"Classification: {shock_result.get('classification')}\n"
             f"Direction: {shock_result.get('direction')}\n"
@@ -1192,7 +1187,7 @@ def run_nightly_sweep():
         log_event("INFO", "nightly_sweep", result)
 
         if result.get("mode") == "simulation" and result.get("should_sweep"):
-            _send_telegram_alert(
+            _send_discord_alert(
                 f"💰 Sweep simulation: Would park "
                 f"€{plan['sweepable_eur']:.0f} in {plan['sweep_ticker']}. "
                 f"Est. daily yield: €{plan['est_daily_yield']:.2f}"
