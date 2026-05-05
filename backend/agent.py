@@ -502,6 +502,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     gate_ok, gate_reason = pre_trade_gate(
         ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state,
         market_regime=getattr(ticker_regime_state, "market_regime", None),
+        signals=signals_snap,
     )
 
     # 3. Log signal to DB

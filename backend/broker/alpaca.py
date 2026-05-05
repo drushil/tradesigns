@@ -248,7 +248,8 @@ def close_all_positions() -> dict:
 def pre_trade_gate(ticker: str, side: str, size_eur: float,
                    composite_score: float, profile: dict,
                    portfolio_state: dict,
-                   market_regime: str = None) -> tuple[bool, str]:
+                   market_regime: str = None,
+                   signals: dict = None) -> tuple[bool, str]:
     """
     Hard rule checks before any order is submitted.
     Returns (allow: bool, reason: str).
@@ -259,6 +260,29 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     trades_today = portfolio_state.get("trades_today", 0)
     allowed = profile.get("allowed_instruments", [])
     open_tickers = {p.get("ticker") for p in portfolio_state.get("positions", [])}
+
+    # Dominant-signal veto: block a BUY when any single signal is at floor (-0.8 or worse),
+    # or a SELL when any single signal is at ceiling (+0.8 or better).
+    # Prevents composite averaging from papering over a screaming counter-signal.
+    _VETO_THRESHOLD = float(profile.get("dominant_signal_veto_threshold", 0.8))
+    if signals and _VETO_THRESHOLD > 0:
+        signal_scores = [v.get("score", 0) for v in signals.values() if isinstance(v, dict)]
+        if side.lower() == "buy" and signal_scores:
+            worst = min(signal_scores)
+            if worst <= -_VETO_THRESHOLD:
+                signal_name = next(
+                    (k for k, v in signals.items()
+                     if isinstance(v, dict) and v.get("score", 0) == worst), "unknown"
+                )
+                return False, f"dominant bearish signal veto: {signal_name}={worst:.2f}"
+        elif side.lower() == "sell" and signal_scores:
+            best = max(signal_scores)
+            if best >= _VETO_THRESHOLD:
+                signal_name = next(
+                    (k for k, v in signals.items()
+                     if isinstance(v, dict) and v.get("score", 0) == best), "unknown"
+                )
+                return False, f"dominant bullish signal veto on short: {signal_name}={best:.2f}"
 
     if allowed and ticker not in allowed and not profile.get("allow_individual_stocks", False):
         return False, f"{ticker} not allowed for profile"
