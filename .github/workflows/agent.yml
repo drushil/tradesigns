@@ -2,16 +2,15 @@ name: Trading Agent - Signal Cycle
 
 on:
   schedule:
-    # Wake every 5 minutes across both EST and EDT market windows.
-    # Python gates actual trading to 09:30-16:00 America/New_York.
-    - cron: '*/5 13-21 * * 1-5'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
     # Off-hours macro/dip alert scan (no trading)
     - cron: '0 */4 * * *'
     # Nightly sweep — after US market close Mon-Fri (21:05 UTC)
     - cron: '5 21 * * 1-5'
-  workflow_dispatch:   # allow manual run from GitHub Actions tab
+  # Market-hours cycles triggered by cron-job.org via workflow_dispatch
+  # (more reliable than GitHub's schedule — honours triggers within seconds)
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
