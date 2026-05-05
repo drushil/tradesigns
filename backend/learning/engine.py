@@ -393,7 +393,9 @@ Task: decide whether to act on this signal.
    - 0.5-0.6 = moderate (majority align)
    - 0.7-0.85 = strong (most signals agree, composite > 0.25)
 3. Return HOLD if signals conflict, composite is near zero, or VIX is high with weak alignment.
-4. Set hold_minutes and stop_loss_pct based on ATR and volatility regime.
+4. In bull market regimes, favor BUY when composite is positive and momentum/relative-strength signals align.
+5. In bull market regimes, choose SELL only when bearish evidence is clear and not just a minor pullback.
+6. Set hold_minutes and stop_loss_pct based on ATR and volatility regime.
 
 Reply with ONLY this JSON (no markdown, no other text):
 {{"action":"BUY|SELL|HOLD","conviction":0.0,"hold_minutes":0,"stop_loss_pct":0.0,"rationale":"one sentence"}}"""

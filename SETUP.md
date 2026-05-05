@@ -73,6 +73,7 @@
    - `TICKER_UNIVERSE` → `SPY,QQQ,GLD,TLT,AAPL`
    - `STARTING_CAPITAL_EUR` → `100`
    - `ALLOW_SHORT_SELLING` → `true` or `false` (optional profile override)
+   - `LLM_CALLS_PER_HOUR_LIMIT` → `40` (optional paper-learning override)
 
 7. Go to **Actions** tab → enable Actions if prompted
 8. The agent will now run automatically every 5 minutes on weekdays! 🎉
@@ -104,6 +105,7 @@ INVESTMENT_HORIZON   = "short"
 TICKER_UNIVERSE      = "SPY,QQQ,GLD,TLT,AAPL"
 STARTING_CAPITAL_EUR = "100"
 ALLOW_SHORT_SELLING  = "true"
+LLM_CALLS_PER_HOUR_LIMIT = "40"
 ```
 
 5. Click **Deploy** → your dashboard goes live at a public URL in ~2 min

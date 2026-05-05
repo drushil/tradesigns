@@ -37,11 +37,17 @@ def render():
             "Capital/trade":   f"{profile['capital_per_trade_pct']}%",
             "Cash buffer":     f"{profile['cash_buffer_pct']}%",
             "Stop loss":       f"{profile['stop_loss_pct']}%",
+            "Signal gate":     f"{profile['min_signal_score']:.2f}",
+            "Paper signal":    f"{profile.get('paper_overrides', {}).get('min_signal_score', profile['min_signal_score']):.2f}",
             "Min conviction":  f"{profile['min_conviction']:.0%}",
+            "Paper conviction": f"{profile.get('paper_overrides', {}).get('min_conviction', profile['min_conviction']):.0%}",
             "Short selling":   "Enabled" if profile.get("allow_short_selling") else "Disabled",
             "Short cap":       f"{profile.get('max_short_position_pct', 0)}%",
+            "Short gate":      f"{profile.get('min_short_signal_score', 0):.2f}",
+            "Bull short gate": f"{profile.get('bull_short_signal_score', profile.get('min_short_signal_score', 0)):.2f}",
             "VIX ceiling":     str(profile['vix_ceiling']),
             "Max trades/day":  str(profile['max_trades_per_day']),
+            "Paper trades/day": str(profile.get("paper_overrides", {}).get("max_trades_per_day", profile["max_trades_per_day"])),
             "Hold range":      f"{profile['min_hold_minutes']}–{profile['max_hold_minutes']} min",
         }
         for k, v in params.items():

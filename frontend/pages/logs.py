@@ -55,6 +55,26 @@ def render():
                     letter-spacing:.06em">{level}</div>
             </div>""", unsafe_allow_html=True)
 
+        blocker_events = {
+            "trade_gated": "Risk gate",
+            "ev_blocked": "EV blocked",
+            "llm_hold_veto": "LLM hold",
+            "conviction_below_threshold": "Low conviction",
+            "llm_limit_hit": "LLM limit",
+        }
+        if "event" in df_all.columns:
+            blocker_df = df_all[df_all["event"].isin(blocker_events)]
+            if not blocker_df.empty:
+                st.markdown("##### Recent Trade Blockers")
+                counts = (
+                    blocker_df["event"]
+                    .map(blocker_events)
+                    .value_counts()
+                    .rename_axis("reason")
+                    .reset_index(name="count")
+                )
+                st.bar_chart(counts, x="reason", y="count", height=220)
+
     st.markdown("---")
 
     # Log stream

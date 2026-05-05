@@ -490,7 +490,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     if action_hint == "SELL":
         size_eur = _cap_short_notional(size_eur, capital_base, profile)
     gate_ok, gate_reason = pre_trade_gate(
-        ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state
+        ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state,
+        market_regime=getattr(ticker_regime_state, "market_regime", None),
     )
 
     # 3. Log signal to DB

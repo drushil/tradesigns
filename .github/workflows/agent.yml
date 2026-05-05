@@ -83,7 +83,7 @@ jobs:
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
           SWING_TICKERS:        "${{ vars.SWING_TICKERS }}"
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
-          LLM_CALLS_PER_HOUR_LIMIT: "20"
+          LLM_CALLS_PER_HOUR_LIMIT: "${{ vars.LLM_CALLS_PER_HOUR_LIMIT }}"
           BROKER_ENV:           "${{ vars.BROKER_ENV }}"
           SWEEP_TICKER:         "${{ vars.SWEEP_TICKER }}"
           SWEEP_MIN_EUR:        "${{ vars.SWEEP_MIN_EUR }}"

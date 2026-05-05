@@ -237,7 +237,8 @@ def close_all_positions() -> dict:
 
 def pre_trade_gate(ticker: str, side: str, size_eur: float,
                    composite_score: float, profile: dict,
-                   portfolio_state: dict) -> tuple[bool, str]:
+                   portfolio_state: dict,
+                   market_regime: str = None) -> tuple[bool, str]:
     """
     Hard rule checks before any order is submitted.
     Returns (allow: bool, reason: str).
@@ -262,6 +263,8 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
         if float(profile.get("max_short_position_pct", 0) or 0) <= 0:
             return False, "short position cap is zero for profile"
         min_short_score = profile.get("min_short_signal_score", profile["min_signal_score"])
+        if str(market_regime or "").lower() == "bull":
+            min_short_score = profile.get("bull_short_signal_score", min_short_score)
         if abs(composite_score) < min_short_score:
             return False, f"short signal below threshold ({composite_score:.3f} < {min_short_score})"
 
