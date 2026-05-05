@@ -302,6 +302,9 @@ def _apply_execution_overrides(profile: dict) -> dict:
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
+    short_override = os.getenv("ALLOW_SHORT_SELLING")
+    if short_override is not None and short_override.strip():
+        p["allow_short_selling"] = short_override.strip().lower() == "true"
     return p
 
 
@@ -317,6 +320,13 @@ def _trading_capital(equity: float) -> float:
 
 def _deterministic_action(composite: float) -> str:
     return "BUY" if composite > 0 else "SELL"
+
+
+def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> float:
+    short_cap_pct = profile.get("max_short_position_pct")
+    if short_cap_pct is None:
+        short_cap_pct = profile.get("max_position_pct", 0)
+    return min(size_eur, capital_base * float(short_cap_pct) / 100)
 
 
 def _parse_dt(value):
@@ -456,9 +466,15 @@ def run_signal_cycle():
 def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_trades,
                     regime_state, shock_result):
     """Signal → gate → EV → LLM → order."""
+    ticker_regime_state = detect_regime(ticker)
+    ticker_regime = ticker_regime_state.intraday_regime
+    if _learning_engine:
+        weights = _learning_engine.get_weights(ticker_regime)
+    action_hint = None
+
     # 1. Compute signals
     signal_result = compute_all_signals(
-        ticker, weights, regime_state=regime_state, shock_result=shock_result
+        ticker, weights, regime_state=ticker_regime_state, shock_result=shock_result
     )
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
@@ -468,10 +484,13 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
     # 2. Pre-trade gate (hard rules)
     capital_base = _trading_capital(portfolio_state["equity"])
-    pre_size = compute_position_size(ticker, capital_base, profile, 0.7, atr_data, regime_state)
+    action_hint = _deterministic_action(composite)
+    pre_size = compute_position_size(ticker, capital_base, profile, 0.7, atr_data, ticker_regime_state)
     size_eur = pre_size["size_eur"]
+    if action_hint == "SELL":
+        size_eur = _cap_short_notional(size_eur, capital_base, profile)
     gate_ok, gate_reason = pre_trade_gate(
-        ticker, _deterministic_action(composite).lower(), size_eur, composite, profile, portfolio_state
+        ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state
     )
 
     # 3. Log signal to DB
@@ -497,7 +516,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "regime_bull_bear":       signal_result.get("regime_bull_bear"),
         "shock_detected":         signal_result.get("shock_detected", False),
         "shock_classification":   signal_result.get("shock_classification"),
-        "regime":                 regime,
+        "regime":                 ticker_regime,
         "vix":                    portfolio_state["vix"],
         "gated":                  not gate_ok,
         "gate_reason":            gate_reason if not gate_ok else None,
@@ -513,7 +532,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # 4. EV check
-    ev_result = compute_expected_value(composite, size_eur, recent_trades, regime)
+    ev_result = compute_expected_value(composite, size_eur, recent_trades, ticker_regime)
     if ev_result["decision"] == "block":
         log_event("INFO", "ev_blocked", {"ticker": ticker, **ev_result})
         return
@@ -524,11 +543,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     llm_result = llm_signal_decision(
-        ticker, composite, regime, news_headline, profile,
+        ticker, composite, ticker_regime, news_headline, profile,
         signal_scores   = signals_snap,
         atr_data        = atr_data,
         regime_context  = {
-            "market_regime": getattr(regime_state, "market_regime", ""),
+            "market_regime": getattr(ticker_regime_state, "market_regime", ""),
             "vix":           portfolio_state.get("vix", ""),
         },
     )
@@ -573,8 +592,10 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         return
 
     # 6. Size and submit order
-    sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, regime_state)
+    sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, ticker_regime_state)
     final_size = sizing["size_eur"]
+    if action == "SELL":
+        final_size = _cap_short_notional(final_size, capital_base, profile)
     max_notional = _env_float(
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", final_size),
@@ -643,7 +664,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "side":          action,
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
-        "regime":        regime,
+        "regime":        ticker_regime,
         "macro_regime":  signal_result.get("macro_regime"),
         "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
         "horizon":       "short",
@@ -902,6 +923,8 @@ def _submit_horizon_order(
         ticker, capital_base, profile, conviction, atr_data or {}, regime_state
     )
     size_eur = sizing["size_eur"] * size_multiplier
+    if side.upper() == "SELL":
+        size_eur = _cap_short_notional(size_eur, capital_base, profile)
     max_notional = _env_float(
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", size_eur),

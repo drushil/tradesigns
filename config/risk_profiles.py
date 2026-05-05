@@ -25,6 +25,8 @@ RISK_PROFILES = {
         "allow_individual_stocks": False,
         "allow_leveraged_etfs": False,
         "allow_short_selling": False,
+        "max_short_position_pct": 0.0,
+        "min_short_signal_score": 0.60,
         "signal_weights": {
             "order_book_imbalance": 0.14,
             "tape_aggression":      0.10,
@@ -57,6 +59,8 @@ RISK_PROFILES = {
         "allow_individual_stocks": False,
         "allow_leveraged_etfs": False,
         "allow_short_selling": False,
+        "max_short_position_pct": 0.0,
+        "min_short_signal_score": 0.50,
         "signal_weights": {
             "order_book_imbalance": 0.15,
             "tape_aggression":      0.13,
@@ -88,7 +92,9 @@ RISK_PROFILES = {
         "allowed_instruments": ["SPY", "QQQ", "GLD", "TLT", "AAPL", "TSLA"],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
-        "allow_short_selling": False,
+        "allow_short_selling": True,
+        "max_short_position_pct": 8.0,
+        "min_short_signal_score": 0.25,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.17,
@@ -120,7 +126,9 @@ RISK_PROFILES = {
         "allowed_instruments": ["SPY", "QQQ", "GLD", "TLT", "AAPL", "TSLA", "NVDA", "META"],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
-        "allow_short_selling": False,
+        "allow_short_selling": True,
+        "max_short_position_pct": 12.0,
+        "min_short_signal_score": 0.20,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.20,
@@ -153,6 +161,8 @@ RISK_PROFILES = {
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
         "allow_short_selling": True,
+        "max_short_position_pct": 15.0,
+        "min_short_signal_score": 0.18,
         "signal_weights": {
             "order_book_imbalance": 0.23,
             "tape_aggression":      0.20,

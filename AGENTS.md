@@ -137,6 +137,7 @@ INVESTMENT_HORIZON      # short|mid|both
 TICKER_UNIVERSE         # SPY,QQQ,GLD,TLT,AAPL (comma-separated)
 STARTING_CAPITAL_EUR    # 100
 LLM_CALLS_PER_HOUR_LIMIT # 20
+ALLOW_SHORT_SELLING     # optional true|false override for profile shorting
 ```
 
 ---

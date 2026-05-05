@@ -38,6 +38,8 @@ def render():
             "Cash buffer":     f"{profile['cash_buffer_pct']}%",
             "Stop loss":       f"{profile['stop_loss_pct']}%",
             "Min conviction":  f"{profile['min_conviction']:.0%}",
+            "Short selling":   "Enabled" if profile.get("allow_short_selling") else "Disabled",
+            "Short cap":       f"{profile.get('max_short_position_pct', 0)}%",
             "VIX ceiling":     str(profile['vix_ceiling']),
             "Max trades/day":  str(profile['max_trades_per_day']),
             "Hold range":      f"{profile['min_hold_minutes']}–{profile['max_hold_minutes']} min",
@@ -111,6 +113,7 @@ def render():
             Max loss: {p['max_drawdown_pct']}%<br>
             Per trade: {p['capital_per_trade_pct']}%<br>
             VIX cap: {p['vix_ceiling']}<br>
+            Shorts: {'yes' if p.get('allow_short_selling') else 'no'}<br>
             Max trades: {p['max_trades_per_day']}/day
           </div>
         </div>""", unsafe_allow_html=True)

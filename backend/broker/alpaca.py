@@ -258,6 +258,13 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     if side.lower() == "sell" and not profile.get("allow_short_selling", False):
         return False, "short selling disabled for profile"
 
+    if side.lower() == "sell":
+        if float(profile.get("max_short_position_pct", 0) or 0) <= 0:
+            return False, "short position cap is zero for profile"
+        min_short_score = profile.get("min_short_signal_score", profile["min_signal_score"])
+        if abs(composite_score) < min_short_score:
+            return False, f"short signal below threshold ({composite_score:.3f} < {min_short_score})"
+
     if drawdown >= profile["max_drawdown_pct"]:
         return False, f"max drawdown hit ({drawdown:.1f}% ≥ {profile['max_drawdown_pct']}%)"
 

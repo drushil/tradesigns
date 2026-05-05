@@ -26,7 +26,7 @@ def render():
     df["pnl_eur"]     = pd.to_numeric(df.get("pnl_eur", 0),     errors="coerce").fillna(0)
 
     # ── Filters ────────────────────────────────────────────────────────────
-    col_f1, col_f2, col_f3 = st.columns(3)
+    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
     with col_f1:
         tickers = ["All"] + sorted(df["ticker"].unique().tolist())
         sel_ticker = st.selectbox("Ticker", tickers)
@@ -34,6 +34,9 @@ def render():
         regimes = ["All"] + sorted(df["regime"].dropna().unique().tolist()) if "regime" in df.columns else ["All"]
         sel_regime = st.selectbox("Regime", regimes)
     with col_f3:
+        sides = ["All"] + sorted(df["side"].dropna().unique().tolist()) if "side" in df.columns else ["All"]
+        sel_side = st.selectbox("Side", sides)
+    with col_f4:
         outcomes = ["All", "Wins only", "Losses only"]
         sel_outcome = st.selectbox("Outcome", outcomes)
 
@@ -42,6 +45,8 @@ def render():
         fdf = fdf[fdf["ticker"] == sel_ticker]
     if sel_regime != "All" and "regime" in fdf.columns:
         fdf = fdf[fdf["regime"] == sel_regime]
+    if sel_side != "All" and "side" in fdf.columns:
+        fdf = fdf[fdf["side"] == sel_side]
     if sel_outcome == "Wins only":
         fdf = fdf[fdf["net_pnl_pct"] > 0]
     elif sel_outcome == "Losses only":
@@ -58,12 +63,14 @@ def render():
     wins  = fdf[fdf["net_pnl_pct"] > 0]
     losses= fdf[fdf["net_pnl_pct"] <= 0]
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Trades shown", len(fdf))
     c2.metric("Win rate", f"{len(wins)/len(fdf)*100:.1f}%" if len(fdf) else "—")
     c3.metric("Avg P&L", f"{fdf['net_pnl_pct'].mean():+.3f}%" if len(fdf) else "—")
     c4.metric("Total P&L", f"€{fdf['pnl_eur'].sum():+.2f}" if len(fdf) else "—")
     c5.metric("Avg hold", f"{fdf['hold_minutes'].mean():.0f} min" if "hold_minutes" in fdf.columns and len(fdf) else "—")
+    short_count = int((fdf["side"] == "SELL").sum()) if "side" in fdf.columns else 0
+    c6.metric("Short mix", f"{short_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
 
     st.markdown("---")
 

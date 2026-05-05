@@ -22,7 +22,7 @@ concurrency:
 jobs:
   run-agent-cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +90,7 @@ jobs:
           SWEEP_RESERVE_PCT:    "${{ vars.SWEEP_RESERVE_PCT }}"
           DIVIDEND_SCAN_ENABLED: "${{ vars.DIVIDEND_SCAN_ENABLED }}"
           DIVIDEND_MIN_YIELD_PCT: "${{ vars.DIVIDEND_MIN_YIELD_PCT }}"
+          ALLOW_SHORT_SELLING:  "${{ vars.ALLOW_SHORT_SELLING }}"
         run: |
           python <<'PY'
           from datetime import datetime, timezone
