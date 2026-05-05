@@ -24,15 +24,15 @@ def render():
         return
 
     import os
-    equity        = account.get("portfolio_value", 0)
-    cash          = account.get("cash", 0)
+    equity_usd    = account.get("portfolio_value", 0)
+    cash_usd      = account.get("cash", 0)
     start         = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
     fx_rate       = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
     ceiling       = account.get("capital_ceiling_eur")
     alpaca_actual = account.get("alpaca_actual_usd")
-    # P&L base: equity is USD-capped, so compare against EUR start × fx_rate
-    start_base    = start * fx_rate if ceiling else start
-    cum_pnl_pct   = (equity - start_base) / start_base * 100 if start_base > 0 else 0
+    equity_eur    = equity_usd / fx_rate if fx_rate else equity_usd
+    cash_eur      = cash_usd / fx_rate if fx_rate else cash_usd
+    cum_pnl_pct   = (equity_eur - start) / start * 100 if start > 0 else 0
     try:
         from backend.signals.engine import detect_regime
         regime_state = detect_regime()
@@ -41,10 +41,10 @@ def render():
 
     # ── KPI row ────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Portfolio Value", f"€{equity:,.2f}",
+    c1.metric("Portfolio Value", f"€{equity_eur:,.2f}",
               delta=f"{cum_pnl_pct:+.2f}% all-time")
-    c2.metric("Cash Available", f"€{cash:,.2f}",
-              delta=f"{cash/equity*100:.0f}% of portfolio" if equity else None)
+    c2.metric("Cash Available", f"€{cash_eur:,.2f}",
+              delta=f"{cash_usd/equity_usd*100:.0f}% of portfolio" if equity_usd else None)
     c3.metric("Total Trades", trade_stats.get("total", 0))
     c4.metric("Win Rate",
               f"{trade_stats.get('win_rate', 0):.1f}%",
@@ -82,11 +82,14 @@ def render():
             df = pd.DataFrame(snapshots)
             df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
             df = df.sort_values("snapshot_at")
+            df["total_value_display_eur"] = pd.to_numeric(
+                df["total_value_eur"], errors="coerce"
+            ) / fx_rate
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=df["snapshot_at"],
-                y=df["total_value_eur"],
+                y=df["total_value_display_eur"],
                 mode="lines",
                 fill="tozeroy",
                 line=dict(color="#00d4a0", width=2),
@@ -118,10 +121,10 @@ def render():
                 <div class="signal-card">
                     <div class="signal-name">{p['ticker']}</div>
                     <div style="font-family:'DM Mono',monospace;font-size:14px">
-                        {p['qty']:.4f} @ €{p['avg_entry']:.2f}
+                        {p['qty']:.4f} @ ${p['avg_entry']:.2f}
                     </div>
                     <div class="signal-score {pnl_color}" style="font-size:18px">
-                        €{p['unrealized_pl']:+.2f} ({p['unrealized_plpc']:+.2f}%)
+                        ${p['unrealized_pl']:+.2f} ({p['unrealized_plpc']:+.2f}%)
                     </div>
                 </div>""", unsafe_allow_html=True)
         else:
