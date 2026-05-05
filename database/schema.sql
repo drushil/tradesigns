@@ -24,6 +24,7 @@ create table if not exists trades (
     stop_price      numeric(12,4),
     take_profit_price numeric(12,4),
     size_eur        numeric(10,2),
+    size_usd        numeric(10,2),
     pnl_pct         numeric(8,4),
     net_pnl_pct     numeric(8,4),
     pnl_eur         numeric(10,2),
@@ -62,6 +63,9 @@ create index if not exists idx_trades_regime      on trades (regime);
 create index if not exists idx_trades_pnl         on trades (net_pnl_pct)
     where net_pnl_pct is not null;
 
+alter table if exists trades
+    add column if not exists size_usd numeric(10,2);
+
 -- 2. OPEN_TRADES
 create table if not exists open_trades (
     id                  bigint generated always as identity primary key,
@@ -79,6 +83,7 @@ create table if not exists open_trades (
     hold_days           smallint,
     horizon             text check (horizon in ('short','mid','both','swing','intraday',null)),
     size_eur            numeric(10,2),
+    size_usd            numeric(10,2),
     order_id            text,
     status              text not null default 'open' check (status in ('open','closed')),
     close_reason        text,
@@ -99,6 +104,7 @@ create index if not exists idx_open_trades_status on open_trades (status, create
 
 alter table if exists open_trades
     add column if not exists entry_time timestamptz,
+    add column if not exists size_usd numeric(10,2),
     add column if not exists quantity numeric(14,6),
     add column if not exists hold_minutes smallint,
     add column if not exists hold_days smallint,

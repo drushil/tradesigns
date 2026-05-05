@@ -81,6 +81,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "hold_days": trade.get("hold_days"),
             "horizon": trade.get("horizon"),
             "size_eur": trade.get("size_eur"),
+            "size_usd": trade.get("size_usd"),
             "order_id": trade.get("order_id"),
             "regime": trade.get("regime"),
             "macro_regime": trade.get("macro_regime"),
@@ -101,6 +102,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             fallback = {
                 k: v for k, v in record.items()
                 if k not in {"quantity", "hold_minutes", "hold_days", "horizon",
+                             "size_usd",
                              "macro_regime", "macro_multiplier", "dip_type",
                              "sizing_json", "mean_reversion_trade", "swing_trade"}
             }

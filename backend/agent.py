@@ -64,6 +64,14 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _eurusd_rate() -> float:
+    return _env_float("EURUSD_RATE", 1.08)
+
+
+def _eur_to_usd(amount_eur: float) -> float:
+    return float(amount_eur or 0) * _eurusd_rate()
+
+
 TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",") if t.strip()]
 SWING_TICKERS = [t.strip().upper() for t in _env_value("SWING_TICKERS", "").split(",") if t.strip()]
 PROFILE  = get_profile(_env_value("RISK_PROFILE", "moderate"))
@@ -354,6 +362,7 @@ def _hydrate_open_trades():
             "hold_days": int(record.get("hold_days") or 0),
             "horizon": record.get("horizon") or "short",
             "size_eur": float(record.get("size_eur") or 0),
+            "size_usd": float(record.get("size_usd") or 0),
             "side": record.get("side", "BUY"),
             "composite_score": float(record.get("composite_score") or 0),
             "signals_json": record.get("signals_json") or {},
@@ -611,7 +620,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         log_event("WARN", "price_unavailable", {"ticker": ticker})
         return
     current_price = float(bar["Close"].squeeze().iloc[-1])
-    qty = final_size / current_price
+    final_size_usd = _eur_to_usd(final_size)
+    sizing["size_usd"] = round(final_size_usd, 2)
+    qty = final_size_usd / current_price
 
     raw_hold_minutes = llm_result.get("hold_minutes", 30)
     try:
@@ -662,6 +673,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "take_profit_price": take_profit_price,
         "hold_minutes":  hold_minutes,
         "size_eur":      final_size,
+        "size_usd":      final_size_usd,
         "side":          action,
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
@@ -806,6 +818,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         pnl_pct = -pnl_pct
 
     size_eur    = trade["size_eur"]
+    size_usd    = trade.get("size_usd") or _eur_to_usd(size_eur)
     slippage    = size_eur * 0.0008   # Alpaca = $0 commission
     llm_cost    = 0.002
     net_pnl_pct = pnl_pct - (slippage + llm_cost) / size_eur * 100
@@ -819,6 +832,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "stop_price":      round(float(trade.get("stop_price") or 0), 4),
         "take_profit_price": round(float(trade.get("take_profit_price") or 0), 4),
         "size_eur":        round(size_eur, 2),
+        "size_usd":        round(size_usd, 2),
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
         "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
@@ -938,7 +952,9 @@ def _submit_horizon_order(
         log_event("WARN", "price_unavailable", {"ticker": ticker, "horizon": horizon})
         return {"error": "price_unavailable"}
 
-    qty = size_eur / current_price
+    size_usd = _eur_to_usd(size_eur)
+    sizing["size_usd"] = round(size_usd, 2)
+    qty = size_usd / current_price
     take_profit_pct = profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2)
     order = submit_market_order(
         ticker=ticker,
@@ -972,6 +988,7 @@ def _submit_horizon_order(
         "hold_minutes": hold_minutes or 0,
         "hold_days": hold_days or 0,
         "size_eur": size_eur,
+        "size_usd": size_usd,
         "side": side.upper(),
         "composite_score": composite_score,
         "signals_json": signals_json or {},

@@ -80,7 +80,7 @@ def build_summary() -> str:
                     conviction = 0
                 lines.append(
                     f"{emoji} **{t.get('ticker','?')}** {str(t.get('side','?')).upper()} "
-                    f"@ €{(t.get('entry_price') or 0):.2f}  "
+                    f"@ ${(t.get('entry_price') or 0):.2f}  "
                     f"conviction {conviction:.2f}  "
                     f"→ {t.get('exit_reason') or 'open'}"
                     + (f"  {pnl:+.2f}%" if t.get('exit_reason') else "")
