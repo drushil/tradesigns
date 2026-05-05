@@ -29,7 +29,8 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
                                           scan_for_macro_shock)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
-                                          scan_for_extreme_dips, get_order_by_id)
+                                          scan_for_extreme_dips, get_order_by_id,
+                                          cancel_order_by_id)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
@@ -772,9 +773,45 @@ def _recover_bracket_fill(trade: dict) -> Optional[dict]:
     return None
 
 
+def _cancel_bracket_orders_for_manual_exit(trade: dict) -> list[dict]:
+    """
+    Time exits can conflict with open bracket legs that reserve shares.
+    Cancel those legs first, then submit the manual close.
+    """
+    order_id = trade.get("order_id")
+    if not order_id:
+        return []
+    results = []
+    order = get_order_by_id(str(order_id))
+    if "error" in order:
+        results.append({"order_id": order_id, "error": order["error"]})
+        return results
+
+    terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
+    for leg in order.get("legs", []):
+        status = str(leg.get("status", "")).lower()
+        leg_id = leg.get("id")
+        if not leg_id or any(state in status for state in terminal):
+            continue
+        results.append(cancel_order_by_id(str(leg_id)))
+
+    if results:
+        time.sleep(1)
+    return results
+
+
 def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     """Close a position and record the trade outcome for learning."""
     global _learning_engine
+
+    cancel_results = []
+    if exit_reason == "time_exit":
+        cancel_results = _cancel_bracket_orders_for_manual_exit(trade)
+        if cancel_results:
+            log_event("INFO", "bracket_orders_cancelled_for_time_exit", {
+                "ticker": ticker,
+                "results": cancel_results[:4],
+            })
 
     result = close_position(ticker)
     close_error = result.get("error")

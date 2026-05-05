@@ -49,6 +49,10 @@ def render():
             "Max trades/day":  str(profile['max_trades_per_day']),
             "Paper trades/day": str(profile.get("paper_overrides", {}).get("max_trades_per_day", profile["max_trades_per_day"])),
             "Hold range":      f"{profile['min_hold_minutes']}–{profile['max_hold_minutes']} min",
+            "Paper hold":      (
+                f"{profile.get('paper_overrides', {}).get('min_hold_minutes', profile['min_hold_minutes'])}"
+                f"–{profile.get('paper_overrides', {}).get('max_hold_minutes', profile['max_hold_minutes'])} min"
+            ),
         }
         for k, v in params.items():
             st.markdown(f"""

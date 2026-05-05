@@ -145,6 +145,16 @@ def get_order_by_id(order_id: str) -> dict:
         return {"error": str(e)[:120]}
 
 
+def cancel_order_by_id(order_id: str) -> dict:
+    """Best-effort cancellation for parent or bracket-leg orders."""
+    try:
+        client = _get_trading_client()
+        client.cancel_order_by_id(order_id)
+        return {"status": "cancel_requested", "order_id": str(order_id)}
+    except Exception as e:
+        return {"error": str(e), "order_id": str(order_id)}
+
+
 # ── Order submission ──────────────────────────────────────────────────────────
 
 def _round_price(price: float) -> float:
