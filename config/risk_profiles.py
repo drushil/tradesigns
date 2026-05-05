@@ -33,6 +33,7 @@ RISK_PROFILES = {
         "allow_short_selling": False,
         "max_short_position_pct": 0.0,
         "min_short_signal_score": 0.60,
+        "dominant_signal_veto_threshold": 0.65,
         "signal_weights": {
             "order_book_imbalance": 0.14,
             "tape_aggression":      0.10,
@@ -73,6 +74,7 @@ RISK_PROFILES = {
         "allow_short_selling": False,
         "max_short_position_pct": 0.0,
         "min_short_signal_score": 0.50,
+        "dominant_signal_veto_threshold": 0.72,
         "signal_weights": {
             "order_book_imbalance": 0.15,
             "tape_aggression":      0.13,
@@ -114,6 +116,7 @@ RISK_PROFILES = {
         "max_short_position_pct": 8.0,
         "min_short_signal_score": 0.18,
         "bull_short_signal_score": 0.22,
+        "dominant_signal_veto_threshold": 0.80,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.17,
@@ -155,6 +158,7 @@ RISK_PROFILES = {
         "max_short_position_pct": 12.0,
         "min_short_signal_score": 0.15,
         "bull_short_signal_score": 0.19,
+        "dominant_signal_veto_threshold": 0.85,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.20,
@@ -196,6 +200,7 @@ RISK_PROFILES = {
         "max_short_position_pct": 15.0,
         "min_short_signal_score": 0.12,
         "bull_short_signal_score": 0.16,
+        "dominant_signal_veto_threshold": 0.90,
         "signal_weights": {
             "order_book_imbalance": 0.23,
             "tape_aggression":      0.20,
