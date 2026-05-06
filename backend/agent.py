@@ -31,7 +31,7 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
                                           scan_for_extreme_dips, get_order_by_id,
-                                          cancel_order_by_id)
+                                          cancel_order_by_id, submit_stop_order)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
@@ -150,16 +150,17 @@ def _open_position_tickers(portfolio_state: dict) -> set[str]:
 
 
 def _should_run_swing_recheck(now: datetime = None) -> bool:
-    """Run swing re-evaluation once in the configured market-open window."""
-    if not _allows_swing():
-        return False
-    now = now or datetime.utcnow()
-    hour = _env_int("SWING_REEVAL_UTC_HOUR", 14)
-    minute = _env_int("SWING_REEVAL_UTC_MINUTE", 0)
+    """Run swing re-evaluation once in the configured New York market-open window."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ny_now = _to_new_york_time(now)
+    hour = _env_int("SWING_REEVAL_NY_HOUR", 9)
+    minute = _env_int("SWING_REEVAL_NY_MINUTE", 35)
     window = _env_int("SWING_REEVAL_WINDOW_MINUTES", 5)
-    current = now.hour * 60 + now.minute
+    current = ny_now.hour * 60 + ny_now.minute
     target = hour * 60 + minute
-    return 0 <= current - target < window
+    return ny_now.weekday() < 5 and 0 <= current - target < window
 
 
 def _init_learning_engine() -> RegimeAwareWeightEngine:
@@ -467,8 +468,11 @@ def _hydrate_open_trades():
             ),
             "trailing_stop_price": float(record.get("trailing_stop_price") or 0),
             "stop_multiplier": float(record.get("stop_multiplier") or 1.5),
+            "stop_pct": float(record.get("stop_pct") or 0),
+            "max_hold_minutes": int(record.get("max_hold_minutes") or record.get("hold_minutes") or 30),
             "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
             "hold_decision_json": record.get("hold_decision_json") or {},
+            "protective_stop_order_id": record.get("protective_stop_order_id"),
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
             "order_id": record.get("order_id"),
@@ -553,12 +557,41 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
     atr_raw = atr_data.get("atr_raw") or (entry_price * atr_pct / 100)
     stop_pct = max(0.5, min(12.0, float(atr_pct) * stop_multiplier))
 
-    if trade.get("side", "BUY") == "BUY":
+    side = trade.get("side", "BUY")
+    if side == "BUY":
         stop_price = entry_price * (1 - stop_pct / 100)
+        chandelier_stop = current_price - (atr_raw * stop_multiplier)
+        protective_stop_price = max(stop_price, chandelier_stop)
+        protective_side = "sell"
     else:
         stop_price = entry_price * (1 + stop_pct / 100)
+        chandelier_stop = current_price + (atr_raw * stop_multiplier)
+        protective_stop_price = min(stop_price, chandelier_stop)
+        protective_side = "buy"
 
-    chandelier_stop = current_price - (atr_raw * stop_multiplier)
+    cancel_results = _cancel_bracket_orders_for_manual_exit(trade)
+    cancel_errors = [r for r in cancel_results if r.get("error")]
+    if cancel_errors:
+        log_event("WARN", "swing_promotion_bracket_cancel_failed", {
+            "ticker": ticker,
+            "errors": cancel_errors[:4],
+        })
+        return False
+
+    protective_order = submit_stop_order(
+        ticker=ticker,
+        side=protective_side,
+        qty=float(trade.get("quantity") or 0),
+        stop_price=protective_stop_price,
+        time_in_force="gtc",
+    )
+    if protective_order.get("error"):
+        log_event("WARN", "swing_promotion_stop_order_failed", {
+            "ticker": ticker,
+            "error": protective_order["error"],
+            "stop_price": round(protective_stop_price, 4),
+        })
+        return False
 
     _open_trades[ticker].update({
         "swing_trade":              True,
@@ -572,12 +605,15 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         "swing_conviction":         swing_check["conviction"],
         "swing_reasons":            swing_check["reasons"],
         "highest_price_since_entry": max(current_price, entry_price),
-        "trailing_stop_price":      round(chandelier_stop, 4),
-        "stop_price":               round(stop_price, 4),
+        "trailing_stop_price":      round(protective_stop_price, 4),
+        "stop_price":               round(protective_stop_price, 4),
         "stop_pct":                 stop_pct,
+        "protective_stop_order_id": protective_order.get("order_id"),
         "hold_decision_json": {
             "promoted_at_pnl_pct": round(pnl_pct, 3),
             "swing_check":         swing_check,
+            "cancelled_bracket_legs": cancel_results,
+            "protective_stop_order": protective_order,
         },
     })
 
@@ -592,6 +628,7 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         "conviction":      swing_check["conviction"],
         "reasons":         swing_check["reasons"],
         "pnl_at_promotion": round(pnl_pct, 3),
+        "protective_stop_order_id": protective_order.get("order_id"),
     })
     _send_discord_alert(
         f"Swing promoted: {ticker} "
@@ -1002,11 +1039,33 @@ def _check_exits(portfolio_state, profile):
                 atr_info = compute_atr(ticker)
                 atr_raw  = atr_info.get("atr_raw") or (entry_price * 0.025)
                 stop_mult = float(trade.get("stop_multiplier", 2.5))
-                chandelier_stop = new_highest - (atr_raw * stop_mult)
-                _open_trades[ticker]["trailing_stop_price"] = round(chandelier_stop, 4)
+                if trade.get("side", "BUY") == "BUY":
+                    chandelier_stop = new_highest - (atr_raw * stop_mult)
+                    old_stop = float(trade.get("trailing_stop_price") or trade.get("stop_price") or 0)
+                    should_replace_stop = chandelier_stop > old_stop
+                else:
+                    chandelier_stop = min(current_price, prev_highest) + (atr_raw * stop_mult)
+                    old_stop = float(trade.get("trailing_stop_price") or trade.get("stop_price") or 0)
+                    should_replace_stop = old_stop <= 0 or chandelier_stop < old_stop
+
+                if should_replace_stop:
+                    stop_order = _replace_protective_stop_order(ticker, _open_trades[ticker], chandelier_stop)
+                    if stop_order.get("error"):
+                        log_event("WARN", "protective_stop_replace_failed", {
+                            "ticker": ticker,
+                            "error": stop_order["error"],
+                            "stop_price": round(chandelier_stop, 4),
+                        })
+                        exit_reason = "circuit_breaker"
+                    else:
+                        save_open_trade(ticker, _open_trades[ticker])
 
                 pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0.0
-                if trade.get("side", "BUY") == "BUY" and current_price <= chandelier_stop:
+                if exit_reason:
+                    pass
+                elif trade.get("side", "BUY") == "BUY" and current_price <= chandelier_stop:
+                    exit_reason = "chandelier_stop"
+                elif trade.get("side") == "SELL" and current_price >= chandelier_stop:
                     exit_reason = "chandelier_stop"
                 elif pnl_pct >= 8.0:
                     # Hard-coded take-profit — not configurable
@@ -1073,6 +1132,56 @@ def _recover_bracket_fill(trade: dict) -> Optional[dict]:
     return None
 
 
+def _recover_protective_stop_fill(trade: dict) -> Optional[dict]:
+    """Recover fill details when a standalone protective stop already closed the position."""
+    order_id = trade.get("protective_stop_order_id")
+    if not order_id:
+        return None
+    try:
+        order = get_order_by_id(str(order_id))
+        if "error" in order or "filled" not in str(order.get("status", "")).lower():
+            return None
+        price = float(order.get("filled_price") or 0)
+        if not price:
+            return None
+        return {
+            "exit_price": price,
+            "exit_reason": "chandelier_stop",
+            "close_order_id": order.get("id") or order_id,
+        }
+    except Exception:
+        return None
+
+
+def _cancel_protective_stop_order(trade: dict) -> Optional[dict]:
+    order_id = trade.get("protective_stop_order_id")
+    if not order_id:
+        return None
+    return cancel_order_by_id(str(order_id))
+
+
+def _replace_protective_stop_order(ticker: str, trade: dict,
+                                   stop_price: float) -> dict:
+    """Replace the broker-side protective stop when a trailing stop ratchets."""
+    cancel_result = _cancel_protective_stop_order(trade)
+    if cancel_result and cancel_result.get("error"):
+        return {"error": cancel_result["error"], "cancel_result": cancel_result}
+
+    close_side = "sell" if trade.get("side", "BUY") == "BUY" else "buy"
+    order = submit_stop_order(
+        ticker=ticker,
+        side=close_side,
+        qty=float(trade.get("quantity") or 0),
+        stop_price=stop_price,
+        time_in_force="gtc",
+    )
+    if "error" not in order:
+        trade["protective_stop_order_id"] = order.get("order_id")
+        trade["stop_price"] = round(float(stop_price), 4)
+        trade["trailing_stop_price"] = round(float(stop_price), 4)
+    return order
+
+
 def _cancel_bracket_orders_for_manual_exit(trade: dict) -> list[dict]:
     """
     Time exits can conflict with open bracket legs that reserve shares.
@@ -1105,6 +1214,13 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     global _learning_engine
 
     cancel_results = []
+    protective_cancel = _cancel_protective_stop_order(trade)
+    if protective_cancel:
+        log_event("INFO", "protective_stop_cancelled_for_manual_exit", {
+            "ticker": ticker,
+            "result": protective_cancel,
+        })
+
     if exit_reason == "time_exit":
         cancel_results = _cancel_bracket_orders_for_manual_exit(trade)
         if cancel_results:
@@ -1117,8 +1233,8 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     close_error = result.get("error")
     if close_error:
         if "position not found" in str(close_error).lower():
-            # Position was closed by Alpaca's bracket mechanism — try to recover fill price
-            recovered = _recover_bracket_fill(trade)
+            # Position was closed by broker-side protection — try to recover fill price.
+            recovered = _recover_protective_stop_fill(trade) or _recover_bracket_fill(trade)
             if recovered:
                 exit_price  = recovered["exit_price"]
                 exit_reason = recovered["exit_reason"]
@@ -1216,6 +1332,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "highest_price_since_entry": trade.get("highest_price_since_entry"),
         "daily_reeval_count": int(trade.get("daily_reeval_count") or 0),
         "hold_decision_json": trade.get("hold_decision_json"),
+        "protective_stop_order_id": trade.get("protective_stop_order_id"),
         "order_id":        trade.get("order_id"),
         "close_order_id":  result.get("order_id"),
         "close_error":     close_error,
@@ -1548,6 +1665,7 @@ def re_evaluate_swing_positions():
                 })
 
             days_remaining = max(0, max_days - days_held)
+            save_open_trade(ticker, _open_trades[ticker])
             log_event("INFO", "swing_hold_confirmed", {
                 "ticker":          ticker,
                 "composite":       composite,

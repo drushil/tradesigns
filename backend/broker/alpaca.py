@@ -223,6 +223,46 @@ def submit_market_order(ticker: str, side: str, qty: float,
         return {"error": str(e), "ticker": ticker, "side": side}
 
 
+def submit_stop_order(ticker: str, side: str, qty: float,
+                      stop_price: float,
+                      time_in_force: str = "gtc") -> dict:
+    """
+    Submit a standalone protective stop order.
+    side is the closing side: 'sell' protects a long, 'buy' protects a short.
+    """
+    try:
+        from alpaca.trading.requests import StopOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        qty = math.floor(float(qty or 0))
+        if qty <= 0:
+            return {"error": "quantity below 1 share after stop sizing", "ticker": ticker, "side": side}
+
+        tif = TimeInForce.GTC if str(time_in_force).lower() == "gtc" else TimeInForce.DAY
+        order_side = OrderSide.SELL if side.lower() == "sell" else OrderSide.BUY
+        req = StopOrderRequest(
+            symbol=ticker,
+            qty=qty,
+            side=order_side,
+            time_in_force=tif,
+            stop_price=_round_price(float(stop_price)),
+        )
+        order = _get_trading_client().submit_order(req)
+        return {
+            "order_id": str(order.id),
+            "ticker": ticker,
+            "side": side,
+            "qty": float(order.qty or qty),
+            "stop_price": _round_price(float(stop_price)),
+            "status": str(order.status),
+            "order_class": "protective_stop",
+            "time_in_force": str(tif),
+            "submitted_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "side": side}
+
+
 def close_position(ticker: str) -> dict:
     """Closes an open position entirely via market order."""
     try:

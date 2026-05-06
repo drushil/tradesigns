@@ -467,6 +467,7 @@ alter table if exists trades
     add column if not exists trailing_stop_price    numeric(12,4),
     add column if not exists highest_price_since_entry numeric(12,4),
     add column if not exists overnight_gap_pct      numeric(8,4),
+    add column if not exists protective_stop_order_id text,
     add column if not exists hold_decision_json     jsonb;
 
 -- signals: swing detection results at signal time
@@ -484,9 +485,12 @@ alter table if exists open_trades
     add column if not exists highest_price_since_entry  numeric(12,4),
     add column if not exists trailing_stop_price        numeric(12,4),
     add column if not exists stop_multiplier            numeric(4,2),
+    add column if not exists stop_pct                   numeric(6,4),
+    add column if not exists max_hold_minutes           smallint,
     add column if not exists daily_reeval_count         smallint default 0,
     add column if not exists hold_decision_json         jsonb,
-    add column if not exists initial_horizon            text;
+    add column if not exists initial_horizon            text,
+    add column if not exists protective_stop_order_id   text;
 
 -- Update exit_reason constraint to include momentum-swing exit types
 alter table if exists trades drop constraint if exists trades_exit_reason_check;
