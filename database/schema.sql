@@ -43,6 +43,9 @@ create table if not exists trades (
     sizing_json     jsonb,
     mean_reversion_trade boolean default false,
     swing_trade     boolean default false,
+    exposure_direction text,
+    strategy_family text,
+    regime_debug_json jsonb,
     composite_score numeric(6,4) check (composite_score between -1 and 1),
     llm_conviction  numeric(6,4) check (llm_conviction between 0 and 1),
     llm_rationale   text,
@@ -64,7 +67,10 @@ create index if not exists idx_trades_pnl         on trades (net_pnl_pct)
     where net_pnl_pct is not null;
 
 alter table if exists trades
-    add column if not exists size_usd numeric(10,2);
+    add column if not exists size_usd numeric(10,2),
+    add column if not exists exposure_direction text,
+    add column if not exists strategy_family text,
+    add column if not exists regime_debug_json jsonb;
 
 -- 2. OPEN_TRADES
 create table if not exists open_trades (
@@ -94,6 +100,9 @@ create table if not exists open_trades (
     sizing_json         jsonb,
     mean_reversion_trade boolean default false,
     swing_trade         boolean default false,
+    exposure_direction  text,
+    strategy_family     text,
+    regime_debug_json   jsonb,
     composite_score     numeric(6,4),
     llm_conviction      numeric(6,4),
     llm_rationale       text,
@@ -114,7 +123,10 @@ alter table if exists open_trades
     add column if not exists dip_type text,
     add column if not exists sizing_json jsonb,
     add column if not exists mean_reversion_trade boolean default false,
-    add column if not exists swing_trade boolean default false;
+    add column if not exists swing_trade boolean default false,
+    add column if not exists exposure_direction text,
+    add column if not exists strategy_family text,
+    add column if not exists regime_debug_json jsonb;
 
 -- 3. SIGNALS
 create table if not exists signals (
@@ -141,6 +153,10 @@ create table if not exists signals (
     regime_bull_bear        text check (regime_bull_bear in ('bull','bear','transitioning')),
     shock_detected          boolean default false,
     shock_classification    text,
+    action_hint             text check (action_hint in ('BUY','SELL','HOLD',null)),
+    exposure_direction      text,
+    strategy_family         text,
+    regime_debug_json       jsonb,
     vix                     numeric(6,2),
     volume_vs_avg           numeric(6,2),
     gated                   boolean not null default false,
@@ -154,6 +170,12 @@ create index if not exists idx_signals_created_at  on signals (created_at desc);
 create index if not exists idx_signals_ticker_time on signals (ticker, created_at desc);
 create index if not exists idx_signals_active      on signals (created_at desc)
     where gated = false;
+
+alter table if exists signals
+    add column if not exists action_hint text,
+    add column if not exists exposure_direction text,
+    add column if not exists strategy_family text,
+    add column if not exists regime_debug_json jsonb;
 
 -- 4. NEWS_CACHE
 create table if not exists news_cache (

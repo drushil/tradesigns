@@ -32,6 +32,11 @@ class RegimeState:
     vix: float
     sma200_price: float
     price_vs_sma200_pct: float
+    trend_score: float = 0.0
+    trend_threshold: float = 1.5
+    trend_mean_return: float = 0.0
+    trend_std_return: float = 0.0
+    regime_reason: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1364,19 +1369,34 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
     except Exception:
         pass
 
+    trend_score = 0.0
+    trend_threshold = 1.5
+    trend_mean_return = 0.0
+    trend_std_return = 0.0
+    regime_reason = "vix_high" if vix > 30 else "default"
+
     if vix > 30:
         intraday_regime = "high_vol"
     else:
         df = _get_bars(ticker, period="5d", interval="15m")
         if df is None:
             intraday_regime = "ranging"
+            regime_reason = "insufficient_intraday_data"
         else:
             close  = df["Close"].squeeze()
             returns   = close.pct_change().dropna()
             std_ret   = float(returns.rolling(14).std().iloc[-1])
             mean_ret  = float(returns.rolling(14).mean().iloc[-1])
+            if not np.isfinite(std_ret) or not np.isfinite(mean_ret):
+                std_ret = 0.0
+                mean_ret = 0.0
+                regime_reason = "insufficient_return_window"
             trend_score = abs(mean_ret) / (std_ret + 1e-9)
             intraday_regime = "trending" if trend_score > 1.5 else "ranging"
+            trend_mean_return = mean_ret
+            trend_std_return = std_ret
+            if regime_reason != "insufficient_return_window":
+                regime_reason = "trend_score_above_threshold" if intraday_regime == "trending" else "trend_score_below_threshold"
 
     state = RegimeState(
         market_regime=market_regime,
@@ -1384,6 +1404,11 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
         vix=round(vix, 2),
         sma200_price=round(sma200_price, 4),
         price_vs_sma200_pct=round(price_vs_sma200_pct, 3),
+        trend_score=round(trend_score, 4),
+        trend_threshold=trend_threshold,
+        trend_mean_return=round(trend_mean_return, 8),
+        trend_std_return=round(trend_std_return, 8),
+        regime_reason=regime_reason,
     )
     _regime_state_cache[cache_key] = (now_ts, state)
     return state

@@ -94,6 +94,9 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "llm_conviction": trade.get("llm_conviction"),
             "llm_rationale": trade.get("llm_rationale"),
             "signals_json": trade.get("signals_json", {}),
+            "exposure_direction": trade.get("exposure_direction"),
+            "strategy_family": trade.get("strategy_family"),
+            "regime_debug_json": trade.get("regime_debug_json"),
             "status": "open",
         }
         try:
@@ -104,7 +107,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                 if k not in {"quantity", "hold_minutes", "hold_days", "horizon",
                              "size_usd",
                              "macro_regime", "macro_multiplier", "dip_type",
-                             "sizing_json", "mean_reversion_trade", "swing_trade"}
+                             "sizing_json", "mean_reversion_trade", "swing_trade",
+                             "exposure_direction", "strategy_family", "regime_debug_json"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}

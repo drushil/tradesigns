@@ -26,7 +26,7 @@ def render():
     df["pnl_eur"]     = pd.to_numeric(df.get("pnl_eur", 0),     errors="coerce").fillna(0)
 
     # ── Filters ────────────────────────────────────────────────────────────
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
     with col_f1:
         tickers = ["All"] + sorted(df["ticker"].unique().tolist())
         sel_ticker = st.selectbox("Ticker", tickers)
@@ -39,6 +39,9 @@ def render():
     with col_f4:
         outcomes = ["All", "Wins only", "Losses only"]
         sel_outcome = st.selectbox("Outcome", outcomes)
+    with col_f5:
+        exposures = ["All"] + sorted(df["exposure_direction"].dropna().unique().tolist()) if "exposure_direction" in df.columns else ["All"]
+        sel_exposure = st.selectbox("Exposure", exposures)
 
     fdf = df.copy()
     if sel_ticker != "All":
@@ -51,6 +54,8 @@ def render():
         fdf = fdf[fdf["net_pnl_pct"] > 0]
     elif sel_outcome == "Losses only":
         fdf = fdf[fdf["net_pnl_pct"] <= 0]
+    if sel_exposure != "All" and "exposure_direction" in fdf.columns:
+        fdf = fdf[fdf["exposure_direction"] == sel_exposure]
 
     if sel_ticker != "All":
         profile_html = ticker_profile_html(sel_ticker, compact=True)
@@ -69,8 +74,8 @@ def render():
     c3.metric("Avg P&L", f"{fdf['net_pnl_pct'].mean():+.3f}%" if len(fdf) else "—")
     c4.metric("Total P&L", f"€{fdf['pnl_eur'].sum():+.2f}" if len(fdf) else "—")
     c5.metric("Avg hold", f"{fdf['hold_minutes'].mean():.0f} min" if "hold_minutes" in fdf.columns and len(fdf) else "—")
-    short_count = int((fdf["side"] == "SELL").sum()) if "side" in fdf.columns else 0
-    c6.metric("Short mix", f"{short_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
+    bearish_count = int((fdf["exposure_direction"] == "short_market").sum()) if "exposure_direction" in fdf.columns else 0
+    c6.metric("Bearish exposure", f"{bearish_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
 
     st.markdown("---")
 
@@ -105,10 +110,44 @@ def render():
                                margin=dict(l=0,r=0,t=10,b=0))
             st.plotly_chart(fig2, width="stretch")
 
+    if "strategy_family" in fdf.columns and "exposure_direction" in fdf.columns:
+        col_strategy, col_exposure = st.columns(2)
+        with col_strategy:
+            st.markdown("##### P&L by Strategy")
+            strategy_perf = (fdf.groupby("strategy_family", dropna=False)
+                               .agg(trades=("ticker", "count"), avg_pnl=("net_pnl_pct", "mean"))
+                               .reset_index())
+            fig3 = px.bar(
+                strategy_perf, x="strategy_family", y="avg_pnl", color="trades",
+                template="plotly_dark",
+                labels={"strategy_family": "Strategy", "avg_pnl": "Avg Net P&L (%)"},
+            )
+            fig3.add_hline(y=0, line_dash="dot", line_color="#555")
+            fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=280,
+                               margin=dict(l=0,r=0,t=10,b=0))
+            st.plotly_chart(fig3, width="stretch")
+        with col_exposure:
+            st.markdown("##### P&L by Exposure")
+            exposure_perf = (fdf.groupby("exposure_direction", dropna=False)
+                               .agg(trades=("ticker", "count"), avg_pnl=("net_pnl_pct", "mean"))
+                               .reset_index())
+            fig4 = px.bar(
+                exposure_perf, x="exposure_direction", y="avg_pnl", color="trades",
+                template="plotly_dark",
+                labels={"exposure_direction": "Exposure", "avg_pnl": "Avg Net P&L (%)"},
+            )
+            fig4.add_hline(y=0, line_dash="dot", line_color="#555")
+            fig4.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=280,
+                               margin=dict(l=0,r=0,t=10,b=0))
+            st.plotly_chart(fig4, width="stretch")
+
     # ── Trade table ────────────────────────────────────────────────────────
     st.markdown("##### All Trades")
     display_cols = ["created_at", "ticker", "side", "net_pnl_pct",
                     "pnl_eur", "hold_minutes", "exit_reason", "regime",
+                    "exposure_direction", "strategy_family",
                     "composite_score", "llm_conviction"]
     available = [c for c in display_cols if c in fdf.columns]
     show_df = fdf[available].sort_values("created_at", ascending=False).head(100)

@@ -338,6 +338,84 @@ def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> 
     return min(size_eur, capital_base * float(short_cap_pct) / 100)
 
 
+_INVERSE_ETFS = {"SH", "PSQ", "SQQQ", "SPXU", "SDS", "QID", "DOG", "TZA"}
+_DEFENSIVE_TICKERS = {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"}
+
+
+def _exposure_direction(ticker: str, side: str) -> str:
+    ticker = str(ticker or "").upper()
+    side = str(side or "").upper()
+    if side == "SELL":
+        return "short_market"
+    if ticker in _INVERSE_ETFS:
+        return "short_market"
+    if ticker in _DEFENSIVE_TICKERS:
+        return "defensive_long"
+    return "long_market"
+
+
+def _regime_debug_payload(regime_state, signal_result: dict = None) -> dict:
+    signal_result = signal_result or {}
+    payload = regime_state.to_dict() if hasattr(regime_state, "to_dict") else {}
+    payload.update({
+        "macro_regime": signal_result.get("macro_regime"),
+        "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
+        "regime_bull_bear": signal_result.get("regime_bull_bear"),
+        "shock_detected": signal_result.get("shock_detected", False),
+        "shock_classification": signal_result.get("shock_classification"),
+    })
+    return payload
+
+
+def _strategy_family(ticker: str, side: str, regime: str, signal_result: dict,
+                     horizon: str = "short", mean_reversion_trade: bool = False) -> str:
+    ticker = str(ticker or "").upper()
+    side = str(side or "").upper()
+    regime = str(regime or "")
+    horizon = str(horizon or "short")
+    signal_result = signal_result or {}
+    signals = signal_result.get("signals", {}) or {}
+
+    if mean_reversion_trade or signal_result.get("mean_reversion_signal"):
+        return "mean_reversion"
+    if horizon == "swing":
+        return "swing"
+    if ticker in _INVERSE_ETFS:
+        return "inverse_etf"
+    if side == "SELL":
+        return "direct_short"
+
+    macd = signals.get("macd_crossover", {}).get("score", 0)
+    rel_strength = signals.get("relative_strength", {}).get("score", 0)
+    tape = signals.get("tape_aggression", {}).get("score", 0)
+    if regime == "trending" or max(macd, rel_strength, tape) >= 0.35:
+        return "trend_following"
+    return "signal_composite"
+
+
+def _log_short_candidate(event_name: str, ticker: str, composite: float,
+                         reason: str = None, profile: dict = None,
+                         regime_state = None, extra: dict = None):
+    profile = profile or {}
+    market_regime = getattr(regime_state, "market_regime", None)
+    min_short_score = profile.get("min_short_signal_score", profile.get("min_signal_score"))
+    if str(market_regime or "").lower() == "bull":
+        min_short_score = profile.get("bull_short_signal_score", min_short_score)
+    payload = {
+        "ticker": ticker,
+        "composite": composite,
+        "reason": reason,
+        "market_regime": market_regime,
+        "intraday_regime": getattr(regime_state, "intraday_regime", None),
+        "min_signal_score": profile.get("min_signal_score"),
+        "min_short_signal_score": min_short_score,
+        "allow_short_selling": profile.get("allow_short_selling", False),
+    }
+    if extra:
+        payload.update(extra)
+    log_event("INFO", event_name, payload)
+
+
 def _parse_dt(value):
     if isinstance(value, datetime):
         return value
@@ -368,6 +446,9 @@ def _hydrate_open_trades():
             "composite_score": float(record.get("composite_score") or 0),
             "signals_json": record.get("signals_json") or {},
             "regime": record.get("regime") or "ranging",
+            "exposure_direction": record.get("exposure_direction"),
+            "strategy_family": record.get("strategy_family"),
+            "regime_debug_json": record.get("regime_debug_json") or {},
             "macro_regime": record.get("macro_regime"),
             "macro_multiplier": float(record.get("macro_multiplier") or 1.0),
             "dip_type": record.get("dip_type"),
@@ -489,6 +570,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
     atr_data       = signal_result.get("atr_data") or {}
+    regime_debug   = _regime_debug_payload(ticker_regime_state, signal_result)
     news_headline = (signals_snap.get("news_sentiment", {})
                     .get("meta", {}).get("latest_headline", ""))
 
@@ -529,6 +611,10 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "shock_detected":         signal_result.get("shock_detected", False),
         "shock_classification":   signal_result.get("shock_classification"),
         "regime":                 ticker_regime,
+        "action_hint":            action_hint,
+        "exposure_direction":     _exposure_direction(ticker, action_hint),
+        "strategy_family":        _strategy_family(ticker, action_hint, ticker_regime, signal_result),
+        "regime_debug_json":      regime_debug,
         "vix":                    portfolio_state["vix"],
         "gated":                  not gate_ok,
         "gate_reason":            gate_reason if not gate_ok else None,
@@ -541,12 +627,22 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "composite": composite,
             "reason": gate_reason,
         })
+        if action_hint == "SELL":
+            _log_short_candidate(
+                "short_candidate_gated", ticker, composite, gate_reason,
+                profile, ticker_regime_state,
+            )
         return
 
     # 4. EV check
     ev_result = compute_expected_value(composite, size_eur, recent_trades, ticker_regime)
     if ev_result["decision"] == "block":
         log_event("INFO", "ev_blocked", {"ticker": ticker, **ev_result})
+        if action_hint == "SELL":
+            _log_short_candidate(
+                "short_candidate_ev_blocked", ticker, composite,
+                ev_result.get("reason", "ev_blocked"), profile, ticker_regime_state, ev_result,
+            )
         return
 
     # 5. LLM decision (gated by hourly limit)
@@ -584,6 +680,12 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "composite": composite,
             "rationale": llm_result.get("rationale", ""),
         })
+        if action == "SELL":
+            _log_short_candidate(
+                "short_candidate_llm_hold", ticker, composite,
+                llm_result.get("rationale", "llm_hold"), profile, ticker_regime_state,
+                {"llm_conviction": llm_conviction},
+            )
         return
     if suggested_action in {"BUY", "SELL"} and suggested_action != action:
         log_event("INFO", "llm_direction_conflict", {
@@ -593,6 +695,13 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "llm_action": suggested_action,
             "rationale": llm_result.get("rationale", ""),
         })
+        if action == "SELL":
+            _log_short_candidate(
+                "short_candidate_llm_conflict", ticker, composite,
+                llm_result.get("rationale", "llm_direction_conflict"),
+                profile, ticker_regime_state,
+                {"llm_action": suggested_action, "llm_conviction": llm_conviction},
+            )
         return
 
     if conviction < profile["min_conviction"]:
@@ -601,6 +710,12 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "conviction": conviction,
             "min_conviction": profile["min_conviction"],
         })
+        if action == "SELL":
+            _log_short_candidate(
+                "short_candidate_conviction_blocked", ticker, composite,
+                "conviction_below_threshold", profile, ticker_regime_state,
+                {"conviction": conviction, "min_conviction": profile["min_conviction"]},
+            )
         return
 
     # 6. Size and submit order
@@ -667,6 +782,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         stop_price = current_price * (1 + stop_loss_pct / 100)
         take_profit_price = current_price * (1 - profile.get("take_profit_pct", 2.0) / 100)
 
+    exposure_direction = _exposure_direction(ticker, action)
+    strategy_family = _strategy_family(
+        ticker, action, ticker_regime, signal_result,
+        horizon="short", mean_reversion_trade=mean_reversion_trade,
+    )
     _open_trades[ticker] = {
         "entry_time":    datetime.utcnow(),
         "entry_price":   current_price,
@@ -680,6 +800,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
         "regime":        ticker_regime,
+        "exposure_direction": exposure_direction,
+        "strategy_family": strategy_family,
+        "regime_debug_json": regime_debug,
         "macro_regime":  signal_result.get("macro_regime"),
         "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
         "horizon":       "short",
@@ -699,6 +822,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "rationale": llm_result.get("rationale"),
         "sizing": sizing,
         "mean_reversion_trade": mean_reversion_trade,
+        "exposure_direction": exposure_direction,
+        "strategy_family": strategy_family,
     })
 
 
@@ -883,6 +1008,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "llm_conviction":  trade["llm_conviction"],
         "llm_rationale":   trade["llm_rationale"],
         "signals_json":    trade["signals_json"],
+        "exposure_direction": trade.get("exposure_direction") or _exposure_direction(ticker, trade["side"]),
+        "strategy_family": trade.get("strategy_family"),
+        "regime_debug_json": trade.get("regime_debug_json") or {},
         "dip_type":        trade.get("dip_type"),
         "sizing_json":     trade.get("sizing_json"),
         "mean_reversion_trade": bool(trade.get("mean_reversion_trade")),
@@ -1017,6 +1145,16 @@ def _submit_horizon_order(
         stop_price = current_price * (1 + stop_loss_pct / 100)
         take_profit_price = current_price * (1 - take_profit_pct / 100)
 
+    signal_context = {
+        "signals": signals_json or {},
+        "macro_regime": macro_regime,
+        "macro_multiplier": macro_multiplier,
+    }
+    exposure_direction = _exposure_direction(ticker, side)
+    strategy_family = _strategy_family(
+        ticker, side, regime, signal_context,
+        horizon=horizon, mean_reversion_trade=False,
+    )
     record = {
         "entry_time": datetime.utcnow(),
         "entry_price": current_price,
@@ -1031,6 +1169,9 @@ def _submit_horizon_order(
         "composite_score": composite_score,
         "signals_json": signals_json or {},
         "regime": regime,
+        "exposure_direction": exposure_direction,
+        "strategy_family": strategy_family,
+        "regime_debug_json": _regime_debug_payload(regime_state, signal_context),
         "macro_regime": macro_regime,
         "macro_multiplier": macro_multiplier,
         "horizon": horizon,
@@ -1056,6 +1197,8 @@ def _submit_horizon_order(
         "rationale": rationale,
         "dip_type": dip_type,
         "sizing": sizing,
+        "exposure_direction": exposure_direction,
+        "strategy_family": strategy_family,
     })
     return order
 
