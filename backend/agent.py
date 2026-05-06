@@ -70,6 +70,18 @@ def _eurusd_rate() -> float:
     return _env_float("EURUSD_RATE", 1.08)
 
 
+def _get_cached_signals(ticker: str, weights: dict, regime_state) -> dict:
+    """Return signals from cache if fresh, otherwise fetch and cache."""
+    cached = _signal_cache.get(ticker)
+    if cached:
+        age = (datetime.utcnow() - cached[0]).total_seconds()
+        if age < _SIGNAL_CACHE_TTL_SECONDS:
+            return cached[1]
+    result = compute_all_signals(ticker, weights, regime_state=regime_state)
+    _signal_cache[ticker] = (datetime.utcnow(), result)
+    return result
+
+
 def _eur_to_usd(amount_eur: float) -> float:
     return float(amount_eur or 0) * _eurusd_rate()
 
@@ -96,6 +108,9 @@ _last_shock_result   = {
     "direction": "mixed",
     "reason": "not_scanned",
 }
+# Per-cycle signal cache — keyed by ticker, expires after 12 min (one cycle apart)
+_signal_cache: dict[str, tuple[datetime, dict]] = {}
+_SIGNAL_CACHE_TTL_SECONDS = 720
 
 def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
     first = date(year, month, 1)
@@ -648,7 +663,7 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
     try:
         weights = _learning_engine.get_weights("trending") if _learning_engine else profile["signal_weights"]
         regime_state = detect_regime(ticker)
-        signal_result = compute_all_signals(ticker, weights, regime_state=regime_state)
+        signal_result = _get_cached_signals(ticker, weights, regime_state)
         swing_check = detect_momentum_swing(ticker, signal_result, regime_state, profile)
     except Exception as e:
         log_event("WARN", "swing_promotion_signal_error", {"ticker": ticker, "error": str(e)[:80]})
@@ -850,10 +865,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         weights = _learning_engine.get_weights(ticker_regime)
     action_hint = None
 
-    # 1. Compute signals
+    # 1. Compute signals (also warms the intra-cycle cache)
     signal_result = compute_all_signals(
         ticker, weights, regime_state=ticker_regime_state, shock_result=shock_result
     )
+    _signal_cache[ticker] = (datetime.utcnow(), signal_result)
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
     atr_data       = signal_result.get("atr_data") or {}
@@ -1249,7 +1265,7 @@ def _handle_hold_deadline(
             _learning_engine.get_weights(regime_state.intraday_regime)
             if _learning_engine else profile["signal_weights"]
         )
-        signal_result = compute_all_signals(ticker, weights, regime_state=regime_state)
+        signal_result = _get_cached_signals(ticker, weights, regime_state)
         current_composite = float(signal_result.get("composite_score") or 0.0)
     except Exception as e:
         log_event("WARN", "hold_deadline_signal_error", {
