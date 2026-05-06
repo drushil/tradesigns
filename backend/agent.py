@@ -72,13 +72,19 @@ def _eurusd_rate() -> float:
 
 def _get_cached_signals(ticker: str, weights: dict, regime_state) -> dict:
     """Return signals from cache if fresh, otherwise fetch and cache."""
+    now = datetime.now(timezone.utc)
     cached = _signal_cache.get(ticker)
-    if cached:
-        age = (datetime.utcnow() - cached[0]).total_seconds()
+    if cached is not None:
+        age = (now - cached[0]).total_seconds()
         if age < _SIGNAL_CACHE_TTL_SECONDS:
             return cached[1]
+    # Evict all expired entries while we're here (keeps dict bounded to TICKERS set)
+    expired = [k for k, v in _signal_cache.items()
+               if (now - v[0]).total_seconds() >= _SIGNAL_CACHE_TTL_SECONDS]
+    for k in expired:
+        _signal_cache.pop(k, None)
     result = compute_all_signals(ticker, weights, regime_state=regime_state)
-    _signal_cache[ticker] = (datetime.utcnow(), result)
+    _signal_cache[ticker] = (now, result)
     return result
 
 
@@ -517,7 +523,7 @@ def _trade_pnl_pct(trade: dict, current_price: float) -> float:
 
 
 def _directional_score(side: str, composite: float) -> float:
-    return float(composite or 0.0) if side == "BUY" else -float(composite or 0.0)
+    return float(composite) if side == "BUY" else -float(composite)
 
 
 def _time_exit_cooldown_active(ticker: str, recent_trades: list, profile: dict) -> Optional[dict]:
@@ -596,6 +602,9 @@ def _hydrate_open_trades():
             "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
             "hold_extension_count": int(record.get("hold_extension_count") or 0),
             "hold_decision_json": record.get("hold_decision_json") or {},
+            "peak_directional_score": float(record.get("peak_directional_score") or 0),
+            "entry_vwap": float(record.get("entry_vwap") or 0),
+            "consecutive_weak_cycles": int(record.get("consecutive_weak_cycles") or 0),
             "protective_stop_order_id": record.get("protective_stop_order_id"),
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
@@ -638,10 +647,9 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
     Returns True if promoted (caller should skip the close).
     """
     # Must be profitable to promote
-    entry_price = trade.get("entry_price", 0)
-    if entry_price <= 0:
+    if (trade.get("entry_price") or 0) <= 0:
         return False
-    pnl_pct = (current_price - entry_price) / entry_price * 100
+    pnl_pct = _trade_pnl_pct(trade, current_price)
     if pnl_pct <= 0:
         return False
 
@@ -869,7 +877,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     signal_result = compute_all_signals(
         ticker, weights, regime_state=ticker_regime_state, shock_result=shock_result
     )
-    _signal_cache[ticker] = (datetime.utcnow(), signal_result)
+    _signal_cache[ticker] = (datetime.now(timezone.utc), signal_result)
     composite     = signal_result["composite_score"]
     signals_snap  = signal_result["signals"]
     atr_data       = signal_result.get("atr_data") or {}
@@ -1202,7 +1210,7 @@ def _check_exits(portfolio_state, profile):
                     else:
                         save_open_trade(ticker, _open_trades[ticker])
 
-                pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0.0
+                pnl_pct = _trade_pnl_pct(trade, current_price)
                 if exit_reason:
                     pass
                 elif trade.get("side", "BUY") == "BUY" and current_price <= chandelier_stop:
@@ -1216,6 +1224,10 @@ def _check_exits(portfolio_state, profile):
 
             else:
                 # Normal intraday stop/take-profit/time exit
+                # For extended trades check momentum decay each cycle before stop/time checks
+                if exit_reason is None and int(trade.get("hold_extension_count") or 0) > 0:
+                    exit_reason = _check_momentum_exit(ticker, trade, profile)
+
                 stop_price        = trade["stop_price"]
                 take_profit_price = trade.get("take_profit_price")
 
@@ -1317,7 +1329,8 @@ def _handle_hold_deadline(
         log_event("INFO", "hold_deadline_exit", decision)
         return "time_exit"
 
-    if pnl_pct > 0 and signal_result.get("composite_score") is not None:
+    # Only attempt swing promotion if signal is still aligned (not faded)
+    if pnl_pct > 0 and current_score >= aligned_score and signal_result.get("composite_score") is not None:
         if _try_promote_to_swing(ticker, trade, current_price, profile):
             decision["decision"] = "promoted_to_swing"
             log_event("INFO", "hold_deadline_promoted", decision)
@@ -1326,6 +1339,12 @@ def _handle_hold_deadline(
     if pnl_pct >= min_green and current_score >= aligned_score and extensions_used < max_extensions:
         _open_trades[ticker]["hold_minutes"] = int(trade.get("hold_minutes") or 0) + extension_minutes
         _open_trades[ticker]["hold_extension_count"] = extensions_used + 1
+        # Capture momentum baseline for decay tracking on first extension
+        if extensions_used == 0:
+            vwap_meta = (signal_result.get("signals") or {}).get("vwap_deviation", {}).get("meta", {})
+            _open_trades[ticker]["peak_directional_score"] = round(current_score, 4)
+            _open_trades[ticker]["entry_vwap"] = float(vwap_meta.get("vwap") or 0)
+            _open_trades[ticker]["consecutive_weak_cycles"] = 0
         hold_decision = dict(trade.get("hold_decision_json") or {})
         hold_decision["deadline_extension"] = {
             **decision,
@@ -1341,6 +1360,83 @@ def _handle_hold_deadline(
     decision["decision"] = "exit_deadline_no_edge"
     log_event("INFO", "hold_deadline_exit", decision)
     return "time_exit"
+
+
+def _check_momentum_exit(ticker: str, trade: dict, profile: dict) -> Optional[str]:
+    """
+    Per-cycle momentum health check for extended intraday trades.
+    Uses only the intra-cycle signal cache — zero extra API calls.
+
+    Four decay signals (three trigger exits, one contributes to persistence counter):
+      1. peak_decay      — directional score dropped >40% from its peak since extension
+      2. vwap_recross    — price crossed back through VWAP against the position direction
+      3. volume_fade     — volume_ratio < 0.5 (contributes to consecutive_weak_cycles)
+      4. score_persist   — directional score weak for 2+ consecutive cycles
+    """
+    cached = _signal_cache.get(ticker)
+    if cached is None:
+        return None
+    signal_result = cached[1]
+
+    side = trade.get("side", "BUY")
+    composite = float(signal_result.get("composite_score") or 0)
+    current_score = _directional_score(side, composite)
+    signals = signal_result.get("signals") or {}
+
+    # ── 1. Momentum peak decay ─────────────────────────────────────────────
+    peak_score = float(trade.get("peak_directional_score") or current_score)
+    if current_score > peak_score:
+        _open_trades[ticker]["peak_directional_score"] = round(current_score, 4)
+    elif peak_score > 0.10 and current_score < peak_score * 0.60:
+        log_event("INFO", "momentum_exit_triggered", {
+            "ticker": ticker, "reason": "peak_decay",
+            "peak_score": round(peak_score, 4),
+            "current_score": round(current_score, 4),
+        })
+        return "momentum_peak_decay"
+
+    # ── 2. VWAP recross ───────────────────────────────────────────────────
+    entry_vwap = float(trade.get("entry_vwap") or 0)
+    if entry_vwap > 0:
+        vwap_meta = signals.get("vwap_deviation", {}).get("meta", {})
+        sig_price  = float(vwap_meta.get("price") or 0)
+        sig_vwap   = float(vwap_meta.get("vwap") or 0)
+        if sig_price > 0 and sig_vwap > 0:
+            entry_was_above = float(trade.get("entry_price") or 0) >= entry_vwap
+            now_below = sig_price < sig_vwap
+            recrossed = (side == "BUY" and entry_was_above and now_below) or \
+                        (side == "SELL" and not entry_was_above and not now_below)
+            if recrossed:
+                log_event("INFO", "momentum_exit_triggered", {
+                    "ticker": ticker, "reason": "vwap_recross",
+                    "entry_vwap": round(entry_vwap, 4),
+                    "current_vwap": round(sig_vwap, 4),
+                    "current_price": round(sig_price, 4),
+                })
+                return "vwap_recross"
+
+    # ── 3 & 4. Volume fade + score persistence ────────────────────────────
+    tape_meta    = signals.get("tape_aggression", {}).get("meta", {})
+    volume_ratio = float(tape_meta.get("volume_ratio") or 1.0)
+    min_score    = float(profile.get("hold_extension_min_signal_score", 0.20))
+    score_weak   = current_score < min_score
+    volume_fading = volume_ratio < 0.5
+
+    if score_weak or volume_fading:
+        weak_count = int(trade.get("consecutive_weak_cycles") or 0) + 1
+        _open_trades[ticker]["consecutive_weak_cycles"] = weak_count
+        if weak_count >= 2:
+            log_event("INFO", "momentum_exit_triggered", {
+                "ticker": ticker, "reason": "score_persistence",
+                "consecutive_weak_cycles": weak_count,
+                "current_score": round(current_score, 4),
+                "volume_ratio": round(volume_ratio, 2),
+            })
+            return "score_persistence_exit"
+    else:
+        _open_trades[ticker]["consecutive_weak_cycles"] = 0
+
+    return None
 
 
 def _recover_bracket_fill(trade: dict) -> Optional[dict]:
@@ -1599,16 +1695,17 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     if _learning_engine:
         _learning_engine.update(attributions, trade["regime"])
         weights = _learning_engine.all_weights()
+        recent_count = sum(1 for _ in get_recent_trades(days=90))
         save_signal_weights(
             regime="global",
             weights=weights["global"],
-            trade_count=sum(1 for _ in get_recent_trades(days=90)),
+            trade_count=recent_count,
             trigger="trade_update"
         )
         save_signal_weights(
             regime=trade["regime"],
             weights=weights.get(trade["regime"], weights["global"]),
-            trade_count=sum(1 for _ in get_recent_trades(days=90)),
+            trade_count=recent_count,
             trigger="trade_update"
         )
 
@@ -1848,7 +1945,7 @@ def re_evaluate_swing_positions():
             current_price = _current_daily_price(ticker)
             if not current_price:
                 continue
-            pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0.0
+            pnl_pct = _trade_pnl_pct(pos, current_price)
 
             # Increment daily reeval counter
             _open_trades[ticker]["daily_reeval_count"] = int(pos.get("daily_reeval_count", 0)) + 1

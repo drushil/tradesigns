@@ -491,6 +491,9 @@ alter table if exists open_trades
     add column if not exists daily_reeval_count         smallint default 0,
     add column if not exists hold_extension_count       smallint default 0,
     add column if not exists hold_decision_json         jsonb,
+    add column if not exists peak_directional_score     numeric(6,4) default 0,
+    add column if not exists entry_vwap                 numeric(12,4) default 0,
+    add column if not exists consecutive_weak_cycles    smallint default 0,
     add column if not exists initial_horizon            text,
     add column if not exists protective_stop_order_id   text;
 
@@ -502,5 +505,6 @@ alter table if exists trades
         'signal_reversal','manual','circuit_breaker',
         'chandelier_stop','swing_exit','earnings_tomorrow',
         'regime_turned_bear','momentum_reversed',
-        'macro_shock','take_profit_8pct','swing_promoted'
+        'macro_shock','take_profit_8pct','swing_promoted',
+        'momentum_peak_decay','vwap_recross','score_persistence_exit'
     ));
