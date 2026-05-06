@@ -105,8 +105,6 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "hold_extension_count": trade.get("hold_extension_count"),
             "hold_decision_json": trade.get("hold_decision_json"),
             "peak_directional_score": trade.get("peak_directional_score"),
-            "entry_vwap": trade.get("entry_vwap"),
-            "consecutive_weak_cycles": trade.get("consecutive_weak_cycles"),
             "protective_stop_order_id": trade.get("protective_stop_order_id"),
             "composite_score": trade.get("composite_score"),
             "llm_conviction": trade.get("llm_conviction"),
@@ -131,7 +129,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                              "highest_price_since_entry", "trailing_stop_price",
                              "stop_multiplier", "stop_pct", "max_hold_minutes",
                              "daily_reeval_count", "hold_extension_count", "hold_decision_json",
-                             "peak_directional_score", "entry_vwap", "consecutive_weak_cycles",
+                             "peak_directional_score",
                              "protective_stop_order_id",
                              "exposure_direction", "strategy_family", "regime_debug_json"}
             }

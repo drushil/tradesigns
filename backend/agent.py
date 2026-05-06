@@ -603,8 +603,6 @@ def _hydrate_open_trades():
             "hold_extension_count": int(record.get("hold_extension_count") or 0),
             "hold_decision_json": record.get("hold_decision_json") or {},
             "peak_directional_score": float(record.get("peak_directional_score") or 0),
-            "entry_vwap": float(record.get("entry_vwap") or 0),
-            "consecutive_weak_cycles": int(record.get("consecutive_weak_cycles") or 0),
             "protective_stop_order_id": record.get("protective_stop_order_id"),
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
@@ -1341,10 +1339,7 @@ def _handle_hold_deadline(
         _open_trades[ticker]["hold_extension_count"] = extensions_used + 1
         # Capture momentum baseline for decay tracking on first extension
         if extensions_used == 0:
-            vwap_meta = (signal_result.get("signals") or {}).get("vwap_deviation", {}).get("meta", {})
             _open_trades[ticker]["peak_directional_score"] = round(current_score, 4)
-            _open_trades[ticker]["entry_vwap"] = float(vwap_meta.get("vwap") or 0)
-            _open_trades[ticker]["consecutive_weak_cycles"] = 0
         hold_decision = dict(trade.get("hold_decision_json") or {})
         hold_decision["deadline_extension"] = {
             **decision,
@@ -1367,74 +1362,27 @@ def _check_momentum_exit(ticker: str, trade: dict, profile: dict) -> Optional[st
     Per-cycle momentum health check for extended intraday trades.
     Uses only the intra-cycle signal cache — zero extra API calls.
 
-    Four decay signals (three trigger exits, one contributes to persistence counter):
-      1. peak_decay      — directional score dropped >40% from its peak since extension
-      2. vwap_recross    — price crossed back through VWAP against the position direction
-      3. volume_fade     — volume_ratio < 0.5 (contributes to consecutive_weak_cycles)
-      4. score_persist   — directional score weak for 2+ consecutive cycles
+    Single signal: peak decay — directional score dropped >40% from its
+    peak since extension was granted. Other signals (VWAP recross, volume
+    fade, score persistence) are deferred until validated by trade data.
     """
     cached = _signal_cache.get(ticker)
     if cached is None:
         return None
-    signal_result = cached[1]
 
     side = trade.get("side", "BUY")
-    composite = float(signal_result.get("composite_score") or 0)
-    current_score = _directional_score(side, composite)
-    signals = signal_result.get("signals") or {}
+    current_score = _directional_score(side, float(cached[1].get("composite_score") or 0))
 
-    # ── 1. Momentum peak decay ─────────────────────────────────────────────
     peak_score = float(trade.get("peak_directional_score") or current_score)
     if current_score > peak_score:
         _open_trades[ticker]["peak_directional_score"] = round(current_score, 4)
     elif peak_score > 0.10 and current_score < peak_score * 0.60:
         log_event("INFO", "momentum_exit_triggered", {
-            "ticker": ticker, "reason": "peak_decay",
+            "ticker": ticker,
             "peak_score": round(peak_score, 4),
             "current_score": round(current_score, 4),
         })
         return "momentum_peak_decay"
-
-    # ── 2. VWAP recross ───────────────────────────────────────────────────
-    entry_vwap = float(trade.get("entry_vwap") or 0)
-    if entry_vwap > 0:
-        vwap_meta = signals.get("vwap_deviation", {}).get("meta", {})
-        sig_price  = float(vwap_meta.get("price") or 0)
-        sig_vwap   = float(vwap_meta.get("vwap") or 0)
-        if sig_price > 0 and sig_vwap > 0:
-            entry_was_above = float(trade.get("entry_price") or 0) >= entry_vwap
-            now_below = sig_price < sig_vwap
-            recrossed = (side == "BUY" and entry_was_above and now_below) or \
-                        (side == "SELL" and not entry_was_above and not now_below)
-            if recrossed:
-                log_event("INFO", "momentum_exit_triggered", {
-                    "ticker": ticker, "reason": "vwap_recross",
-                    "entry_vwap": round(entry_vwap, 4),
-                    "current_vwap": round(sig_vwap, 4),
-                    "current_price": round(sig_price, 4),
-                })
-                return "vwap_recross"
-
-    # ── 3 & 4. Volume fade + score persistence ────────────────────────────
-    tape_meta    = signals.get("tape_aggression", {}).get("meta", {})
-    volume_ratio = float(tape_meta.get("volume_ratio") or 1.0)
-    min_score    = float(profile.get("hold_extension_min_signal_score", 0.20))
-    score_weak   = current_score < min_score
-    volume_fading = volume_ratio < 0.5
-
-    if score_weak or volume_fading:
-        weak_count = int(trade.get("consecutive_weak_cycles") or 0) + 1
-        _open_trades[ticker]["consecutive_weak_cycles"] = weak_count
-        if weak_count >= 2:
-            log_event("INFO", "momentum_exit_triggered", {
-                "ticker": ticker, "reason": "score_persistence",
-                "consecutive_weak_cycles": weak_count,
-                "current_score": round(current_score, 4),
-                "volume_ratio": round(volume_ratio, 2),
-            })
-            return "score_persistence_exit"
-    else:
-        _open_trades[ticker]["consecutive_weak_cycles"] = 0
 
     return None
 
