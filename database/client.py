@@ -56,6 +56,7 @@ def insert_trade(trade: dict) -> dict:
             "signals_json", "commission_eur", "slippage_eur", "llm_cost_eur",
             "risk_profile", "horizon",
             "atr_at_entry", "r_multiple", "stop_pct_used",
+            "hold_decision_json", "hold_extension_count",
         }
         fallback = {k: v for k, v in trade.items() if k in base_columns}
         try:
@@ -101,6 +102,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "stop_pct": trade.get("stop_pct"),
             "max_hold_minutes": trade.get("max_hold_minutes"),
             "daily_reeval_count": trade.get("daily_reeval_count"),
+            "hold_extension_count": trade.get("hold_extension_count"),
             "hold_decision_json": trade.get("hold_decision_json"),
             "protective_stop_order_id": trade.get("protective_stop_order_id"),
             "composite_score": trade.get("composite_score"),
@@ -125,7 +127,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                              "swing_conviction", "swing_reasons",
                              "highest_price_since_entry", "trailing_stop_price",
                              "stop_multiplier", "stop_pct", "max_hold_minutes",
-                             "daily_reeval_count", "hold_decision_json",
+                             "daily_reeval_count", "hold_extension_count", "hold_decision_json",
                              "protective_stop_order_id",
                              "exposure_direction", "strategy_family", "regime_debug_json"}
             }

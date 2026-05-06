@@ -320,6 +320,67 @@ def _apply_execution_overrides(profile: dict) -> dict:
     return p
 
 
+def _apply_learned_hold_extension(
+    ticker: str,
+    hold_minutes: int,
+    conviction: float,
+    composite: float,
+    profile: dict,
+    portfolio_state: dict,
+) -> tuple[int, Optional[dict]]:
+    """
+    Extend high-quality intraday trades based on the latest learning that
+    longer holds have produced better net P&L.
+    """
+    if os.getenv("LEARNED_HOLD_EXTENSION_ENABLED", "true").strip().lower() == "false":
+        return hold_minutes, None
+
+    min_conviction = _env_float(
+        "LEARNED_HOLD_MIN_CONVICTION",
+        float(profile.get("learned_hold_min_conviction", 0.80)),
+    )
+    min_score = _env_float(
+        "LEARNED_HOLD_MIN_SIGNAL_SCORE",
+        float(profile.get("learned_hold_min_signal_score", 0.35)),
+    )
+    if conviction < min_conviction or abs(composite) < min_score:
+        return hold_minutes, None
+
+    vix = float(portfolio_state.get("vix") or 20.0)
+    vix_ceiling = float(profile.get("vix_ceiling", 50))
+    if vix > vix_ceiling:
+        return hold_minutes, None
+
+    min_minutes = _env_int(
+        "LEARNED_HOLD_MIN_MINUTES",
+        int(profile.get("learned_hold_min_minutes", 120)),
+    )
+    max_minutes = _env_int(
+        "LEARNED_HOLD_MAX_MINUTES",
+        int(profile.get("learned_hold_max_minutes", 240)),
+    )
+    confidence_span = max(
+        0.0,
+        min(1.0, (conviction - min_conviction) / max(1.0 - min_conviction, 0.01)),
+    )
+    target_minutes = int(min_minutes + (max_minutes - min_minutes) * confidence_span)
+    extended_hold = max(int(hold_minutes), min(max_minutes, max(min_minutes, target_minutes)))
+    if extended_hold == hold_minutes:
+        return hold_minutes, None
+
+    return extended_hold, {
+        "ticker": ticker.upper(),
+        "previous_hold_minutes": int(hold_minutes),
+        "extended_hold_minutes": int(extended_hold),
+        "conviction": round(float(conviction), 3),
+        "composite": round(float(composite), 4),
+        "min_conviction": min_conviction,
+        "min_signal_score": min_score,
+        "vix": round(vix, 2),
+        "source": "learning_longer_holds_all_tickers",
+    }
+
+
 def _trading_capital(equity: float) -> float:
     raw = os.getenv("TRADING_CAPITAL_EUR") or os.getenv("STARTING_CAPITAL_EUR")
     if raw and raw.strip():
@@ -421,13 +482,60 @@ def _log_short_candidate(event_name: str, ticker: str, composite: float,
 
 def _parse_dt(value):
     if isinstance(value, datetime):
-        return value
+        return value.replace(tzinfo=None)
     if not value:
         return datetime.utcnow()
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
         return datetime.utcnow()
+
+
+def _trade_pnl_pct(trade: dict, current_price: float) -> float:
+    entry_price = float(trade.get("entry_price") or 0)
+    if entry_price <= 0:
+        return 0.0
+    pnl_pct = (current_price - entry_price) / entry_price * 100
+    if trade.get("side") == "SELL":
+        pnl_pct = -pnl_pct
+    return pnl_pct
+
+
+def _directional_score(side: str, composite: float) -> float:
+    return float(composite or 0.0) if side == "BUY" else -float(composite or 0.0)
+
+
+def _time_exit_cooldown_active(ticker: str, recent_trades: list, profile: dict) -> Optional[dict]:
+    cooldown_minutes = _env_int(
+        "TIME_EXIT_COOLDOWN_MINUTES",
+        int(profile.get("time_exit_cooldown_minutes", 60)),
+    )
+    if cooldown_minutes <= 0:
+        return None
+
+    now = datetime.utcnow()
+    latest = None
+    for trade in recent_trades or []:
+        if str(trade.get("ticker", "")).upper() != ticker.upper():
+            continue
+        if trade.get("exit_reason") != "time_exit":
+            continue
+        closed_at = _parse_dt(
+            trade.get("exit_time") or trade.get("created_at") or trade.get("closed_at")
+        )
+        if latest is None or closed_at > latest:
+            latest = closed_at
+
+    if latest is None:
+        return None
+    elapsed = (now - latest).total_seconds() / 60
+    if elapsed < cooldown_minutes:
+        return {
+            "ticker": ticker,
+            "minutes_since_time_exit": round(elapsed, 1),
+            "cooldown_minutes": cooldown_minutes,
+        }
+    return None
 
 
 def _hydrate_open_trades():
@@ -471,6 +579,7 @@ def _hydrate_open_trades():
             "stop_pct": float(record.get("stop_pct") or 0),
             "max_hold_minutes": int(record.get("max_hold_minutes") or record.get("hold_minutes") or 30),
             "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
+            "hold_extension_count": int(record.get("hold_extension_count") or 0),
             "hold_decision_json": record.get("hold_decision_json") or {},
             "protective_stop_order_id": record.get("protective_stop_order_id"),
             "llm_conviction": float(record.get("llm_conviction") or 0),
@@ -759,6 +868,10 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     size_eur = pre_size["size_eur"]
     if action_hint == "SELL":
         size_eur = _cap_short_notional(size_eur, capital_base, profile)
+    cooldown = _time_exit_cooldown_active(ticker, recent_trades, profile)
+    if cooldown:
+        log_event("INFO", "time_exit_cooldown", cooldown)
+        return
     gate_ok, gate_reason = pre_trade_gate(
         ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state,
         market_regime=getattr(ticker_regime_state, "market_regime", None),
@@ -925,6 +1038,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     except (TypeError, ValueError):
         hold_minutes = 30
     mean_reversion_trade = bool(signal_result.get("mean_reversion_signal"))
+    hold_extension = None
     if mean_reversion_trade:
         hold_minutes = 2880
     else:
@@ -932,6 +1046,16 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             int(profile.get("min_hold_minutes", 1)),
             min(int(profile.get("max_hold_minutes", 60)), hold_minutes),
         )
+        hold_minutes, hold_extension = _apply_learned_hold_extension(
+            ticker=ticker,
+            hold_minutes=hold_minutes,
+            conviction=conviction,
+            composite=composite,
+            profile=profile,
+            portfolio_state=portfolio_state,
+        )
+        if hold_extension:
+            log_event("INFO", "learned_hold_extended", hold_extension)
 
     stop_loss_pct = sizing.get("stop_pct") or float(llm_result.get("stop_loss_pct", profile["stop_loss_pct"]))
     if mean_reversion_trade:
@@ -972,6 +1096,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "stop_price":    stop_price,
         "take_profit_price": take_profit_price,
         "hold_minutes":  hold_minutes,
+        "hold_extension_count": 0,
+        "hold_decision_json": hold_extension,
         "size_eur":      final_size,
         "size_usd":      final_size_usd,
         "side":          action,
@@ -1089,15 +1215,116 @@ def _check_exits(portfolio_state, profile):
                         exit_reason = "take_profit"
 
                 if hold_elapsed >= hold_target and exit_reason is None:
-                    # Attempt swing promotion before closing
-                    if _try_promote_to_swing(ticker, trade, current_price, profile):
-                        continue  # Promoted — defer to chandelier path
-                    exit_reason = "time_exit"
+                    exit_reason = _handle_hold_deadline(
+                        ticker, trade, current_price, profile, portfolio_state
+                    )
+                    if exit_reason is None:
+                        continue
 
             if exit_reason:
                 _close_trade(ticker, trade, current_price, exit_reason)
         except Exception as e:
             log_event("ERROR", f"exit_check_{ticker}", {"error": str(e)})
+
+
+def _handle_hold_deadline(
+    ticker: str,
+    trade: dict,
+    current_price: float,
+    profile: dict,
+    portfolio_state: dict,
+) -> Optional[str]:
+    """
+    Decide what to do when an intraday trade reaches its hold deadline.
+    Time is treated as a risk signal: exit weak trades, extend aligned winners,
+    and let strong breakouts attempt swing promotion.
+    """
+    pnl_pct = _trade_pnl_pct(trade, current_price)
+    side = trade.get("side", "BUY")
+    entry_score = _directional_score(side, float(trade.get("composite_score") or 0.0))
+
+    try:
+        regime_state = detect_regime(ticker)
+        weights = (
+            _learning_engine.get_weights(regime_state.intraday_regime)
+            if _learning_engine else profile["signal_weights"]
+        )
+        signal_result = compute_all_signals(ticker, weights, regime_state=regime_state)
+        current_composite = float(signal_result.get("composite_score") or 0.0)
+    except Exception as e:
+        log_event("WARN", "hold_deadline_signal_error", {
+            "ticker": ticker,
+            "error": str(e)[:100],
+        })
+        current_composite = 0.0
+        signal_result = {}
+
+    current_score = _directional_score(side, current_composite)
+    fade_score = _env_float(
+        "HOLD_EXTENSION_FADE_SCORE",
+        float(profile.get("hold_extension_fade_score", 0.10)),
+    )
+    aligned_score = _env_float(
+        "HOLD_EXTENSION_MIN_SIGNAL_SCORE",
+        float(profile.get("hold_extension_min_signal_score", 0.20)),
+    )
+    min_green = _env_float(
+        "HOLD_EXTENSION_MIN_PNL_PCT",
+        float(profile.get("hold_extension_min_pnl_pct", 0.05)),
+    )
+    extension_minutes = _env_int(
+        "HOLD_EXTENSION_MINUTES",
+        int(profile.get("hold_extension_minutes", 30)),
+    )
+    max_extensions = _env_int(
+        "HOLD_EXTENSION_MAX_COUNT",
+        int(profile.get("hold_extension_max_count", 2)),
+    )
+    extensions_used = int(trade.get("hold_extension_count") or 0)
+    weakened = current_score < fade_score or current_score < entry_score * 0.5
+
+    decision = {
+        "ticker": ticker,
+        "pnl_pct": round(pnl_pct, 4),
+        "entry_directional_score": round(entry_score, 4),
+        "current_directional_score": round(current_score, 4),
+        "extensions_used": extensions_used,
+    }
+
+    if pnl_pct <= 0 and weakened:
+        decision["decision"] = "exit_losing_or_flat_weakened"
+        log_event("INFO", "hold_deadline_exit", decision)
+        return "time_exit"
+
+    if 0 < pnl_pct < min_green and weakened:
+        decision["decision"] = "exit_small_green_momentum_faded"
+        log_event("INFO", "hold_deadline_exit", decision)
+        return "time_exit"
+
+    if pnl_pct > 0 and signal_result.get("composite_score") is not None:
+        if _try_promote_to_swing(ticker, trade, current_price, profile):
+            decision["decision"] = "promoted_to_swing"
+            log_event("INFO", "hold_deadline_promoted", decision)
+            return None
+
+    if pnl_pct >= min_green and current_score >= aligned_score and extensions_used < max_extensions:
+        _open_trades[ticker]["hold_minutes"] = int(trade.get("hold_minutes") or 0) + extension_minutes
+        _open_trades[ticker]["hold_extension_count"] = extensions_used + 1
+        hold_decision = dict(trade.get("hold_decision_json") or {})
+        hold_decision["deadline_extension"] = {
+            **decision,
+            "decision": "extend_aligned_winner",
+            "extension_minutes": extension_minutes,
+            "new_hold_minutes": _open_trades[ticker]["hold_minutes"],
+        }
+        _open_trades[ticker]["hold_decision_json"] = hold_decision
+        save_open_trade(ticker, _open_trades[ticker])
+        log_event("INFO", "hold_deadline_extended", hold_decision["deadline_extension"])
+        return None
+
+    decision["decision"] = "exit_deadline_no_edge"
+    log_event("INFO", "hold_deadline_exit", decision)
+    return "time_exit"
 
 
 def _recover_bracket_fill(trade: dict) -> Optional[dict]:
@@ -1331,6 +1558,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "trailing_stop_price": trade.get("trailing_stop_price"),
         "highest_price_since_entry": trade.get("highest_price_since_entry"),
         "daily_reeval_count": int(trade.get("daily_reeval_count") or 0),
+        "hold_extension_count": int(trade.get("hold_extension_count") or 0),
         "hold_decision_json": trade.get("hold_decision_json"),
         "protective_stop_order_id": trade.get("protective_stop_order_id"),
         "order_id":        trade.get("order_id"),
