@@ -114,9 +114,9 @@ _last_shock_result   = {
     "direction": "mixed",
     "reason": "not_scanned",
 }
-# Per-cycle signal cache — keyed by ticker, expires after 12 min (one cycle apart)
+# Per-cycle signal cache — keyed by ticker, expires after 8 min (one cycle apart at 10-min cadence)
 _signal_cache: dict[str, tuple[datetime, dict]] = {}
-_SIGNAL_CACHE_TTL_SECONDS = 720
+_SIGNAL_CACHE_TTL_SECONDS = 480
 
 def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
     first = date(year, month, 1)
