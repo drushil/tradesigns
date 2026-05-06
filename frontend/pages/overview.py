@@ -60,16 +60,72 @@ def render():
             f"(not used — ceiling applied at €{ceiling:,.0f} ≈ ${ceiling * fx_rate:,.0f})"
         )
 
+    # Count open momentum swing positions
+    try:
+        from database.client import get_open_trade_records
+        open_records  = get_open_trade_records()
+        open_swings   = [r for r in open_records if r.get("promoted_to_swing")]
+        max_swings    = 2  # profile default; could read from env
+    except Exception:
+        open_swings   = []
+        max_swings    = 2
+
     if regime_state:
         label = regime_state.market_regime.upper()
         icon = "🐂" if label == "BULL" else ("🐻" if label == "BEAR" else "↔")
+        swing_frag = ""
+        if open_swings:
+            tickers_str = ", ".join(r["ticker"] for r in open_swings[:3])
+            swing_frag = (f'<span style="margin-left:20px;color:#ffd166">'
+                          f'🚀 Open swings: {len(open_swings)}/{max_swings} ({tickers_str})'
+                          f'</span>')
+        else:
+            swing_frag = (f'<span style="margin-left:20px;color:#555">'
+                          f'🚀 Open swings: 0/{max_swings}'
+                          f'</span>')
         st.markdown(f"""
         <div style="margin:12px 0 4px;padding:12px 14px;border:1px solid #222;border-radius:8px;background:#101010">
           <span style="font-size:22px;font-weight:700">{icon} {label}</span>
           <span style="margin-left:16px;color:#aaa">VIX {regime_state.vix:.1f}</span>
           <span style="margin-left:16px;color:#777">SPY vs SMA200 {regime_state.price_vs_sma200_pct:+.2f}%</span>
+          {swing_frag}
         </div>
         """, unsafe_allow_html=True)
+
+    # ── Open swing position cards ──────────────────────────────────────────
+    if open_swings:
+        st.markdown("##### Open Momentum Swings")
+        cols = st.columns(min(len(open_swings), 3))
+        for i, rec in enumerate(open_swings):
+            ticker     = rec.get("ticker", "?")
+            entry      = float(rec.get("entry_price") or 0)
+            conviction = float(rec.get("swing_conviction") or 0)
+            days_held  = 0
+            if rec.get("promoted_at"):
+                try:
+                    from datetime import datetime
+                    promoted_dt = datetime.fromisoformat(
+                        str(rec["promoted_at"]).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                    days_held = (datetime.utcnow() - promoted_dt).days
+                except Exception:
+                    pass
+            max_days = int(rec.get("max_hold_minutes", 1950)) // 390
+            days_rem  = max(0, max_days - days_held)
+            # Get current price from positions list
+            pos_match = next((p for p in positions if p["ticker"] == ticker), None)
+            pnl_str   = f"{pos_match['unrealized_plpc']:+.2f}%" if pos_match else "—"
+            pnl_color = "positive" if pos_match and pos_match["unrealized_pl"] >= 0 else "negative"
+            with cols[i % 3]:
+                st.markdown(f"""
+                <div class="signal-card">
+                    <div class="signal-name">🚀 {ticker}</div>
+                    <div style="font-family:'DM Mono',monospace;font-size:13px">
+                        Entry ${entry:.2f} · Conv {conviction:.0%}
+                    </div>
+                    <div class="signal-score {pnl_color}" style="font-size:18px">{pnl_str}</div>
+                    <div style="font-size:11px;color:#555">{days_held}d held · {days_rem}d remaining</div>
+                </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
 

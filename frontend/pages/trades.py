@@ -145,7 +145,18 @@ def render():
 
     # ── Trade table ────────────────────────────────────────────────────────
     st.markdown("##### All Trades")
-    display_cols = ["created_at", "ticker", "side", "net_pnl_pct",
+
+    # Build hold-type badge column
+    fdf = fdf.copy()
+    def _swing_badge(row):
+        is_swing = bool(row.get("promoted_to_swing") or row.get("swing_trade"))
+        days     = row.get("hold_days_actual")
+        if is_swing:
+            return f"🚀 SWING {int(days)}d" if days else "🚀 SWING"
+        return "⚡ INTRADAY"
+    fdf["hold_type"] = fdf.apply(_swing_badge, axis=1)
+
+    display_cols = ["created_at", "ticker", "side", "hold_type", "net_pnl_pct",
                     "pnl_eur", "hold_minutes", "exit_reason", "regime",
                     "exposure_direction", "strategy_family",
                     "composite_score", "llm_conviction"]
@@ -164,3 +175,23 @@ def render():
         width="stretch",
         height=400,
     )
+
+    # ── Swing trade detail expanders ───────────────────────────────────────
+    if "promoted_to_swing" in fdf.columns:
+        swing_rows = fdf[fdf["promoted_to_swing"].fillna(False).astype(bool)]
+        if not swing_rows.empty:
+            st.markdown("##### Swing Trade Details")
+            for _, row in swing_rows.sort_values("created_at", ascending=False).head(20).iterrows():
+                label = (f"🚀 {row.get('ticker','?')} · "
+                         f"{row.get('hold_days_actual','?')}d · "
+                         f"{row.get('net_pnl_pct', 0):+.2f}%")
+                with st.expander(label):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Conviction", f"{float(row.get('swing_conviction') or 0):.0%}")
+                    c2.metric("Hold days", row.get("hold_days_actual", "—"))
+                    c3.metric("Daily re-evals", row.get("daily_reeval_count", 0))
+                    reasons = row.get("swing_reasons") or []
+                    if reasons:
+                        st.markdown(f"**Reasons:** {', '.join(reasons)}")
+                    if row.get("exit_trigger"):
+                        st.markdown(f"**Exit trigger:** `{row['exit_trigger']}`")

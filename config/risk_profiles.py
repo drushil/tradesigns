@@ -34,6 +34,9 @@ RISK_PROFILES = {
         "max_short_position_pct": 0.0,
         "min_short_signal_score": 0.60,
         "dominant_signal_veto_threshold": 0.65,
+        "max_swing_hold_days": 2,
+        "max_concurrent_swings": 1,
+        "swing_conviction_threshold": 0.80,
         "signal_weights": {
             "order_book_imbalance": 0.14,
             "tape_aggression":      0.10,
@@ -75,6 +78,9 @@ RISK_PROFILES = {
         "max_short_position_pct": 0.0,
         "min_short_signal_score": 0.50,
         "dominant_signal_veto_threshold": 0.72,
+        "max_swing_hold_days": 3,
+        "max_concurrent_swings": 1,
+        "swing_conviction_threshold": 0.75,
         "signal_weights": {
             "order_book_imbalance": 0.15,
             "tape_aggression":      0.13,
@@ -117,6 +123,9 @@ RISK_PROFILES = {
         "min_short_signal_score": 0.18,
         "bull_short_signal_score": 0.22,
         "dominant_signal_veto_threshold": 0.80,
+        "max_swing_hold_days": 3,
+        "max_concurrent_swings": 2,
+        "swing_conviction_threshold": 0.70,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.17,
@@ -159,6 +168,9 @@ RISK_PROFILES = {
         "min_short_signal_score": 0.15,
         "bull_short_signal_score": 0.19,
         "dominant_signal_veto_threshold": 0.85,
+        "max_swing_hold_days": 5,
+        "max_concurrent_swings": 2,
+        "swing_conviction_threshold": 0.65,
         "signal_weights": {
             "order_book_imbalance": 0.21,
             "tape_aggression":      0.20,
@@ -201,6 +213,9 @@ RISK_PROFILES = {
         "min_short_signal_score": 0.12,
         "bull_short_signal_score": 0.16,
         "dominant_signal_veto_threshold": 0.90,
+        "max_swing_hold_days": 7,
+        "max_concurrent_swings": 3,
+        "swing_conviction_threshold": 0.60,
         "signal_weights": {
             "order_book_imbalance": 0.23,
             "tape_aggression":      0.20,

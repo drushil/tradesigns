@@ -37,6 +37,7 @@ class RegimeState:
     trend_mean_return: float = 0.0
     trend_std_return: float = 0.0
     regime_reason: str = ""
+    computed_at: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1412,6 +1413,104 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
     )
     _regime_state_cache[cache_key] = (now_ts, state)
     return state
+
+
+# ── Momentum swing detector ───────────────────────────────────────────────────
+
+def detect_momentum_swing(
+    ticker: str,
+    signal_result: dict,
+    regime_state: "RegimeState",
+    profile: dict = None,
+) -> dict:
+    """
+    Detects when a ticker has a high-conviction multi-day momentum setup.
+    All 5 core conditions must align simultaneously.
+    Bear regime and macro shock are absolute blocks regardless of signal strength.
+    """
+    sigs = signal_result.get("signals", {})
+
+    # Gate 1: Must be bull regime — absolute block
+    if regime_state.market_regime != "bull":
+        return {"swing_detected": False, "disqualifiers": ["not_bull_regime"]}
+
+    # Gate 2: No macro shock active
+    if signal_result.get("shock_detected", False):
+        return {"swing_detected": False, "disqualifiers": ["shock_active"]}
+
+    # Gate 3: Not within 3 days of earnings
+    earn_meta = sigs.get("earnings_proximity", {}).get("meta", {})
+    days_to_earn = earn_meta.get("days_to_earnings")
+    if days_to_earn is not None and days_to_earn <= 3:
+        return {"swing_detected": False, "disqualifiers": [f"earnings_in_{days_to_earn}d"]}
+
+    # Collect signal scores
+    composite    = signal_result.get("composite_score", 0)
+    rel_strength = sigs.get("relative_strength",  {}).get("score", 0)
+    macd         = sigs.get("macd_crossover",     {}).get("score", 0)
+    tape         = sigs.get("tape_aggression",    {}).get("score", 0)
+    rsi          = sigs.get("rsi_divergence",     {}).get("score", 0)
+    bollinger    = sigs.get("bollinger_squeeze",  {}).get("score", 0)
+
+    conditions = {
+        "composite_high":     composite > 0.60,
+        "rel_strength":       rel_strength > 0.35,
+        "macd_bullish":       macd > 0.35,
+        "tape_bullish":       tape > 0.30,
+        "rsi_not_overbought": rsi > -0.20,
+    }
+
+    bonus_conditions = {
+        "bollinger_breakout": bollinger > 0.50,
+        "macd_crossover":     macd > 0.70,
+        "strong_rs":          rel_strength > 0.60,
+    }
+
+    passed  = [k for k, v in conditions.items() if v]
+    failed  = [k for k, v in conditions.items() if not v]
+    bonuses = [k for k, v in bonus_conditions.items() if v]
+
+    if failed:
+        return {
+            "swing_detected":    False,
+            "disqualifiers":     failed,
+            "conditions_met":    len(passed),
+            "conditions_needed": 5,
+        }
+
+    base_conviction  = (composite + rel_strength + macd + tape) / 4
+    bonus_conviction = len(bonuses) * 0.05
+    conviction       = min(1.0, base_conviction + bonus_conviction)
+
+    # Profile conviction threshold gate
+    min_conviction = float((profile or {}).get("swing_conviction_threshold", 0.60))
+    if conviction < min_conviction:
+        return {
+            "swing_detected": False,
+            "disqualifiers":  [f"conviction_{conviction:.2f}_below_threshold_{min_conviction:.2f}"],
+        }
+
+    # Hold duration: scale with conviction
+    if conviction > 0.80:
+        hold_days = 5
+    elif conviction > 0.70:
+        hold_days = 4
+    else:
+        hold_days = 3
+
+    # Respect profile max_swing_hold_days
+    max_hold_days = int((profile or {}).get("max_swing_hold_days", 5))
+    hold_days = min(hold_days, max_hold_days)
+
+    return {
+        "swing_detected":  True,
+        "conviction":      round(conviction, 3),
+        "hold_days":       hold_days,
+        "hold_minutes":    hold_days * 390,
+        "stop_multiplier": 2.5,
+        "reasons":         passed + bonuses,
+        "bonus_signals":   bonuses,
+    }
 
 
 # ── Master signal composer ────────────────────────────────────────────────────

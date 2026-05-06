@@ -249,7 +249,9 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
                    composite_score: float, profile: dict,
                    portfolio_state: dict,
                    market_regime: str = None,
-                   signals: dict = None) -> tuple[bool, str]:
+                   signals: dict = None,
+                   current_swing_count: int = 0,
+                   is_swing_candidate: bool = False) -> tuple[bool, str]:
     """
     Hard rule checks before any order is submitted.
     Returns (allow: bool, reason: str).
@@ -283,6 +285,12 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
                      if isinstance(v, dict) and v.get("score", 0) == best), "unknown"
                 )
                 return False, f"dominant bullish signal veto on short: {signal_name}={best:.2f}"
+
+    # Max concurrent swing positions — enforced before any swing promotion
+    if is_swing_candidate:
+        max_concurrent = int(profile.get("max_concurrent_swings", 2))
+        if current_swing_count >= max_concurrent:
+            return False, f"max_concurrent_swings_reached ({current_swing_count}/{max_concurrent})"
 
     if allowed and ticker not in allowed and not profile.get("allow_individual_stocks", False):
         return False, f"{ticker} not allowed for profile"

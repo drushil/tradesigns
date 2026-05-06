@@ -26,7 +26,8 @@ from config.risk_profiles        import get_profile
 from backend.signals.engine      import (compute_all_signals, compute_swing_score,
                                           detect_regime, detect_macro_regime,
                                           compute_atr, latest_macro_headlines,
-                                          scan_for_macro_shock)
+                                          scan_for_macro_shock,
+                                          detect_momentum_swing)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
                                           scan_for_extreme_dips, get_order_by_id,
@@ -87,6 +88,7 @@ _llm_hour_reset      = datetime.utcnow()
 _open_trades         = {}   # {ticker: {entry_price, entry_time, stop_price, hold_minutes, ...}}
 _swing_trades        = {}   # {ticker: {entry_price, entry_time, hold_days, ...}}
 _last_shock_refresh  = None
+_day_trade_log: list = []   # [(date, ticker)] same-day round trips for PDT tracking
 _last_shock_result   = {
     "shock_detected": False,
     "classification": "NORMAL",
@@ -455,10 +457,149 @@ def _hydrate_open_trades():
             "sizing_json": record.get("sizing_json") or {},
             "mean_reversion_trade": bool(record.get("mean_reversion_trade") or False),
             "swing_trade": bool(record.get("swing_trade") or False),
+            "promoted_to_swing": bool(record.get("promoted_to_swing") or False),
+            "promoted_at": record.get("promoted_at"),
+            "initial_horizon": record.get("initial_horizon") or record.get("horizon") or "short",
+            "swing_conviction": float(record.get("swing_conviction") or 0),
+            "swing_reasons": record.get("swing_reasons") or [],
+            "highest_price_since_entry": float(
+                record.get("highest_price_since_entry") or record.get("entry_price") or 0
+            ),
+            "trailing_stop_price": float(record.get("trailing_stop_price") or 0),
+            "stop_multiplier": float(record.get("stop_multiplier") or 1.5),
+            "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
+            "hold_decision_json": record.get("hold_decision_json") or {},
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
             "order_id": record.get("order_id"),
         }
+
+
+# ── PDT (Pattern Day Trader) tracking ────────────────────────────────────────
+
+def _record_day_trade(ticker: str):
+    """Record a same-day round trip for PDT monitoring."""
+    _day_trade_log.append((datetime.utcnow().date(), ticker))
+
+
+def _count_day_trades_5d() -> int:
+    """Count round trips (same-day open + close) in the last 5 calendar days."""
+    cutoff = datetime.utcnow().date() - timedelta(days=7)
+    return sum(1 for d, _ in _day_trade_log if d >= cutoff)
+
+
+def _check_pdt_warning(ticker: str, count: int):
+    log_event("WARN", "pdt_warning", {
+        "day_trade_count_5d": count,
+        "trigger_ticker": ticker,
+        "note": "Approaching 4-round-trip PDT limit",
+    })
+    _send_discord_alert(
+        f"PDT WARNING: {count} day trades in 5 days "
+        f"(last: {ticker}). Stop at 3 to avoid PDT violation on live account."
+    )
+
+
+# ── Momentum swing promotion ──────────────────────────────────────────────────
+
+def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
+                          profile: dict) -> bool:
+    """
+    Called at intraday time_exit boundary. If momentum is still intact and
+    the trade is profitable, promote it to a 3-5 day swing instead of closing.
+    Returns True if promoted (caller should skip the close).
+    """
+    # Must be profitable to promote
+    entry_price = trade.get("entry_price", 0)
+    if entry_price <= 0:
+        return False
+    pnl_pct = (current_price - entry_price) / entry_price * 100
+    if pnl_pct <= 0:
+        return False
+
+    # Don't promote mean-reversion trades
+    if trade.get("mean_reversion_trade"):
+        return False
+
+    # Check concurrent swing limit before running expensive signal computation
+    open_swing_count = sum(1 for d in _open_trades.values() if d.get("swing_trade"))
+    max_swings = int(profile.get("max_concurrent_swings", 2))
+    if open_swing_count >= max_swings:
+        log_event("INFO", "swing_promotion_blocked_concurrent", {
+            "ticker": ticker,
+            "open_swings": open_swing_count,
+            "max_swings": max_swings,
+        })
+        return False
+
+    try:
+        weights = _learning_engine.get_weights("trending") if _learning_engine else profile["signal_weights"]
+        regime_state = detect_regime(ticker)
+        signal_result = compute_all_signals(ticker, weights, regime_state=regime_state)
+        swing_check = detect_momentum_swing(ticker, signal_result, regime_state, profile)
+    except Exception as e:
+        log_event("WARN", "swing_promotion_signal_error", {"ticker": ticker, "error": str(e)[:80]})
+        return False
+
+    if not swing_check.get("swing_detected"):
+        return False
+
+    hold_days = swing_check["hold_days"]
+    hold_minutes = swing_check["hold_minutes"]
+    stop_multiplier = swing_check["stop_multiplier"]
+
+    atr_data = signal_result.get("atr_data", {})
+    atr_pct = atr_data.get("atr_pct") or 2.5
+    atr_raw = atr_data.get("atr_raw") or (entry_price * atr_pct / 100)
+    stop_pct = max(0.5, min(12.0, float(atr_pct) * stop_multiplier))
+
+    if trade.get("side", "BUY") == "BUY":
+        stop_price = entry_price * (1 - stop_pct / 100)
+    else:
+        stop_price = entry_price * (1 + stop_pct / 100)
+
+    chandelier_stop = current_price - (atr_raw * stop_multiplier)
+
+    _open_trades[ticker].update({
+        "swing_trade":              True,
+        "promoted_to_swing":        True,
+        "promoted_at":              datetime.utcnow().isoformat(),
+        "initial_horizon":          trade.get("horizon", "short"),
+        "horizon":                  "swing",
+        "hold_minutes":             hold_minutes,
+        "max_hold_minutes":         hold_minutes,
+        "stop_multiplier":          stop_multiplier,
+        "swing_conviction":         swing_check["conviction"],
+        "swing_reasons":            swing_check["reasons"],
+        "highest_price_since_entry": max(current_price, entry_price),
+        "trailing_stop_price":      round(chandelier_stop, 4),
+        "stop_price":               round(stop_price, 4),
+        "stop_pct":                 stop_pct,
+        "hold_decision_json": {
+            "promoted_at_pnl_pct": round(pnl_pct, 3),
+            "swing_check":         swing_check,
+        },
+    })
+
+    try:
+        save_open_trade(ticker, _open_trades[ticker])
+    except Exception:
+        pass
+
+    log_event("INFO", "swing_promoted", {
+        "ticker":          ticker,
+        "hold_days":       hold_days,
+        "conviction":      swing_check["conviction"],
+        "reasons":         swing_check["reasons"],
+        "pnl_at_promotion": round(pnl_pct, 3),
+    })
+    _send_discord_alert(
+        f"Swing promoted: {ticker} "
+        f"{hold_days}-day hold · "
+        f"Conviction: {swing_check['conviction']:.0%} · "
+        f"P&L at promotion: {pnl_pct:+.1f}%"
+    )
+    return True
 
 
 # ── Core cycle ────────────────────────────────────────────────────────────────
@@ -828,12 +969,16 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 
 
 def _check_exits(portfolio_state, profile):
-    """Check all open trades for stop-loss or time-based exit."""
+    """Check all open trades for stop-loss, chandelier stop, or time-based exit."""
     import yfinance as yf
     now = datetime.utcnow()
 
     for ticker, trade in list(_open_trades.items()):
-        if trade.get("horizon") == "swing":
+        # Traditional horizon-swing trades (dip buys, ETF swings) are managed by
+        # run_swing_cycle / re_evaluate_swing_positions — skip here.
+        # Promoted momentum swings (promoted_to_swing=True) do get intraday
+        # chandelier-stop checks.
+        if trade.get("horizon") == "swing" and not trade.get("promoted_to_swing"):
             continue
         try:
             bar = yf.download(ticker, period="1d", interval="1m",
@@ -843,23 +988,52 @@ def _check_exits(portfolio_state, profile):
             current_price = float(bar["Close"].squeeze().iloc[-1])
             entry_time    = trade["entry_time"]
             hold_elapsed  = (now - entry_time).total_seconds() / 60
-            stop_price    = trade["stop_price"]
-            take_profit_price = trade.get("take_profit_price")
-            hold_target   = trade["hold_minutes"]
+            hold_target   = trade.get("max_hold_minutes") or trade["hold_minutes"]
 
             exit_reason = None
-            if trade["side"] == "SELL":
-                if current_price >= stop_price:
-                    exit_reason = "stop_loss"
-                elif take_profit_price and current_price <= take_profit_price:
-                    exit_reason = "take_profit"
-            elif current_price <= stop_price:
-                exit_reason = "stop_loss"
-            elif take_profit_price and current_price >= take_profit_price:
-                exit_reason = "take_profit"
 
-            if hold_elapsed >= hold_target and exit_reason is None:
-                exit_reason = "time_exit"
+            if trade.get("promoted_to_swing"):
+                # Chandelier trailing stop: highest_since_entry - (ATR × stop_mult)
+                entry_price = trade.get("entry_price", current_price)
+                prev_highest = trade.get("highest_price_since_entry", entry_price)
+                new_highest  = max(current_price, prev_highest)
+                _open_trades[ticker]["highest_price_since_entry"] = new_highest
+
+                atr_info = compute_atr(ticker)
+                atr_raw  = atr_info.get("atr_raw") or (entry_price * 0.025)
+                stop_mult = float(trade.get("stop_multiplier", 2.5))
+                chandelier_stop = new_highest - (atr_raw * stop_mult)
+                _open_trades[ticker]["trailing_stop_price"] = round(chandelier_stop, 4)
+
+                pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0.0
+                if trade.get("side", "BUY") == "BUY" and current_price <= chandelier_stop:
+                    exit_reason = "chandelier_stop"
+                elif pnl_pct >= 8.0:
+                    # Hard-coded take-profit — not configurable
+                    exit_reason = "take_profit_8pct"
+                # Time exit for promoted swings is handled by re_evaluate_swing_positions (daily)
+
+            else:
+                # Normal intraday stop/take-profit/time exit
+                stop_price        = trade["stop_price"]
+                take_profit_price = trade.get("take_profit_price")
+
+                if trade["side"] == "SELL":
+                    if current_price >= stop_price:
+                        exit_reason = "stop_loss"
+                    elif take_profit_price and current_price <= take_profit_price:
+                        exit_reason = "take_profit"
+                else:
+                    if current_price <= stop_price:
+                        exit_reason = "stop_loss"
+                    elif take_profit_price and current_price >= take_profit_price:
+                        exit_reason = "take_profit"
+
+                if hold_elapsed >= hold_target and exit_reason is None:
+                    # Attempt swing promotion before closing
+                    if _try_promote_to_swing(ticker, trade, current_price, profile):
+                        continue  # Promoted — defer to chandelier path
+                    exit_reason = "time_exit"
 
             if exit_reason:
                 _close_trade(ticker, trade, current_price, exit_reason)
@@ -986,6 +1160,21 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     llm_cost    = 0.002
     net_pnl_pct = pnl_pct - (slippage + llm_cost) / size_eur * 100
 
+    now_close = datetime.utcnow()
+    hold_minutes_actual = int((now_close - trade["entry_time"]).total_seconds() / 60)
+    hold_days_actual    = max(0, int((now_close - trade["entry_time"]).total_seconds() // 86400))
+
+    # PDT tracking: same-day round trips on BUY trades
+    entry_dt = trade.get("entry_time") or now_close
+    if entry_dt.date() == now_close.date() and trade.get("side") == "BUY":
+        _record_day_trade(ticker)
+        day_trade_count = _count_day_trades_5d()
+        log_event("INFO", "day_trade_recorded", {
+            "ticker": ticker, "count_5d": day_trade_count,
+        })
+        if day_trade_count >= 3:
+            _check_pdt_warning(ticker, day_trade_count)
+
     trade_record = {
         "ticker":          ticker,
         "side":            trade["side"],
@@ -999,8 +1188,10 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
         "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
-        "hold_minutes":    int((datetime.utcnow() - trade["entry_time"]).total_seconds() / 60),
+        "hold_minutes":    hold_minutes_actual,
+        "hold_days_actual": hold_days_actual,
         "exit_reason":     exit_reason,
+        "exit_trigger":    exit_reason,
         "regime":          trade["regime"],
         "macro_regime":    trade.get("macro_regime"),
         "macro_multiplier": trade.get("macro_multiplier"),
@@ -1015,6 +1206,16 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "sizing_json":     trade.get("sizing_json"),
         "mean_reversion_trade": bool(trade.get("mean_reversion_trade")),
         "swing_trade":     bool(trade.get("swing_trade") or trade.get("horizon") == "swing"),
+        "promoted_to_swing": bool(trade.get("promoted_to_swing")),
+        "promoted_at":     trade.get("promoted_at"),
+        "initial_horizon": trade.get("initial_horizon") or trade.get("horizon") or HORIZON,
+        "swing_conviction": trade.get("swing_conviction"),
+        "swing_reasons":   trade.get("swing_reasons") or [],
+        "stop_multiplier": trade.get("stop_multiplier"),
+        "trailing_stop_price": trade.get("trailing_stop_price"),
+        "highest_price_since_entry": trade.get("highest_price_since_entry"),
+        "daily_reeval_count": int(trade.get("daily_reeval_count") or 0),
+        "hold_decision_json": trade.get("hold_decision_json"),
         "order_id":        trade.get("order_id"),
         "close_order_id":  result.get("order_id"),
         "close_error":     close_error,
@@ -1251,6 +1452,116 @@ def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: s
             open_tickers.add(ticker)
 
 
+def re_evaluate_swing_positions():
+    """
+    Runs once per day at market open (09:35 EST / 14:35 UTC).
+    Re-scores each promoted momentum swing position and decides:
+    HOLD (extend), EXIT (close now), or TIGHTEN (trail stop on profit).
+    """
+    _hydrate_open_trades()
+    open_swings = [
+        t for t, data in _open_trades.items()
+        if data.get("promoted_to_swing") is True
+    ]
+
+    if not open_swings:
+        log_event("INFO", "swing_reeval_no_positions", {})
+        return
+
+    log_event("INFO", "swing_reeval_start", {"positions": open_swings})
+
+    profile = _apply_execution_overrides(
+        get_effective_profile(PROFILE, _get_portfolio_state())
+    )
+    weights = (_learning_engine.get_weights("trending")
+               if _learning_engine else profile["signal_weights"])
+    regime = detect_regime()
+
+    for ticker in open_swings:
+        try:
+            pos = _open_trades[ticker]
+            result = compute_all_signals(ticker, weights, regime_state=regime)
+            composite = result["composite_score"]
+
+            entry_price   = pos.get("entry_price", 0)
+            current_price = _current_daily_price(ticker)
+            if not current_price:
+                continue
+            pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0.0
+
+            # Increment daily reeval counter
+            _open_trades[ticker]["daily_reeval_count"] = int(pos.get("daily_reeval_count", 0)) + 1
+
+            exit_reasons = []
+
+            if regime.market_regime == "bear":
+                exit_reasons.append("regime_turned_bear")
+
+            if composite < -0.20:
+                exit_reasons.append("momentum_reversed")
+
+            earn = (result["signals"]
+                    .get("earnings_proximity", {})
+                    .get("meta", {}))
+            days_to_earn = earn.get("days_to_earnings")
+            if days_to_earn is not None and days_to_earn <= 1:
+                exit_reasons.append("earnings_tomorrow")
+
+            if result.get("shock_detected"):
+                exit_reasons.append("macro_shock")
+
+            if pnl_pct >= 8.0:
+                # Hard-coded take-profit — prevents greed overriding discipline
+                exit_reasons.append("take_profit_8pct")
+
+            # Check max hold days
+            entry_time = pos.get("entry_time") or datetime.utcnow()
+            days_held  = (datetime.utcnow() - entry_time).days
+            max_days   = pos.get("max_hold_minutes", 1950) // 390
+            if days_held >= max_days:
+                exit_reasons.append("time_exit")
+
+            if exit_reasons:
+                log_event("INFO", "swing_exit_triggered", {
+                    "ticker":    ticker,
+                    "reasons":   exit_reasons,
+                    "pnl_pct":   round(pnl_pct, 3),
+                    "composite": composite,
+                })
+                _close_trade(ticker, pos, current_price, exit_reasons[0])
+                _send_discord_alert(
+                    f"Swing exit: {ticker} "
+                    f"P&L: {pnl_pct:+.1f}% "
+                    f"Reason: {exit_reasons[0]}"
+                )
+                continue
+
+            # Tighten stop if profitable — trail stop to lock in gains
+            if pnl_pct > 3.0:
+                old_stop_pct = float(pos.get("stop_pct", 2.5))
+                new_stop_pct = old_stop_pct * 0.75
+                _open_trades[ticker]["stop_pct"] = new_stop_pct
+                log_event("INFO", "swing_stop_tightened", {
+                    "ticker":       ticker,
+                    "pnl_pct":      round(pnl_pct, 3),
+                    "new_stop_pct": round(new_stop_pct, 3),
+                })
+
+            days_remaining = max(0, max_days - days_held)
+            log_event("INFO", "swing_hold_confirmed", {
+                "ticker":          ticker,
+                "composite":       composite,
+                "pnl_pct":         round(pnl_pct, 3),
+                "days_held":       days_held,
+                "days_remaining":  days_remaining,
+                "reeval_count":    _open_trades[ticker]["daily_reeval_count"],
+            })
+
+        except Exception as e:
+            log_event("ERROR", "swing_reeval_error",
+                      {"ticker": ticker, "error": str(e)[:80]})
+
+
 def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
                     regime: str = None, macro_regime: str = None,
                     regime_state = None):
@@ -1482,5 +1793,7 @@ if __name__ == "__main__":
         run_weekly_digest()
     elif mode == "signal":
         run_signal_cycle()
+    elif mode == "swing_reeval":
+        re_evaluate_swing_positions()
     else:
         start_scheduler()
