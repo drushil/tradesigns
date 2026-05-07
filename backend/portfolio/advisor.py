@@ -63,12 +63,14 @@ def score_thesis(trade: dict, signal_result: dict, profile: dict) -> dict:
     """
     reasons = []
     composite   = float(signal_result.get("composite_score") or 0)
-    side        = trade.get("side", "BUY")
+    side        = str(trade.get("side", "BUY")).upper()
     directional = composite if side == "BUY" else -composite
 
     entry_price  = float(trade.get("entry_price") or 0)
     current_price = float(trade.get("_current_price") or entry_price)
     pnl_pct = (current_price - entry_price) / entry_price * 100 if entry_price else 0
+    if side == "SELL":
+        pnl_pct = -pnl_pct
 
     stop_loss_pct   = float(profile.get("stop_loss_pct", 2.0))
     min_signal      = float(profile.get("min_signal_score", 0.10))
@@ -321,8 +323,9 @@ def run_portfolio_review() -> dict:
             sig = compute_all_signals(ticker, weights)
             signal_results[ticker] = sig
             # Inject current price so score_thesis can compute pnl_pct
-            if sig.get("current_price"):
-                open_trades[ticker]["_current_price"] = sig["current_price"]
+            current_price = sig.get("current_price") or (sig.get("atr_data") or {}).get("current_price")
+            if current_price:
+                open_trades[ticker]["_current_price"] = current_price
         except Exception as e:
             log_event("WARN", "advisor_signal_fetch_failed", {"ticker": ticker, "error": str(e)[:120]})
             signal_results[ticker] = {"composite_score": 0}
