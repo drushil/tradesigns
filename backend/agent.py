@@ -184,6 +184,24 @@ def _should_run_swing_recheck(now: datetime = None) -> bool:
     return ny_now.weekday() < 5 and 0 <= current - target < window
 
 
+def _is_eod_intraday_cleanup_window(now: datetime = None) -> bool:
+    """Start cleaning intraday positions 30 minutes before the regular close."""
+    if os.getenv("EOD_INTRADAY_CLEANUP_ENABLED", "true").strip().lower() == "false":
+        return False
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ny_now = _to_new_york_time(now)
+    if ny_now.weekday() >= 5:
+        return False
+    close_hour = _env_int("EOD_CLEANUP_NY_CLOSE_HOUR", 16)
+    close_minute = _env_int("EOD_CLEANUP_NY_CLOSE_MINUTE", 0)
+    buffer_minutes = _env_int("EOD_CLEANUP_BUFFER_MINUTES", 30)
+    current = ny_now.hour * 60 + ny_now.minute
+    close = close_hour * 60 + close_minute
+    return close - buffer_minutes <= current < close
+
+
 def _init_learning_engine() -> RegimeAwareWeightEngine:
     """Load latest weights from DB or use profile priors."""
     saved = get_latest_weights("global")
@@ -1157,6 +1175,7 @@ def _check_exits(portfolio_state, profile):
     """Check all open trades for stop-loss, chandelier stop, or time-based exit."""
     import yfinance as yf
     now = datetime.utcnow()
+    eod_cleanup = _is_eod_intraday_cleanup_window(datetime.now(timezone.utc))
 
     for ticker, trade in list(_open_trades.items()):
         # Traditional horizon-swing trades (dip buys, ETF swings) are managed by
@@ -1222,6 +1241,20 @@ def _check_exits(portfolio_state, profile):
 
             else:
                 # Normal intraday stop/take-profit/time exit
+                if eod_cleanup and exit_reason is None:
+                    if _try_promote_to_swing(ticker, trade, current_price, profile):
+                        log_event("INFO", "eod_intraday_promoted", {
+                            "ticker": ticker,
+                            "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
+                        })
+                        continue
+                    exit_reason = "time_exit"
+                    log_event("INFO", "eod_intraday_cleanup_exit", {
+                        "ticker": ticker,
+                        "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
+                        "reason": "not_swing_qualified",
+                    })
+
                 # For extended trades check momentum decay each cycle before stop/time checks
                 if exit_reason is None and int(trade.get("hold_extension_count") or 0) > 0:
                     exit_reason = _check_momentum_exit(ticker, trade, profile)
