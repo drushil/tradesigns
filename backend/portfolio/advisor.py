@@ -92,7 +92,7 @@ def score_thesis(trade: dict, signal_result: dict, profile: dict) -> dict:
     days_held = int(trade.get("hold_days_actual") or
                     (datetime.utcnow() - _parse_dt(trade.get("entry_time"))).days)
     target_hold = int(trade.get("target_hold_days") or
-                      int(trade.get("max_hold_minutes", 390)) // 390)
+                      int(trade.get("max_hold_minutes") or 390) // 390)
     if target_hold > 0 and days_held > target_hold * 1.5:
         reasons.append(f"held_{days_held}d_beyond_target_{target_hold}d")
 
