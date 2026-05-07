@@ -277,41 +277,61 @@ def run_portfolio_review() -> dict:
     from database.client import (
         get_open_trade_records,
         get_snapshots,
+        get_latest_weights,
+        get_recent_trades,
         save_portfolio_review,
         log_event,
     )
     from backend.signals.engine import compute_all_signals
+    from config.risk_profiles import get_profile
+    from backend.learning.engine import get_effective_profile, build_weight_engine_from_trades, RegimeAwareWeightEngine
 
     open_records = get_open_trade_records()
     if not open_records:
-        log_event("ADVISORY", "portfolio_review_skipped", {"reason": "no_open_trades"})
+        log_event("INFO", "portfolio_review_skipped", {"reason": "no_open_trades"})
         return {"skipped": True, "reason": "no_open_trades"}
 
     # Latest equity from most recent snapshot; fall back to env var
     snapshots = get_snapshots(days=1)
     equity_eur = float(
         (snapshots[0].get("equity_eur") or 0) if snapshots
-        else __import__("os").getenv("STARTING_CAPITAL_EUR", "100")
+        else os.getenv("STARTING_CAPITAL_EUR", "100")
     )
 
     # Build open_trades dict keyed by ticker
     open_trades: dict[str, dict] = {r["ticker"]: r for r in open_records}
 
+    # Load profile + learned weights (same path as the main agent)
+    profile_name = os.getenv("RISK_PROFILE", "moderate")
+    base_profile  = get_profile(profile_name)
+    saved_weights = get_latest_weights("global")
+    recent_trades = get_recent_trades(days=30)
+    replayable    = [t for t in recent_trades if t.get("signals_json") and t.get("net_pnl_pct") is not None]
+    if replayable:
+        weight_engine = build_weight_engine_from_trades(base_profile["signal_weights"], replayable)
+    else:
+        priors        = saved_weights if saved_weights else base_profile["signal_weights"]
+        weight_engine = RegimeAwareWeightEngine(priors)
+    weights = weight_engine.weights()
+
     # Fetch current prices + signals for each ticker
     signal_results: dict[str, dict] = {}
     for ticker in list(open_trades.keys()):
         try:
-            sig = compute_all_signals(ticker)
+            sig = compute_all_signals(ticker, weights)
             signal_results[ticker] = sig
             # Inject current price so score_thesis can compute pnl_pct
             if sig.get("current_price"):
                 open_trades[ticker]["_current_price"] = sig["current_price"]
         except Exception as e:
-            log_event("WARNING", "advisor_signal_fetch_failed", {"ticker": ticker, "error": str(e)[:120]})
+            log_event("WARN", "advisor_signal_fetch_failed", {"ticker": ticker, "error": str(e)[:120]})
             signal_results[ticker] = {"composite_score": 0}
 
-    from config.risk_profiles import get_effective_profile
-    profile = get_effective_profile()
+    profile = get_effective_profile(base_profile, {
+        "consecutive_losses": 0,
+        "drawdown_pct": 0,
+        "vix": 0,
+    })
 
     exposure = compute_exposure(open_trades, equity_eur)
 
@@ -344,7 +364,7 @@ def run_portfolio_review() -> dict:
     }
 
     save_portfolio_review(review)
-    log_event("ADVISORY", "portfolio_review_complete", {
+    log_event("LEARNING", "portfolio_review_complete", {
         "positions": len(position_reviews),
         "summary": summary,
         "alerts": len(exposure["alerts"]),

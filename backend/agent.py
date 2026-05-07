@@ -2196,16 +2196,16 @@ def run_portfolio_review():
     try:
         result = _review()
         if result.get("skipped"):
-            log_event("ADVISORY", "portfolio_review_skipped", result)
+            log_event("INFO", "portfolio_review_skipped", result)
         else:
-            log_event("ADVISORY", "portfolio_review_ok", {
+            log_event("LEARNING", "portfolio_review_ok", {
                 "positions": result.get("position_count", 0),
                 "summary":   result.get("summary", {}),
                 "alerts":    len(result.get("alerts", [])),
             })
         return result
     except Exception as e:
-        log_event("ERROR", "portfolio_review_failed", {"error": str(e)[:200]})
+        log_event("ERROR", "portfolio_review_error", {"error": str(e)[:200]})
         return {}
 
 
