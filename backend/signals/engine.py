@@ -544,6 +544,72 @@ def tape_aggression_score(ticker: str) -> tuple[float, dict]:
 
 # ── Signal 5: Order Book Imbalance (Alpaca free — best bid/ask spread proxy) ──
 
+def _score_quote_imbalance(bid: float, ask: float, bid_size: float = 1.0,
+                           ask_size: float = 1.0) -> tuple[float, dict]:
+    """Compute the shared bid/ask imbalance score from quote fields."""
+    mid = (bid + ask) / 2
+    spread_pct = (ask - bid) / mid * 100 if mid > 0 else 0
+
+    total = bid_size + ask_size
+    imbalance = (bid_size - ask_size) / total if total > 0 else 0.0
+
+    spread_factor = max(0.3, 1.0 - spread_pct * 5)
+    score = _clamp(imbalance * spread_factor)
+    return score, {
+        "bid": bid, "ask": ask,
+        "spread_pct": round(spread_pct, 4),
+        "bid_size": bid_size, "ask_size": ask_size,
+        "imbalance": round(imbalance, 3),
+    }
+
+
+def _order_book_fallback_score(ticker: str, reason: str) -> tuple[float, dict]:
+    """
+    Fallback when Alpaca latest quote is unavailable.
+    Yahoo sometimes exposes bid/ask. If not, use latest 1m bar pressure as a
+    transparent microstructure proxy rather than making the signal unavailable.
+    """
+    try:
+        info = yf.Ticker(ticker).info
+        bid = float(info.get("bid") or 0)
+        ask = float(info.get("ask") or 0)
+        if bid > 0 and ask > 0 and ask >= bid:
+            bid_size = float(info.get("bidSize") or 1)
+            ask_size = float(info.get("askSize") or 1)
+            score, meta = _score_quote_imbalance(bid, ask, bid_size, ask_size)
+            meta.update({"source": "yfinance_quote", "fallback_reason": reason})
+            return score, meta
+    except Exception:
+        pass
+
+    df = _get_bars(ticker, period="1d", interval="1m")
+    if df is None or len(df) < 5:
+        return 0.0, {"error": reason, "source": "fallback_unavailable"}
+
+    high = df["High"].squeeze()
+    low = df["Low"].squeeze()
+    close = df["Close"].squeeze()
+    volume = df["Volume"].squeeze()
+
+    last_high = float(high.iloc[-1])
+    last_low = float(low.iloc[-1])
+    last_close = float(close.iloc[-1])
+    bar_range = last_high - last_low
+    close_location = ((last_close - last_low) / bar_range * 2 - 1) if bar_range > 0 else 0.0
+    momentum = float(close.pct_change().iloc[-4:].sum())
+    vol_mean = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+    vol_ratio = float(volume.iloc[-1]) / vol_mean if vol_mean > 0 else 1.0
+    volume_factor = min(max(vol_ratio, 0.5), 2.0) / 2
+
+    score = _clamp((close_location * 0.5 + np.sign(momentum) * min(abs(momentum) * 100, 1.0) * 0.5) * volume_factor)
+    return score, {
+        "source": "bar_micropressure_proxy",
+        "fallback_reason": reason,
+        "close_location": round(close_location, 3),
+        "momentum_3bar": round(momentum * 100, 3),
+        "volume_ratio": round(vol_ratio, 2),
+    }
+
 def order_book_score(ticker: str) -> tuple[float, dict]:
     """
     Uses Alpaca paper account to get latest quote (bid/ask).
@@ -555,35 +621,22 @@ def order_book_score(ticker: str) -> tuple[float, dict]:
 
         client = _get_alpaca_data_client()
         if client is None:
-            return 0.0, {"error": "no_alpaca_keys"}
+            return _order_book_fallback_score(ticker, "no_alpaca_keys")
 
         req    = StockLatestQuoteRequest(symbol_or_symbols=ticker)
         quote  = client.get_stock_latest_quote(req)[ticker]
 
         bid = float(quote.bid_price)
         ask = float(quote.ask_price)
-        mid = (bid + ask) / 2
-
-        spread_pct = (ask - bid) / mid * 100 if mid > 0 else 0
-
-        # Bid/ask size imbalance (if available)
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return _order_book_fallback_score(ticker, "invalid_alpaca_quote")
         bid_size = float(quote.bid_size or 1)
         ask_size = float(quote.ask_size or 1)
-        total    = bid_size + ask_size
-        imbalance = (bid_size - ask_size) / total if total > 0 else 0.0
-
-        # Tight spread = liquid = higher signal confidence
-        spread_factor = max(0.3, 1.0 - spread_pct * 5)
-        score = _clamp(imbalance * spread_factor)
-
-        return score, {
-            "bid": bid, "ask": ask,
-            "spread_pct": round(spread_pct, 4),
-            "bid_size": bid_size, "ask_size": ask_size,
-            "imbalance": round(imbalance, 3),
-        }
+        score, meta = _score_quote_imbalance(bid, ask, bid_size, ask_size)
+        meta["source"] = "alpaca_quote"
+        return score, meta
     except Exception as e:
-        return 0.0, {"error": str(e)[:80]}
+        return _order_book_fallback_score(ticker, str(e)[:80])
 
 
 # ── Signal 6: MACD Crossover (free — yfinance) ───────────────────────────────
