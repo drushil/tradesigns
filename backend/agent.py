@@ -31,7 +31,8 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, pre_trade_gate, compute_position_size,
                                           scan_for_extreme_dips, get_order_by_id,
-                                          cancel_order_by_id, submit_stop_order)
+                                          cancel_order_by_id, submit_stop_order,
+                                          cancel_open_orders_for_symbol)
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
@@ -578,6 +579,38 @@ def _time_exit_cooldown_active(ticker: str, recent_trades: list, profile: dict) 
     return None
 
 
+def _ticker_loss_cooldown_active(ticker: str, side: str, recent_trades: list,
+                                 profile: dict) -> Optional[dict]:
+    """Pause a ticker after repeated same-day same-direction losses."""
+    max_losses = _env_int("TICKER_DAILY_LOSS_COOLDOWN_COUNT", int(profile.get("ticker_daily_loss_cooldown_count", 2)))
+    if max_losses <= 0:
+        return None
+    min_reentry_score = float(os.getenv(
+        "TICKER_LOSS_REENTRY_MIN_SCORE",
+        str(profile.get("ticker_loss_reentry_min_score", 0.55)),
+    ))
+    today = datetime.utcnow().date()
+    losses = []
+    for trade in recent_trades or []:
+        if str(trade.get("ticker", "")).upper() != ticker.upper():
+            continue
+        if str(trade.get("side", "")).upper() != str(side or "").upper():
+            continue
+        closed_at = _parse_dt(trade.get("exit_time") or trade.get("created_at") or trade.get("closed_at"))
+        if closed_at.date() != today:
+            continue
+        if float(trade.get("net_pnl_pct") or 0) < 0:
+            losses.append(trade)
+    if len(losses) >= max_losses:
+        return {
+            "ticker": ticker,
+            "side": side,
+            "losses_today": len(losses),
+            "min_reentry_score": min_reentry_score,
+        }
+    return None
+
+
 def _hydrate_open_trades():
     for record in get_open_trade_records():
         ticker = record.get("ticker")
@@ -718,7 +751,7 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         protective_stop_price = min(stop_price, chandelier_stop)
         protective_side = "buy"
 
-    cancel_results = _cancel_bracket_orders_for_manual_exit(trade)
+    cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
     cancel_errors = [r for r in cancel_results if r.get("error")]
     if cancel_errors:
         log_event("WARN", "swing_promotion_bracket_cancel_failed", {
@@ -922,6 +955,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     cooldown = _time_exit_cooldown_active(ticker, recent_trades, profile)
     if cooldown:
         log_event("INFO", "time_exit_cooldown", cooldown)
+        return
+    loss_cooldown = _ticker_loss_cooldown_active(ticker, action_hint, recent_trades, profile)
+    if loss_cooldown and abs(composite) < float(loss_cooldown["min_reentry_score"]):
+        loss_cooldown["composite"] = round(composite, 4)
+        log_event("INFO", "ticker_loss_cooldown", loss_cooldown)
         return
     gate_ok, gate_reason = pre_trade_gate(
         ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state,
@@ -1527,29 +1565,32 @@ def _replace_protective_stop_order(ticker: str, trade: dict,
     return order
 
 
-def _cancel_bracket_orders_for_manual_exit(trade: dict) -> list[dict]:
+def _cancel_bracket_orders_for_manual_exit(ticker: str, trade: dict) -> list[dict]:
     """
     Time exits can conflict with open bracket legs that reserve shares.
     Cancel those legs first, then submit the manual close.
     """
     order_id = trade.get("order_id")
-    if not order_id:
-        return []
     results = []
-    order = get_order_by_id(str(order_id))
-    if "error" in order:
-        results.append({"order_id": order_id, "error": order["error"]})
-        return results
 
-    terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
-    for leg in order.get("legs", []):
-        status = str(leg.get("status", "")).lower()
-        leg_id = leg.get("id")
-        if not leg_id or any(state in status for state in terminal):
-            continue
-        results.append(cancel_order_by_id(str(leg_id)))
+    if order_id:
+        order = get_order_by_id(str(order_id))
+        if "error" in order:
+            results.append({"order_id": order_id, "error": order["error"]})
+        else:
+            terminal = {"filled", "canceled", "cancelled", "expired", "rejected"}
+            for leg in order.get("legs", []):
+                status = str(leg.get("status", "")).lower()
+                leg_id = leg.get("id")
+                if not leg_id or any(state in status for state in terminal):
+                    continue
+                results.append(cancel_order_by_id(str(leg_id)))
 
     if results:
+        time.sleep(1)
+    symbol_results = cancel_open_orders_for_symbol(ticker)
+    if symbol_results:
+        results.extend(symbol_results)
         time.sleep(1)
     return results
 
@@ -1566,11 +1607,12 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
             "result": protective_cancel,
         })
 
-    if exit_reason == "time_exit":
-        cancel_results = _cancel_bracket_orders_for_manual_exit(trade)
+    if exit_reason in {"time_exit", "eod_cleanup"}:
+        cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
         if cancel_results:
-            log_event("INFO", "bracket_orders_cancelled_for_time_exit", {
+            log_event("INFO", "bracket_orders_cancelled_for_manual_exit", {
                 "ticker": ticker,
+                "exit_reason": exit_reason,
                 "results": cancel_results[:4],
             })
 

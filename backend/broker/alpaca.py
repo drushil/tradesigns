@@ -3,10 +3,12 @@ backend/broker/alpaca.py
 All broker interactions go through here.
 Paper trading on Alpaca (free). Swap base URL to go live.
 """
+from __future__ import annotations
+
 import os
 import math
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -153,6 +155,28 @@ def cancel_order_by_id(order_id: str) -> dict:
         return {"status": "cancel_requested", "order_id": str(order_id)}
     except Exception as e:
         return {"error": str(e), "order_id": str(order_id)}
+
+
+def cancel_open_orders_for_symbol(ticker: str) -> List[dict]:
+    """Cancel all open orders for a ticker before a manual close."""
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+
+        client = _get_trading_client()
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker], limit=50)
+        orders = client.get_orders(req)
+        results = []
+        for order in orders:
+            order_id = str(order.id)
+            try:
+                client.cancel_order_by_id(order_id)
+                results.append({"status": "cancel_requested", "order_id": order_id})
+            except Exception as e:
+                results.append({"error": str(e), "order_id": order_id})
+        return results
+    except Exception as e:
+        return [{"error": str(e), "ticker": ticker}]
 
 
 # ── Order submission ──────────────────────────────────────────────────────────
@@ -308,22 +332,43 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     # Prevents composite averaging from papering over a screaming counter-signal.
     _VETO_THRESHOLD = float(profile.get("dominant_signal_veto_threshold", 0.8))
     if signals and _VETO_THRESHOLD > 0:
-        signal_scores = [v.get("score", 0) for v in signals.values() if isinstance(v, dict)]
-        if side.lower() == "buy" and signal_scores:
-            worst = min(signal_scores)
-            if worst <= -_VETO_THRESHOLD:
-                signal_name = next(
-                    (k for k, v in signals.items()
-                     if isinstance(v, dict) and v.get("score", 0) == worst), "unknown"
+        signal_scores = []
+        for signal_name, value in signals.items():
+            if not isinstance(value, dict):
+                continue
+            score = value.get("score", 0)
+            if signal_name == "vwap_deviation":
+                macd = float(signals.get("macd_crossover", {}).get("score", 0) or 0)
+                tape = float(signals.get("tape_aggression", {}).get("score", 0) or 0)
+                rel_strength = float(signals.get("relative_strength", {}).get("score", 0) or 0)
+                news = float(signals.get("news_sentiment", {}).get("score", 0) or 0)
+                bullish_breakout = (
+                    side.lower() == "buy"
+                    and score <= -_VETO_THRESHOLD
+                    and macd > 0.15
+                    and tape > 0
+                    and rel_strength > 0
+                    and news >= 0
+                    and str(market_regime or "").lower() in {"bull", "transitioning", ""}
                 )
+                bearish_breakout = (
+                    side.lower() == "sell"
+                    and score >= _VETO_THRESHOLD
+                    and macd < -0.15
+                    and tape < 0
+                    and rel_strength < 0
+                    and news <= 0
+                )
+                if bullish_breakout or bearish_breakout:
+                    continue
+            signal_scores.append((signal_name, score))
+        if side.lower() == "buy" and signal_scores:
+            signal_name, worst = min(signal_scores, key=lambda item: item[1])
+            if worst <= -_VETO_THRESHOLD:
                 return False, f"dominant bearish signal veto: {signal_name}={worst:.2f}"
         elif side.lower() == "sell" and signal_scores:
-            best = max(signal_scores)
+            signal_name, best = max(signal_scores, key=lambda item: item[1])
             if best >= _VETO_THRESHOLD:
-                signal_name = next(
-                    (k for k, v in signals.items()
-                     if isinstance(v, dict) and v.get("score", 0) == best), "unknown"
-                )
                 return False, f"dominant bullish signal veto on short: {signal_name}={best:.2f}"
 
     # Max concurrent swing positions — enforced before any swing promotion
