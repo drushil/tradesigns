@@ -1241,24 +1241,12 @@ def _check_exits(portfolio_state, profile):
 
             else:
                 # Normal intraday stop/take-profit/time exit
-                if eod_cleanup and exit_reason is None:
-                    if _try_promote_to_swing(ticker, trade, current_price, profile):
-                        log_event("INFO", "eod_intraday_promoted", {
-                            "ticker": ticker,
-                            "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
-                        })
-                        continue
-                    exit_reason = "time_exit"
-                    log_event("INFO", "eod_intraday_cleanup_exit", {
-                        "ticker": ticker,
-                        "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
-                        "reason": "not_swing_qualified",
-                    })
 
                 # For extended trades check momentum decay each cycle before stop/time checks
                 if exit_reason is None and int(trade.get("hold_extension_count") or 0) > 0:
                     exit_reason = _check_momentum_exit(ticker, trade, profile)
 
+                # Stop-loss and take-profit always evaluated first
                 stop_price        = trade["stop_price"]
                 take_profit_price = trade.get("take_profit_price")
 
@@ -1273,12 +1261,30 @@ def _check_exits(portfolio_state, profile):
                     elif take_profit_price and current_price >= take_profit_price:
                         exit_reason = "take_profit"
 
-                if hold_elapsed >= hold_target and exit_reason is None:
-                    exit_reason = _handle_hold_deadline(
-                        ticker, trade, current_price, profile, portfolio_state
-                    )
-                    if exit_reason is None:
-                        continue
+                if exit_reason is None:
+                    if eod_cleanup:
+                        # Near close: promote strong winners to swing, close everything else
+                        if _try_promote_to_swing(ticker, trade, current_price, profile):
+                            log_event("INFO", "eod_intraday_promoted", {
+                                "ticker": ticker,
+                                "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
+                            })
+                            continue
+                        pnl_pct_eod = _trade_pnl_pct(trade, current_price)
+                        log_event("INFO", "eod_intraday_cleanup_exit", {
+                            "ticker": ticker,
+                            "pnl_pct": round(pnl_pct_eod, 4),
+                            "outcome": "loser" if pnl_pct_eod < 0 else (
+                                "flat" if pnl_pct_eod < 0.05 else "winner_not_swing_qualified"
+                            ),
+                        })
+                        exit_reason = "time_exit"
+                    elif hold_elapsed >= hold_target:
+                        exit_reason = _handle_hold_deadline(
+                            ticker, trade, current_price, profile, portfolio_state
+                        )
+                        if exit_reason is None:
+                            continue
 
             if exit_reason:
                 _close_trade(ticker, trade, current_price, exit_reason)
