@@ -24,9 +24,38 @@ def render():
     df["created_at"] = pd.to_datetime(df.get("created_at", pd.Series()))
     df["net_pnl_pct"] = pd.to_numeric(df.get("net_pnl_pct", 0), errors="coerce").fillna(0)
     df["pnl_eur"]     = pd.to_numeric(df.get("pnl_eur", 0),     errors="coerce").fillna(0)
+    if "hold_minutes" in df.columns:
+        df["hold_minutes"] = pd.to_numeric(df["hold_minutes"], errors="coerce").fillna(0)
+    if "hold_days_actual" in df.columns:
+        df["hold_days_actual"] = pd.to_numeric(df["hold_days_actual"], errors="coerce")
+    if "swing_conviction" in df.columns:
+        df["swing_conviction"] = pd.to_numeric(df["swing_conviction"], errors="coerce")
+
+    def _truthy(value) -> bool:
+        if pd.isna(value):
+            return False
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "t", "1", "yes", "y"}
+        return bool(value)
+
+    swing_exit_reasons = {
+        "chandelier_stop", "swing_exit", "earnings_tomorrow",
+        "regime_turned_bear", "momentum_reversed", "take_profit_8pct",
+    }
+
+    def _is_swing_trade(row) -> bool:
+        return (
+            _truthy(row.get("promoted_to_swing"))
+            or _truthy(row.get("swing_trade"))
+            or row.get("horizon") == "swing"
+            or row.get("exit_reason") in swing_exit_reasons
+        )
+
+    df["is_swing"] = df.apply(_is_swing_trade, axis=1)
+    df["hold_type_filter"] = df["is_swing"].map({True: "Swing", False: "Intraday"})
 
     # ── Filters ────────────────────────────────────────────────────────────
-    col_f1, col_f2, col_f3, col_f4, col_f5 = st.columns(5)
+    col_f1, col_f2, col_f3, col_f4, col_f5, col_f6 = st.columns(6)
     with col_f1:
         tickers = ["All"] + sorted(df["ticker"].unique().tolist())
         sel_ticker = st.selectbox("Ticker", tickers)
@@ -42,6 +71,8 @@ def render():
     with col_f5:
         exposures = ["All"] + sorted(df["exposure_direction"].dropna().unique().tolist()) if "exposure_direction" in df.columns else ["All"]
         sel_exposure = st.selectbox("Exposure", exposures)
+    with col_f6:
+        sel_hold_type = st.selectbox("Hold type", ["All", "Intraday", "Swing"])
 
     fdf = df.copy()
     if sel_ticker != "All":
@@ -56,6 +87,8 @@ def render():
         fdf = fdf[fdf["net_pnl_pct"] <= 0]
     if sel_exposure != "All" and "exposure_direction" in fdf.columns:
         fdf = fdf[fdf["exposure_direction"] == sel_exposure]
+    if sel_hold_type != "All":
+        fdf = fdf[fdf["hold_type_filter"] == sel_hold_type]
 
     if sel_ticker != "All":
         profile_html = ticker_profile_html(sel_ticker, compact=True)
@@ -76,6 +109,76 @@ def render():
     c5.metric("Avg hold", f"{fdf['hold_minutes'].mean():.0f} min" if "hold_minutes" in fdf.columns and len(fdf) else "—")
     bearish_count = int((fdf["exposure_direction"] == "short_market").sum()) if "exposure_direction" in fdf.columns else 0
     c6.metric("Bearish exposure", f"{bearish_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
+
+    st.markdown("---")
+
+    # ── Swing stats ─────────────────────────────────────────────────────────
+    st.markdown("##### Swing vs Intraday")
+    swing_df = fdf[fdf["is_swing"]]
+    intraday_df = fdf[~fdf["is_swing"]]
+
+    def _win_rate(data):
+        return (data["net_pnl_pct"].gt(0).mean() * 100) if len(data) else None
+
+    def _avg_hold_label(data):
+        if not len(data) or "hold_minutes" not in data.columns:
+            return "—"
+        avg_minutes = data["hold_minutes"].mean()
+        if avg_minutes >= 390:
+            return f"{avg_minutes / 390:.1f} d"
+        return f"{avg_minutes:.0f} min"
+
+    sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
+    sc1.metric("Swing trades", len(swing_df))
+    sc2.metric("Swing win rate", f"{_win_rate(swing_df):.1f}%" if len(swing_df) else "—")
+    sc3.metric("Swing avg P&L", f"{swing_df['net_pnl_pct'].mean():+.3f}%" if len(swing_df) else "—")
+    sc4.metric("Swing total P&L", f"€{swing_df['pnl_eur'].sum():+.2f}" if len(swing_df) else "—")
+    sc5.metric("Swing avg hold", _avg_hold_label(swing_df))
+    sc6.metric(
+        "Avg conviction",
+        f"{swing_df['swing_conviction'].dropna().mean():.0%}"
+        if "swing_conviction" in swing_df.columns and swing_df["swing_conviction"].notna().any()
+        else "—",
+    )
+
+    compare_rows = []
+    for label, data in [("Intraday", intraday_df), ("Swing", swing_df)]:
+        if len(data):
+            compare_rows.append({
+                "Hold Type": label,
+                "Trades": len(data),
+                "Avg Net P&L (%)": data["net_pnl_pct"].mean(),
+                "Win Rate (%)": _win_rate(data),
+            })
+    if compare_rows:
+        compare_df = pd.DataFrame(compare_rows)
+        col_cmp1, col_cmp2 = st.columns(2)
+        with col_cmp1:
+            fig_cmp = px.bar(
+                compare_df, x="Hold Type", y="Avg Net P&L (%)", color="Hold Type",
+                text=compare_df["Avg Net P&L (%)"].map(lambda v: f"{v:+.3f}%"),
+                template="plotly_dark",
+                color_discrete_map={"Intraday": "#888", "Swing": "#ffd166"},
+            )
+            fig_cmp.add_hline(y=0, line_dash="dot", line_color="#555")
+            fig_cmp.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                                  plot_bgcolor="rgba(0,0,0,0)", height=240,
+                                  margin=dict(l=0, r=0, t=10, b=0),
+                                  showlegend=False)
+            st.plotly_chart(fig_cmp, width="stretch")
+        with col_cmp2:
+            st.dataframe(
+                compare_df.assign(
+                    **{
+                        "Avg Net P&L (%)": compare_df["Avg Net P&L (%)"].map(lambda v: f"{v:+.3f}%"),
+                        "Win Rate (%)": compare_df["Win Rate (%)"].map(lambda v: f"{v:.1f}%"),
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+    else:
+        st.info("No closed trades match the current filters yet.")
 
     st.markdown("---")
 
@@ -149,10 +252,9 @@ def render():
     # Build hold-type badge column
     fdf = fdf.copy()
     def _swing_badge(row):
-        is_swing = bool(row.get("promoted_to_swing") or row.get("swing_trade"))
         days     = row.get("hold_days_actual")
-        if is_swing:
-            return f"🚀 SWING {int(days)}d" if days else "🚀 SWING"
+        if row.get("is_swing"):
+            return f"SWING {int(days)}d" if pd.notna(days) and days else "SWING"
         return "⚡ INTRADAY"
     fdf["hold_type"] = fdf.apply(_swing_badge, axis=1)
 
@@ -177,8 +279,8 @@ def render():
     )
 
     # ── Swing trade detail expanders ───────────────────────────────────────
-    if "promoted_to_swing" in fdf.columns:
-        swing_rows = fdf[fdf["promoted_to_swing"].fillna(False).astype(bool)]
+    if "is_swing" in fdf.columns:
+        swing_rows = fdf[fdf["is_swing"]]
         if not swing_rows.empty:
             st.markdown("##### Swing Trade Details")
             for _, row in swing_rows.sort_values("created_at", ascending=False).head(20).iterrows():
