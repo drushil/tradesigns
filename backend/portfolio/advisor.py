@@ -312,7 +312,7 @@ def run_portfolio_review() -> dict:
     else:
         priors        = saved_weights if saved_weights else base_profile["signal_weights"]
         weight_engine = RegimeAwareWeightEngine(priors)
-    weights = weight_engine.weights()
+    weights = weight_engine.get_weights()
 
     # Fetch current prices + signals for each ticker
     signal_results: dict[str, dict] = {}
