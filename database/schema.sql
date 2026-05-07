@@ -504,5 +504,5 @@ alter table if exists trades
         'chandelier_stop','swing_exit','earnings_tomorrow',
         'regime_turned_bear','momentum_reversed',
         'macro_shock','take_profit_8pct','swing_promoted',
-        'momentum_peak_decay'
+        'momentum_peak_decay','eod_cleanup'
     ));

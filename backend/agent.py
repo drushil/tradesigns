@@ -66,6 +66,13 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+def _env_bool(key: str, default: bool = True) -> bool:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"false", "0", "no"}
+
+
 def _eurusd_rate() -> float:
     return _env_float("EURUSD_RATE", 1.08)
 
@@ -184,22 +191,16 @@ def _should_run_swing_recheck(now: datetime = None) -> bool:
     return ny_now.weekday() < 5 and 0 <= current - target < window
 
 
-def _is_eod_intraday_cleanup_window(now: datetime = None) -> bool:
-    """Start cleaning intraday positions 30 minutes before the regular close."""
-    if os.getenv("EOD_INTRADAY_CLEANUP_ENABLED", "true").strip().lower() == "false":
+def _is_eod_intraday_cleanup_window(now: datetime) -> bool:
+    """Return True during the 30-min window before the regular US market close."""
+    if not _env_bool("EOD_INTRADAY_CLEANUP_ENABLED", True):
         return False
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
+    if not is_regular_us_market_hours(now):
+        return False
     ny_now = _to_new_york_time(now)
-    if ny_now.weekday() >= 5:
-        return False
-    close_hour = _env_int("EOD_CLEANUP_NY_CLOSE_HOUR", 16)
-    close_minute = _env_int("EOD_CLEANUP_NY_CLOSE_MINUTE", 0)
-    buffer_minutes = _env_int("EOD_CLEANUP_BUFFER_MINUTES", 30)
+    close = _env_int("EOD_CLEANUP_NY_CLOSE_HOUR", 16) * 60 + _env_int("EOD_CLEANUP_NY_CLOSE_MINUTE", 0)
     current = ny_now.hour * 60 + ny_now.minute
-    close = close_hour * 60 + close_minute
-    return close - buffer_minutes <= current < close
+    return close - _env_int("EOD_CLEANUP_BUFFER_MINUTES", 30) <= current < close
 
 
 def _init_learning_engine() -> RegimeAwareWeightEngine:
@@ -371,7 +372,7 @@ def _apply_learned_hold_extension(
     Extend high-quality intraday trades based on the latest learning that
     longer holds have produced better net P&L.
     """
-    if os.getenv("LEARNED_HOLD_EXTENSION_ENABLED", "true").strip().lower() == "false":
+    if not _env_bool("LEARNED_HOLD_EXTENSION_ENABLED", True):
         return hold_minutes, None
 
     min_conviction = _env_float(
@@ -656,7 +657,7 @@ def _check_pdt_warning(ticker: str, count: int):
 # ── Momentum swing promotion ──────────────────────────────────────────────────
 
 def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
-                          profile: dict) -> bool:
+                          profile: dict, regime_state=None) -> bool:
     """
     Called at intraday time_exit boundary. If momentum is still intact and
     the trade is profitable, promote it to a 3-5 day swing instead of closing.
@@ -686,7 +687,7 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
 
     try:
         weights = _learning_engine.get_weights("trending") if _learning_engine else profile["signal_weights"]
-        regime_state = detect_regime(ticker)
+        regime_state = regime_state or detect_regime(ticker)
         signal_result = _get_cached_signals(ticker, weights, regime_state)
         swing_check = detect_momentum_swing(ticker, signal_result, regime_state, profile)
     except Exception as e:
@@ -1174,8 +1175,9 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
 def _check_exits(portfolio_state, profile):
     """Check all open trades for stop-loss, chandelier stop, or time-based exit."""
     import yfinance as yf
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for hold_elapsed arithmetic
     eod_cleanup = _is_eod_intraday_cleanup_window(datetime.now(timezone.utc))
+    _regime_cache: dict[str, object] = {}  # per-call cache: ticker → regime_state
 
     for ticker, trade in list(_open_trades.items()):
         # Traditional horizon-swing trades (dip buys, ETF swings) are managed by
@@ -1263,8 +1265,13 @@ def _check_exits(portfolio_state, profile):
 
                 if exit_reason is None:
                     if eod_cleanup:
-                        # Near close: promote strong winners to swing, close everything else
-                        if _try_promote_to_swing(ticker, trade, current_price, profile):
+                        # Near close: promote strong winners to swing, close everything else.
+                        # Regime is cached per-call to avoid duplicate detect_regime fetches.
+                        cached_regime = _regime_cache.get(ticker)
+                        if cached_regime is None:
+                            cached_regime = detect_regime(ticker)
+                            _regime_cache[ticker] = cached_regime
+                        if _try_promote_to_swing(ticker, trade, current_price, profile, cached_regime):
                             log_event("INFO", "eod_intraday_promoted", {
                                 "ticker": ticker,
                                 "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
@@ -1278,7 +1285,7 @@ def _check_exits(portfolio_state, profile):
                                 "flat" if pnl_pct_eod < 0.05 else "winner_not_swing_qualified"
                             ),
                         })
-                        exit_reason = "time_exit"
+                        exit_reason = "eod_cleanup"
                     elif hold_elapsed >= hold_target:
                         exit_reason = _handle_hold_deadline(
                             ticker, trade, current_price, profile, portfolio_state
