@@ -100,8 +100,7 @@ jobs:
           DIVIDEND_SCAN_ENABLED: "${{ vars.DIVIDEND_SCAN_ENABLED }}"
           DIVIDEND_MIN_YIELD_PCT: "${{ vars.DIVIDEND_MIN_YIELD_PCT }}"
           ALLOW_SHORT_SELLING:  "${{ vars.ALLOW_SHORT_SELLING }}"
-        env:
-          DISPATCH_MODE: "${{ github.event.inputs.mode }}"
+          DISPATCH_MODE:        "${{ github.event.inputs.mode }}"
         run: |
           python <<'PY'
           import os
