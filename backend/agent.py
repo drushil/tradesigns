@@ -854,6 +854,16 @@ def run_signal_cycle():
         except Exception as e:
             log_event("WARN", "dividend_scan_failed", {"error": str(e)[:100]})
 
+    # Earnings proximity guard (6hr cache — populates cache read by pre_trade_gate)
+    try:
+        from backend.earnings.scanner import scan_earnings_guard
+        eg = scan_earnings_guard(TICKERS)
+        blocked = [t for t, v in eg.items() if v.get("blocked")]
+        if blocked:
+            log_event("INFO", "earnings_guard_active", {"blocked_tickers": blocked})
+    except Exception as e:
+        log_event("WARN", "earnings_guard_scan_failed", {"error": str(e)[:100]})
+
     if _allows_intraday():
         for ticker in TICKERS:
             try:

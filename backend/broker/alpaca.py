@@ -338,6 +338,17 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     if ticker in open_tickers:
         return False, f"position already open for {ticker}"
 
+    # Earnings proximity guard — block new entries within 2 days of a 10-Q/10-K filing
+    try:
+        from backend.earnings.scanner import get_cached_earnings_guard
+        eg = get_cached_earnings_guard()
+        info = eg.get(ticker, {})
+        if info.get("blocked"):
+            days = info.get("days_to_filing")
+            return False, f"earnings_guard: filing in {days}d ({info.get('filing_date')})"
+    except Exception:
+        pass
+
     if side.lower() == "sell" and not profile.get("allow_short_selling", False):
         return False, "short selling disabled for profile"
 

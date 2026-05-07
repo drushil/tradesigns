@@ -38,6 +38,8 @@ class RegimeState:
     trend_std_return: float = 0.0
     regime_reason: str = ""
     computed_at: str = ""
+    yield_curve: float = 0.0          # T10Y2Y spread (10yr minus 2yr, %)
+    yield_curve_state: str = "normal" # "inverted" | "flat" | "normal"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,7 +54,99 @@ def _clamp(val: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, val))
 
 
+# ── Alpaca data client singleton ──────────────────────────────────────────────
+_alpaca_data_client = None
+
+def _get_alpaca_data_client():
+    """Lazy-init singleton for Alpaca StockHistoricalDataClient."""
+    global _alpaca_data_client
+    if _alpaca_data_client is None:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+            api_key    = os.getenv("ALPACA_API_KEY")
+            secret_key = os.getenv("ALPACA_SECRET_KEY")
+            if api_key and secret_key:
+                _alpaca_data_client = StockHistoricalDataClient(api_key, secret_key)
+        except Exception:
+            pass
+    return _alpaca_data_client
+
+
+# Per-cycle bar cache: (ticker, interval) → (timestamp, DataFrame)
+_bars_cache: dict = {}
+_BARS_CACHE_TTL = 90  # seconds — covers one full 10-min signal cycle
+
+
 def _get_bars(ticker: str, period: str = "5d", interval: str = "1m") -> Optional[pd.DataFrame]:
+    """
+    Fetch OHLCV bars. Tries Alpaca (real-time IEX) first; falls back to yfinance.
+    Results are cached for 90 s to avoid duplicate fetches within one cycle.
+    """
+    cache_key = (ticker, interval)
+    now_ts    = time.time()
+    if cache_key in _bars_cache:
+        cached_ts, cached_df = _bars_cache[cache_key]
+        if now_ts - cached_ts < _BARS_CACHE_TTL:
+            return cached_df
+
+    df = _alpaca_bars(ticker, period, interval)
+    if df is None:
+        df = _yfinance_bars(ticker, period, interval)
+
+    _bars_cache[cache_key] = (now_ts, df)
+    return df
+
+
+def _alpaca_bars(ticker: str, period: str, interval: str) -> Optional[pd.DataFrame]:
+    """Fetch bars from Alpaca Data API (IEX, real-time on free tier)."""
+    try:
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+        client = _get_alpaca_data_client()
+        if client is None:
+            return None
+
+        # Map yfinance period/interval → Alpaca timeframe + window
+        _tf_map = {
+            "1m":  TimeFrame.Minute,
+            "5m":  TimeFrame(5,  TimeFrameUnit.Minute),
+            "15m": TimeFrame(15, TimeFrameUnit.Minute),
+            "1h":  TimeFrame.Hour,
+            "1d":  TimeFrame.Day,
+        }
+        _days_map = {"1d": 2, "2d": 2, "5d": 5, "1y": 365, "3mo": 92}
+
+        tf   = _tf_map.get(interval)
+        days = _days_map.get(period, 5)
+        if tf is None:
+            return None
+
+        start = datetime.utcnow() - timedelta(days=days)
+        req   = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=tf,
+            start=start,
+        )
+        bars = client.get_stock_bars(req)
+        if not bars or ticker not in bars.data or not bars.data[ticker]:
+            return None
+
+        df = bars.df
+        # bars.df is multi-indexed (symbol, timestamp) when multi-ticker; flatten
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.loc[ticker] if ticker in df.index.get_level_values(0) else df.droplevel(0)
+        df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+        df.columns = [c.title() for c in df.columns]  # open→Open etc.
+        if len(df) < 5:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _yfinance_bars(ticker: str, period: str, interval: str) -> Optional[pd.DataFrame]:
+    """yfinance fallback — used when Alpaca keys are absent or call fails."""
     try:
         df = yf.download(ticker, period=period, interval=interval,
                          progress=False, auto_adjust=True)
@@ -457,15 +551,12 @@ def order_book_score(ticker: str) -> tuple[float, dict]:
     Free via Alpaca paper account websocket/REST.
     """
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestQuoteRequest
 
-        api_key    = os.getenv("ALPACA_API_KEY")
-        secret_key = os.getenv("ALPACA_SECRET_KEY")
-        if not api_key or not secret_key:
+        client = _get_alpaca_data_client()
+        if client is None:
             return 0.0, {"error": "no_alpaca_keys"}
 
-        client = StockHistoricalDataClient(api_key, secret_key)
         req    = StockLatestQuoteRequest(symbol_or_symbols=ticker)
         quote  = client.get_stock_latest_quote(req)[ticker]
 
@@ -1163,6 +1254,18 @@ def detect_macro_regime(return_meta: bool = False):
     except Exception:
         pass
 
+    # ── 4. Yield curve inversion: deeply inverted → risk_off ─────────────────
+    try:
+        t10y2y = _get_fred_value("T10Y2Y")
+        if t10y2y is not None:
+            meta["yield_curve_t10y2y"] = round(t10y2y, 3)
+            if t10y2y < -0.5:
+                result = ("risk_off", {**meta, "yield_curve_trigger": True})
+                _macro_regime_cache["macro"] = (now_ts, result)
+                return result if return_meta else result[0]
+    except Exception:
+        pass
+
     result = ("normal", meta)
     _macro_regime_cache["macro"] = (now_ts, result)
     return result if return_meta else result[0]
@@ -1328,6 +1431,46 @@ def _emit_shock_side_effects(shock_result: dict):
 _regime_state_cache: dict = {}
 _REGIME_STATE_TTL = 4 * 3600
 
+# ── FRED macro data cache ─────────────────────────────────────────────────────
+_fred_cache: dict = {}
+_FRED_CACHE_TTL = 6 * 3600   # 6 hours — FRED updates once daily
+
+
+def _get_fred_value(series_id: str) -> Optional[float]:
+    """
+    Fetch the latest observation for a FRED series.
+    Requires FRED_API_KEY env var (free at fred.stlouisfed.org).
+    Returns None on failure so callers can degrade gracefully.
+    """
+    now_ts = time.time()
+    if series_id in _fred_cache:
+        cached_ts, cached_val = _fred_cache[series_id]
+        if now_ts - cached_ts < _FRED_CACHE_TTL:
+            return cached_val
+
+    api_key = os.getenv("FRED_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id={series_id}&api_key={api_key}"
+            "&limit=5&sort_order=desc&file_type=json"
+        )
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        obs  = resp.json().get("observations", [])
+        # Most recent non-missing value
+        for o in obs:
+            if o.get("value", ".") != ".":
+                val = float(o["value"])
+                _fred_cache[series_id] = (now_ts, val)
+                return val
+    except Exception:
+        pass
+    return None
+
 
 def detect_regime(ticker: str = "SPY") -> RegimeState:
     """
@@ -1342,12 +1485,24 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
         if now_ts - cached_ts < _REGIME_STATE_TTL:
             return cached_state
 
-    try:
-        vix_df = yf.download("^VIX", period="2d", interval="1h",
-                             progress=False, auto_adjust=True)
-        vix = float(vix_df["Close"].squeeze().iloc[-1]) if not vix_df.empty else 20.0
-    except Exception:
-        vix = 20.0
+    # VIX: prefer FRED VIXCLS (official, no scraping); fall back to yfinance
+    vix = _get_fred_value("VIXCLS")
+    if vix is None:
+        try:
+            vix_df = yf.download("^VIX", period="2d", interval="1h",
+                                 progress=False, auto_adjust=True)
+            vix = float(vix_df["Close"].squeeze().iloc[-1]) if not vix_df.empty else 20.0
+        except Exception:
+            vix = 20.0
+
+    # Yield curve: T10Y2Y from FRED (10yr minus 2yr Treasury spread)
+    yield_curve       = _get_fred_value("T10Y2Y") or 0.0
+    if yield_curve < -0.2:
+        yield_curve_state = "inverted"
+    elif yield_curve <= 0.2:
+        yield_curve_state = "flat"
+    else:
+        yield_curve_state = "normal"
 
     market_regime = "transitioning"
     sma200_price = 0.0
@@ -1374,9 +1529,19 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
     trend_threshold = 1.5
     trend_mean_return = 0.0
     trend_std_return = 0.0
-    regime_reason = "vix_high" if vix > 30 else "default"
 
-    if vix > 30:
+    # High-vol gate: VIX > 30 OR deeply inverted curve (< -0.5) signals stress
+    _high_vol = vix > 30 or yield_curve < -0.5
+    if vix > 30 and yield_curve < -0.5:
+        regime_reason = "vix_high_inverted_curve"
+    elif vix > 30:
+        regime_reason = "vix_high"
+    elif yield_curve < -0.5:
+        regime_reason = "inverted_curve"
+    else:
+        regime_reason = "default"
+
+    if _high_vol:
         intraday_regime = "high_vol"
     else:
         df = _get_bars(ticker, period="5d", interval="15m")
@@ -1410,6 +1575,8 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
         trend_mean_return=round(trend_mean_return, 8),
         trend_std_return=round(trend_std_return, 8),
         regime_reason=regime_reason,
+        yield_curve=round(yield_curve, 3),
+        yield_curve_state=yield_curve_state,
     )
     _regime_state_cache[cache_key] = (now_ts, state)
     return state
