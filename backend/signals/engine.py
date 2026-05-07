@@ -72,7 +72,7 @@ def _get_alpaca_data_client():
     return _alpaca_data_client
 
 
-# Per-cycle bar cache: (ticker, interval) → (timestamp, DataFrame)
+# Per-cycle bar cache: (ticker, period, interval) -> (timestamp, DataFrame)
 _bars_cache: dict = {}
 _BARS_CACHE_TTL = 90  # seconds — covers one full 10-min signal cycle
 
@@ -82,7 +82,7 @@ def _get_bars(ticker: str, period: str = "5d", interval: str = "1m") -> Optional
     Fetch OHLCV bars. Tries Alpaca (real-time IEX) first; falls back to yfinance.
     Results are cached for 90 s to avoid duplicate fetches within one cycle.
     """
-    cache_key = (ticker, interval)
+    cache_key = (ticker.upper(), period, interval)
     now_ts    = time.time()
     if cache_key in _bars_cache:
         cached_ts, cached_df = _bars_cache[cache_key]

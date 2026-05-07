@@ -952,6 +952,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "regime_bull_bear":       signal_result.get("regime_bull_bear"),
         "shock_detected":         signal_result.get("shock_detected", False),
         "shock_classification":   signal_result.get("shock_classification"),
+        "yield_curve":           getattr(ticker_regime_state, "yield_curve", None),
+        "yield_curve_state":     getattr(ticker_regime_state, "yield_curve_state", None),
         "regime":                 ticker_regime,
         "action_hint":            action_hint,
         "exposure_direction":     _exposure_direction(ticker, action_hint),

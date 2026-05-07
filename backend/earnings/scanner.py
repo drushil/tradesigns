@@ -70,7 +70,7 @@ def _fetch_recent_filings(cik: str) -> list[str]:
     """
     Return a list of recent 10-Q / 10-K filing dates (YYYY-MM-DD strings)
     for the given zero-padded CIK.
-    Uses reportDate where available; falls back to filingDate.
+    Uses filingDate because the guard blocks around the actual SEC filing day.
     """
     try:
         url  = f"https://data.sec.gov/submissions/CIK{cik}.json"
@@ -80,14 +80,11 @@ def _fetch_recent_filings(cik: str) -> list[str]:
         recent  = data.get("filings", {}).get("recent", {})
         forms   = recent.get("form", [])
         f_dates = recent.get("filingDate", [])
-        r_dates = recent.get("reportDate", [])
 
         earnings_dates = []
         for i, form in enumerate(forms):
             if form in ("10-Q", "10-K"):
-                # Prefer reportDate (actual earnings period end) over filingDate
-                d = (r_dates[i] if i < len(r_dates) and r_dates[i] else
-                     f_dates[i] if i < len(f_dates) else None)
+                d = f_dates[i] if i < len(f_dates) else None
                 if d:
                     earnings_dates.append(d)
         return earnings_dates
