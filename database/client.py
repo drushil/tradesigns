@@ -449,6 +449,41 @@ def get_snapshots(days: int = 30) -> list:
     return result.data or []
 
 
+# ── Portfolio reviews ─────────────────────────────────────────────────────────
+
+def save_portfolio_review(review: dict):
+    """Persist a weekly advisory review to portfolio_reviews."""
+    try:
+        import json
+        db = get_client(write=True)
+        db.table("portfolio_reviews").insert({
+            "reviewed_at":    review.get("reviewed_at"),
+            "equity_eur":     review.get("equity_eur"),
+            "position_count": review.get("position_count"),
+            "summary":        json.dumps(review.get("summary", {})),
+            "alerts":         json.dumps(review.get("alerts", [])),
+            "positions":      json.dumps(review.get("positions", [])),
+            "exposure":       json.dumps(review.get("exposure", {})),
+        }).execute()
+    except Exception as e:
+        print(f"[REVIEW_WRITE_FAILED] {str(e)[:200]}")
+
+
+def get_portfolio_reviews(limit: int = 12) -> list:
+    """Return the most recent weekly advisory reviews."""
+    try:
+        db = get_client()
+        result = (db.table("portfolio_reviews")
+                  .select("*")
+                  .order("reviewed_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[REVIEW_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
 def log_event(level: str, event: str, detail: dict = None):

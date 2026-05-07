@@ -46,14 +46,15 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 0.5px solid #1
 """, unsafe_allow_html=True)
 
 PAGES = {
-    "📊 Overview":    "overview",
-    "📡 Live Signals": "signals",
-    "🔄 Trades":      "trades",
-    "📈 Performance": "performance",
-    "🧠 Learning":    "learning",
-    "💰 Yield & Sweep": "yield",
-    "⚙️  Config":     "config_page",
-    "📋 Agent Logs":  "logs",
+    "📊 Overview":         "overview",
+    "📡 Live Signals":     "signals",
+    "🔄 Trades":           "trades",
+    "📈 Performance":      "performance",
+    "🧠 Learning":         "learning",
+    "💰 Yield & Sweep":    "yield",
+    "📋 Portfolio Review": "portfolio_review",
+    "⚙️  Config":          "config_page",
+    "📋 Agent Logs":       "logs",
 }
 
 with st.sidebar:

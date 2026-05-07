@@ -2,6 +2,8 @@ name: Trading Agent - Signal Cycle
 
 on:
   schedule:
+    # Weekly portfolio review: Sunday 17:00 UTC (observation only, no trades)
+    - cron: '0 17 * * 0'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
     # Off-hours macro/dip alert scan (no trading)
@@ -99,6 +101,7 @@ jobs:
           from backend.agent import (
               is_regular_us_market_hours,
               run_signal_cycle,
+              run_portfolio_review,
               run_weekly_digest,
               run_nightly_sweep,
               re_evaluate_swing_positions,
@@ -106,7 +109,10 @@ jobs:
           )
 
           now = datetime.now(timezone.utc)
-          if now.weekday() == 6 and now.hour == 18:
+          if now.weekday() == 6 and now.hour == 17:
+              print("Running weekly portfolio review...")
+              run_portfolio_review()
+          elif now.weekday() == 6 and now.hour == 18:
               print("Running weekly digest...")
               run_weekly_digest()
           elif now.weekday() < 5 and now.hour == 21 and now.minute < 10:

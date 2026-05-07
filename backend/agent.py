@@ -2182,6 +2182,33 @@ def run_nightly_sweep():
         log_event("ERROR", "nightly_sweep_failed", {"error": str(e)[:100]})
 
 
+# ── Weekly portfolio review (advisory, observation only) ─────────────────────
+
+def run_portfolio_review():
+    """
+    Advisory portfolio review — observation and recommendation only.
+    Scores every open position and writes hold/trim/add/exit recommendations
+    to portfolio_reviews. No trades are placed.
+    Called weekly (Sunday 17:00 UTC), one hour before the weekly digest.
+    Execution authority is granted only after 8-10 weeks of validated recommendations.
+    """
+    from backend.portfolio.advisor import run_portfolio_review as _review
+    try:
+        result = _review()
+        if result.get("skipped"):
+            log_event("ADVISORY", "portfolio_review_skipped", result)
+        else:
+            log_event("ADVISORY", "portfolio_review_ok", {
+                "positions": result.get("position_count", 0),
+                "summary":   result.get("summary", {}),
+                "alerts":    len(result.get("alerts", [])),
+            })
+        return result
+    except Exception as e:
+        log_event("ERROR", "portfolio_review_failed", {"error": str(e)[:200]})
+        return {}
+
+
 # ── Weekly digest (called by scheduler) ──────────────────────────────────────
 
 def run_weekly_digest():
@@ -2224,7 +2251,12 @@ def start_scheduler():
                           hour="13-21",
                           minute="*/5")
 
-    # Weekly digest: Sunday evening
+    # Weekly portfolio review: Sunday 17:00 UTC (one hour before digest)
+    scheduler.add_job(run_portfolio_review, "cron",
+                      day_of_week="sun", hour=17, minute=0,
+                      timezone=timezone.utc)
+
+    # Weekly digest: Sunday 18:00 UTC
     scheduler.add_job(run_weekly_digest, "cron",
                       day_of_week="sun", hour=18, minute=0,
                       timezone=timezone.utc)
@@ -2244,6 +2276,8 @@ if __name__ == "__main__":
         run_nightly_sweep()
     elif mode == "digest":
         run_weekly_digest()
+    elif mode == "portfolio_review":
+        run_portfolio_review()
     elif mode == "signal":
         run_signal_cycle()
     elif mode == "swing_reeval":
