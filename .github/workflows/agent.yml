@@ -158,11 +158,13 @@ jobs:
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
           SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
           SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
           ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
           ALPACA_BASE_URL:      https://paper-api.alpaca.markets
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           MAX_CAPITAL_DEPLOYED_EUR: "${{ vars.MAX_CAPITAL_DEPLOYED_EUR }}"
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
+          DISCORD_SUMMARY_INTERVAL_MINUTES: "${{ vars.DISCORD_SUMMARY_INTERVAL_MINUTES }}"
         run: |
           python scripts/discord_notify.py
