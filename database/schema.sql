@@ -319,6 +319,42 @@ create index if not exists idx_logs_level_time on agent_logs (level, logged_at d
 create index if not exists idx_logs_errors     on agent_logs (logged_at desc)
     where level in ('ERROR','WARN');
 
+-- 9. BLOCKED_OPPORTUNITIES
+create table if not exists blocked_opportunities (
+    id                      bigint generated always as identity primary key,
+    created_at              timestamptz not null default now(),
+    ticker                  text not null,
+    action_hint             text check (action_hint in ('BUY','SELL','HOLD',null)),
+    composite_score         numeric(6,4),
+    block_stage             text not null check (block_stage in (
+                                'gate','ev','ranking','llm','conviction','price')),
+    block_reason            text,
+    candidate_rank_score    numeric(7,4),
+    breakout_quality        numeric(6,4),
+    ev_decision             text,
+    ev_net_pct              numeric(8,4),
+    ev_result_json          jsonb default '{}'::jsonb,
+    signals_json            jsonb default '{}'::jsonb,
+    setup_context_json      jsonb default '{}'::jsonb,
+    regime                  text,
+    market_regime           text,
+    strategy_family         text,
+    event_risk_active       boolean default false,
+    reference_price         numeric(12,4),
+    replay_checked_at       timestamptz,
+    max_favorable_pct       numeric(8,4),
+    max_adverse_pct         numeric(8,4),
+    close_after_pct         numeric(8,4),
+    replay_result_json      jsonb default '{}'::jsonb
+);
+
+create index if not exists idx_blocked_opportunities_time
+    on blocked_opportunities (created_at desc);
+create index if not exists idx_blocked_opportunities_ticker_time
+    on blocked_opportunities (ticker, created_at desc);
+create index if not exists idx_blocked_opportunities_stage
+    on blocked_opportunities (block_stage, created_at desc);
+
 -- ── RLS ──────────────────────────────────────────────────────────────────────
 -- anon role = Streamlit dashboard (read-only, anon key)
 -- service_role = agent backend (bypasses RLS, write access)
@@ -333,6 +369,7 @@ alter table ticker_profiles     enable row level security;
 alter table learnings           enable row level security;
 alter table portfolio_snapshots enable row level security;
 alter table agent_logs          enable row level security;
+alter table blocked_opportunities enable row level security;
 
 create policy "anon read trades"             on trades             for select to anon using (true);
 create policy "anon read open_trades"        on open_trades        for select to anon using (true);
@@ -344,6 +381,7 @@ create policy "anon read ticker_profiles"    on ticker_profiles    for select to
 create policy "anon read learnings"          on learnings          for select to anon using (true);
 create policy "anon read portfolio_snapshots" on portfolio_snapshots for select to anon using (true);
 create policy "anon read agent_logs"         on agent_logs         for select to anon using (true);
+create policy "anon read blocked_opportunities" on blocked_opportunities for select to anon using (true);
 
 -- ── Views ─────────────────────────────────────────────────────────────────────
 

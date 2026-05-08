@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from dotenv import load_dotenv
 
@@ -309,6 +309,81 @@ def close_all_positions() -> dict:
 
 # ── Risk gate ─────────────────────────────────────────────────────────────────
 
+def _signal_score(signals: dict, name: str) -> float:
+    try:
+        return float((signals or {}).get(name, {}).get("score", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _event_risk_intraday_probe_allowed(side: str, composite_score: float,
+                                       profile: dict, market_regime: str = None,
+                                       signals: dict = None,
+                                       is_swing_candidate: bool = False) -> tuple[bool, str]:
+    """
+    Earnings/filing windows are overnight risk guards, not automatic bans.
+    Allow only exceptional intraday momentum probes with reduced sizing.
+    """
+    if is_swing_candidate:
+        return False, "swing entries blocked during event-risk window"
+
+    if not profile.get("allow_event_risk_intraday_probes", True):
+        return False, "event-risk intraday probes disabled"
+
+    now_utc = datetime.now(timezone.utc)
+    latest_entry_hour = int(profile.get("event_risk_latest_entry_utc_hour", 19))
+    if now_utc.hour >= latest_entry_hour:
+        return False, "too late for event-risk intraday probe"
+
+    signals = signals or {}
+    mean_reversion = _signal_score(signals, "mean_reversion")
+    if mean_reversion >= float(profile.get("event_risk_mean_reversion_block_score", 0.5)):
+        return False, "mean-reversion blocked during event-risk window"
+
+    side = str(side or "").lower()
+    min_score = float(profile.get("event_risk_probe_min_score", 0.32))
+    min_macd = float(profile.get("event_risk_probe_min_macd", 0.35))
+    min_tape = float(profile.get("event_risk_probe_min_tape", 0.25))
+    min_rel = float(profile.get("event_risk_probe_min_relative_strength", 0.35))
+
+    macd = _signal_score(signals, "macd_crossover")
+    tape = _signal_score(signals, "tape_aggression")
+    rel_strength = _signal_score(signals, "relative_strength")
+    news = _signal_score(signals, "news_sentiment")
+    vwap = _signal_score(signals, "vwap_deviation")
+    market = str(market_regime or "").lower()
+
+    if side == "buy":
+        aligned = (
+            composite_score >= min_score
+            and macd >= min_macd
+            and tape >= min_tape
+            and rel_strength >= min_rel
+            and news >= 0
+            and vwap <= 0
+            and market in {"bull", "transitioning", ""}
+        )
+    else:
+        aligned = (
+            composite_score <= -min_score
+            and macd <= -min_macd
+            and tape <= -min_tape
+            and rel_strength <= -min_rel
+            and news <= 0
+            and vwap >= 0
+            and market not in {"bull"}
+        )
+
+    if not aligned:
+        return False, (
+            "event-risk probe quality below threshold "
+            f"(score={composite_score:.3f}, macd={macd:.2f}, tape={tape:.2f}, "
+            f"rel={rel_strength:.2f}, vwap={vwap:.2f})"
+        )
+
+    return True, "event_risk_intraday_probe"
+
+
 def pre_trade_gate(ticker: str, side: str, size_eur: float,
                    composite_score: float, profile: dict,
                    portfolio_state: dict,
@@ -390,6 +465,14 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
         info = eg.get(ticker, {})
         if info.get("blocked"):
             days = info.get("days_to_filing")
+            event_ok, event_reason = _event_risk_intraday_probe_allowed(
+                side, composite_score, profile,
+                market_regime=market_regime,
+                signals=signals,
+                is_swing_candidate=is_swing_candidate,
+            )
+            if event_ok:
+                return True, f"{event_reason}: filing in {days}d ({info.get('filing_date')})"
             return False, f"earnings_guard: filing in {days}d ({info.get('filing_date')})"
     except Exception:
         pass

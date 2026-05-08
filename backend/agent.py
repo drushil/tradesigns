@@ -41,7 +41,10 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           save_signal_weights, get_latest_weights,
                                           save_snapshot, save_learning, log_event, get_logs,
                                           save_open_trade, get_open_trade_records,
-                                          close_open_trade_record)
+                                          close_open_trade_record,
+                                          insert_blocked_opportunity,
+                                          get_unchecked_blocked_opportunities,
+                                          update_blocked_opportunity_replay)
 from backend.sweep.agent         import (compute_sweep_plan, execute_sweep,
                                           recall_sweep, has_active_sweep)
 from backend.dividends.scanner   import (scan_dividend_calendar, log_dividend_opportunity)
@@ -352,6 +355,22 @@ def _missing_runtime_config() -> list[str]:
 
 def _apply_execution_overrides(profile: dict) -> dict:
     p = profile.copy()
+    p.setdefault("ev_reduced_size_floor_pct", -0.02)
+    p.setdefault("ev_probe_floor_pct", -0.10)
+    p.setdefault("ev_breakout_probe_min_quality", 0.65)
+    p.setdefault("ev_reduced_size_multiplier", 0.65)
+    p.setdefault("ev_probe_size_multiplier", 0.35)
+    p.setdefault("allow_event_risk_intraday_probes", True)
+    p.setdefault("event_risk_probe_min_score", 0.32)
+    p.setdefault("event_risk_probe_min_macd", 0.35)
+    p.setdefault("event_risk_probe_min_tape", 0.25)
+    p.setdefault("event_risk_probe_min_relative_strength", 0.35)
+    p.setdefault("event_risk_probe_size_multiplier", 0.30)
+    p.setdefault("event_risk_max_hold_minutes", 30)
+    p.setdefault("event_risk_stop_multiplier", 0.75)
+    p.setdefault("event_risk_min_stop_pct", 0.25)
+    p.setdefault("event_risk_latest_entry_utc_hour", 19)
+    p.setdefault("max_new_intraday_trades_per_cycle", 2)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -496,6 +515,239 @@ def _strategy_family(ticker: str, side: str, regime: str, signal_result: dict,
     if regime == "trending" or max(macd, rel_strength, tape) >= 0.35:
         return "trend_following"
     return "signal_composite"
+
+
+def _signal_score(signals: dict, name: str) -> float:
+    try:
+        return float((signals or {}).get(name, {}).get("score", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _event_risk_active(ticker: str) -> dict:
+    try:
+        from backend.earnings.scanner import get_cached_earnings_guard
+        info = (get_cached_earnings_guard() or {}).get(str(ticker or "").upper(), {}) or {}
+        return info if info.get("blocked") else {}
+    except Exception:
+        return {}
+
+
+def _breakout_quality(side: str, composite: float, signals: dict, market_regime: str = None) -> float:
+    side = str(side or "").upper()
+    direction = 1 if side == "BUY" else -1
+    macd = _signal_score(signals, "macd_crossover") * direction
+    tape = _signal_score(signals, "tape_aggression") * direction
+    rel_strength = _signal_score(signals, "relative_strength") * direction
+    news = _signal_score(signals, "news_sentiment") * direction
+    vwap = _signal_score(signals, "vwap_deviation") * direction
+    composite_aligned = float(composite or 0) * direction
+    market = str(market_regime or "").lower()
+    market_bonus = 1.0 if side == "BUY" and market in {"bull", "transitioning", ""} else 0.5
+    if side == "SELL" and market == "bear":
+        market_bonus = 1.0
+
+    components = [
+        max(0.0, min(macd, 1.0)),
+        max(0.0, min(tape, 1.0)),
+        max(0.0, min(rel_strength, 1.0)),
+        max(0.0, min(news, 1.0)),
+        max(0.0, min(abs(vwap) / 0.8, 1.0)) if vwap < 0 else 0.0,
+        max(0.0, min(composite_aligned / 0.5, 1.0)),
+        market_bonus,
+    ]
+    return round(sum(components) / len(components), 4)
+
+
+def _candidate_rank_score(composite: float, breakout_quality: float, strategy_family: str,
+                          event_risk_active: bool = False) -> float:
+    strategy_bonus = {
+        "trend_following": 0.12,
+        "signal_composite": 0.04,
+        "mean_reversion": -0.08,
+        "direct_short": -0.03,
+    }.get(str(strategy_family or ""), 0.0)
+    event_penalty = 0.08 if event_risk_active else 0.0
+    score = (abs(float(composite or 0)) * 0.45) + (float(breakout_quality or 0) * 0.55)
+    return round(max(0.0, score + strategy_bonus - event_penalty), 4)
+
+
+def _trade_setup_context(ticker: str, action: str, composite: float,
+                         signals: dict, signal_result: dict,
+                         regime_state, gate_reason: str = None) -> dict:
+    strategy_family = _strategy_family(
+        ticker, action, getattr(regime_state, "intraday_regime", None), signal_result,
+        mean_reversion_trade=bool(signal_result.get("mean_reversion_signal")),
+    )
+    event_info = _event_risk_active(ticker)
+    event_probe = bool(
+        event_info
+        and gate_reason
+        and str(gate_reason).startswith("event_risk_intraday_probe")
+    )
+    breakout_quality = _breakout_quality(
+        action, composite, signals, getattr(regime_state, "market_regime", None)
+    )
+    return {
+        "ticker": ticker,
+        "action": action,
+        "strategy_family": strategy_family,
+        "intraday_regime": getattr(regime_state, "intraday_regime", None),
+        "market_regime": getattr(regime_state, "market_regime", None),
+        "breakout_quality": breakout_quality,
+        "candidate_rank_score": _candidate_rank_score(
+            composite, breakout_quality, strategy_family, bool(event_info)
+        ),
+        "event_risk_active": bool(event_info),
+        "event_risk_intraday_probe": event_probe,
+        "event_risk_info": event_info,
+    }
+
+
+def _record_blocked_opportunity(ticker: str, action: str, composite: float,
+                                signals: dict, setup_context: dict,
+                                regime: str, block_stage: str, block_reason: str,
+                                ev_result: dict = None, reference_price: float = None):
+    try:
+        payload = {
+            "ticker": str(ticker or "").upper(),
+            "action_hint": action,
+            "composite_score": round(float(composite or 0), 4),
+            "block_stage": block_stage,
+            "block_reason": block_reason,
+            "candidate_rank_score": (setup_context or {}).get("candidate_rank_score"),
+            "breakout_quality": (setup_context or {}).get("breakout_quality"),
+            "ev_decision": (ev_result or {}).get("ev_decision"),
+            "ev_net_pct": (ev_result or {}).get("net_ev_pct"),
+            "ev_result_json": ev_result or {},
+            "signals_json": {k: {"score": v.get("score", 0)} for k, v in (signals or {}).items() if isinstance(v, dict)},
+            "setup_context_json": setup_context or {},
+            "regime": regime,
+            "market_regime": (setup_context or {}).get("market_regime"),
+            "strategy_family": (setup_context or {}).get("strategy_family"),
+            "event_risk_active": bool((setup_context or {}).get("event_risk_active")),
+            "reference_price": reference_price,
+        }
+        result = insert_blocked_opportunity(payload)
+        if result.get("error"):
+            return
+    except Exception:
+        return
+
+
+def _parse_supabase_time(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
+    import yfinance as yf
+
+    ticker = str(opp.get("ticker") or "").upper()
+    action = str(opp.get("action_hint") or "BUY").upper()
+    created_at = _parse_supabase_time(opp.get("created_at"))
+    if not ticker or not created_at:
+        return {}
+
+    now_utc = datetime.now(timezone.utc)
+    end_at = min(now_utc, created_at + timedelta(minutes=horizon_minutes))
+    if end_at <= created_at:
+        return {}
+
+    bars = yf.download(
+        ticker,
+        period="1d",
+        interval="1m",
+        progress=False,
+        auto_adjust=True,
+    )
+    if bars.empty:
+        return {}
+
+    if bars.index.tz is None:
+        bars.index = bars.index.tz_localize("UTC")
+    else:
+        bars.index = bars.index.tz_convert("UTC")
+
+    window = bars[(bars.index >= created_at) & (bars.index <= end_at)]
+    if window.empty:
+        return {}
+
+    close_series = window["Close"].squeeze()
+    high_series = window["High"].squeeze()
+    low_series = window["Low"].squeeze()
+    reference_price = opp.get("reference_price")
+    try:
+        reference_price = float(reference_price)
+    except (TypeError, ValueError):
+        reference_price = float(close_series.iloc[0])
+    if reference_price <= 0:
+        return {}
+
+    if action == "SELL":
+        max_favorable = (reference_price - float(low_series.min())) / reference_price * 100
+        max_adverse = (reference_price - float(high_series.max())) / reference_price * 100
+        close_after = (reference_price - float(close_series.iloc[-1])) / reference_price * 100
+    else:
+        max_favorable = (float(high_series.max()) - reference_price) / reference_price * 100
+        max_adverse = (float(low_series.min()) - reference_price) / reference_price * 100
+        close_after = (float(close_series.iloc[-1]) - reference_price) / reference_price * 100
+
+    return {
+        "max_favorable_pct": round(max_favorable, 4),
+        "max_adverse_pct": round(max_adverse, 4),
+        "close_after_pct": round(close_after, 4),
+        "replay_result_json": {
+            "horizon_minutes": horizon_minutes,
+            "bars_seen": int(len(window)),
+            "reference_price": round(reference_price, 4),
+            "start": created_at.isoformat(),
+            "end": end_at.isoformat(),
+            "action": action,
+            "block_stage": opp.get("block_stage"),
+            "block_reason": opp.get("block_reason"),
+        },
+    }
+
+
+def _replay_blocked_opportunities():
+    if not _env_bool("BLOCKED_OPPORTUNITY_REPLAY_ENABLED", True):
+        return
+
+    min_age = _env_int("BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES", 20)
+    horizon = _env_int("BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES", 90)
+    limit = _env_int("BLOCKED_OPPORTUNITY_REPLAY_LIMIT", 25)
+    opportunities = get_unchecked_blocked_opportunities(min_age_minutes=min_age, limit=limit)
+    if not opportunities:
+        return
+
+    checked = 0
+    updated = 0
+    for opp in opportunities:
+        checked += 1
+        try:
+            replay = _replay_one_blocked_opportunity(opp, horizon)
+            if not replay:
+                continue
+            result = update_blocked_opportunity_replay(opp.get("id"), replay)
+            if not result.get("error"):
+                updated += 1
+        except Exception as e:
+            log_event("WARN", "blocked_opportunity_replay_failed", {
+                "ticker": opp.get("ticker"),
+                "id": opp.get("id"),
+                "error": str(e)[:160],
+            })
+    if checked:
+        log_event("INFO", "blocked_opportunity_replay_complete", {
+            "checked": checked,
+            "updated": updated,
+            "horizon_minutes": horizon,
+        })
 
 
 def _log_short_candidate(event_name: str, ticker: str, composite: float,
@@ -898,13 +1150,68 @@ def run_signal_cycle():
         log_event("WARN", "earnings_guard_scan_failed", {"error": str(e)[:100]})
 
     if _allows_intraday():
+        candidates = []
         for ticker in TICKERS:
             try:
-                _process_ticker(ticker, regime, weights, effective_profile,
-                                portfolio_state, recent_trades,
-                                regime_state, shock_result)
+                candidate = _evaluate_ticker_candidate(
+                    ticker, regime, weights, effective_profile,
+                    portfolio_state, recent_trades,
+                    regime_state, shock_result,
+                )
+                if candidate:
+                    candidates.append(candidate)
             except Exception as e:
                 log_event("ERROR", f"ticker_error_{ticker}", {"error": str(e)})
+        candidates.sort(
+            key=lambda c: (
+                float(c.get("setup_context", {}).get("candidate_rank_score") or 0),
+                abs(float(c.get("composite") or 0)),
+            ),
+            reverse=True,
+        )
+        if candidates:
+            max_per_cycle = _env_int(
+                "MAX_NEW_INTRADAY_TRADES_PER_CYCLE",
+                int(effective_profile.get("max_new_intraday_trades_per_cycle", 2)),
+            )
+            log_event("INFO", "ranked_trade_candidates", {
+                "selected": [c["ticker"] for c in candidates[:max_per_cycle]],
+                "candidates": [
+                    {
+                        "ticker": c["ticker"],
+                        "score": round(float(c.get("composite") or 0), 4),
+                        "rank_score": c.get("setup_context", {}).get("candidate_rank_score"),
+                        "breakout_quality": c.get("setup_context", {}).get("breakout_quality"),
+                        "ev_decision": c.get("ev_result", {}).get("ev_decision"),
+                        "strategy_family": c.get("setup_context", {}).get("strategy_family"),
+                    }
+                    for c in candidates
+                ],
+            })
+            for skipped in candidates[max_per_cycle:]:
+                log_event("INFO", "candidate_not_selected", {
+                    "ticker": skipped["ticker"],
+                    "reason": "lower ranked than selected candidates",
+                    "rank_score": skipped.get("setup_context", {}).get("candidate_rank_score"),
+                    "breakout_quality": skipped.get("setup_context", {}).get("breakout_quality"),
+                    "ev_decision": skipped.get("ev_result", {}).get("ev_decision"),
+                })
+                _record_blocked_opportunity(
+                    skipped["ticker"],
+                    skipped.get("action_hint"),
+                    skipped.get("composite"),
+                    skipped.get("signals_snap"),
+                    skipped.get("setup_context"),
+                    skipped.get("ticker_regime"),
+                    "ranking",
+                    "lower ranked than selected candidates",
+                    ev_result=skipped.get("ev_result"),
+                )
+            for candidate in candidates[:max_per_cycle]:
+                try:
+                    _execute_trade_candidate(candidate, effective_profile, portfolio_state)
+                except Exception as e:
+                    log_event("ERROR", f"candidate_execution_error_{candidate['ticker']}", {"error": str(e)})
 
     _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile, regime_state)
 
@@ -920,13 +1227,16 @@ def run_signal_cycle():
     # Check open trades for stop-loss / time exit
     _check_exits(portfolio_state, effective_profile)
 
+    # Measure whether blocked/skipped candidates would have worked afterward.
+    _replay_blocked_opportunities()
+
     # Save portfolio snapshot
     _save_snapshot(portfolio_state, regime)
 
 
-def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_trades,
-                    regime_state, shock_result):
-    """Signal → gate → EV → LLM → order."""
+def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state, recent_trades,
+                               regime_state, shock_result):
+    """Signal → gate → EV. Returns a ranked candidate if execution should be considered."""
     ticker_regime_state = detect_regime(ticker)
     ticker_regime = ticker_regime_state.intraday_regime
     if _learning_engine:
@@ -966,6 +1276,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         market_regime=getattr(ticker_regime_state, "market_regime", None),
         signals=signals_snap,
     )
+    setup_context = _trade_setup_context(
+        ticker, action_hint, composite, signals_snap, signal_result,
+        ticker_regime_state, gate_reason=gate_reason,
+    )
+    strategy_family_hint = setup_context["strategy_family"]
 
     # 3. Log signal to DB
     insert_signal({
@@ -995,7 +1310,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "regime":                 ticker_regime,
         "action_hint":            action_hint,
         "exposure_direction":     _exposure_direction(ticker, action_hint),
-        "strategy_family":        _strategy_family(ticker, action_hint, ticker_regime, signal_result),
+        "strategy_family":        strategy_family_hint,
         "regime_debug_json":      regime_debug,
         "vix":                    portfolio_state["vix"],
         "gated":                  not gate_ok,
@@ -1014,10 +1329,18 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
                 "short_candidate_gated", ticker, composite, gate_reason,
                 profile, ticker_regime_state,
             )
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "gate", gate_reason,
+        )
         return
 
     # 4. EV check
-    ev_result = compute_expected_value(composite, size_eur, recent_trades, ticker_regime)
+    ev_result = compute_expected_value(
+        composite, size_eur, recent_trades, ticker_regime,
+        setup_context=setup_context,
+        profile=profile,
+    )
     if ev_result["decision"] == "block":
         log_event("INFO", "ev_blocked", {"ticker": ticker, **ev_result})
         if action_hint == "SELL":
@@ -1025,11 +1348,62 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
                 "short_candidate_ev_blocked", ticker, composite,
                 ev_result.get("reason", "ev_blocked"), profile, ticker_regime_state, ev_result,
             )
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "ev", ev_result.get("reason", "ev_blocked"),
+            ev_result=ev_result,
+        )
         return
+    if ev_result.get("ev_decision") not in {None, "full_size", "exploration_full_size"}:
+        log_event("INFO", "ev_sizing_adjusted", {
+            "ticker": ticker,
+            "composite": composite,
+            "ev_decision": ev_result.get("ev_decision"),
+            "size_multiplier": ev_result.get("size_multiplier"),
+            "breakout_quality": ev_result.get("breakout_quality"),
+            "reason": ev_result.get("reason"),
+            "setup": setup_context,
+        })
+
+    return {
+        "ticker": ticker,
+        "ticker_regime": ticker_regime,
+        "ticker_regime_state": ticker_regime_state,
+        "signal_result": signal_result,
+        "composite": composite,
+        "signals_snap": signals_snap,
+        "atr_data": atr_data,
+        "regime_debug": regime_debug,
+        "news_headline": news_headline,
+        "setup_context": setup_context,
+        "ev_result": ev_result,
+        "capital_base": capital_base,
+        "action_hint": action_hint,
+    }
+
+
+def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: dict):
+    """LLM → order for an already-ranked candidate."""
+    ticker = candidate["ticker"]
+    ticker_regime = candidate["ticker_regime"]
+    ticker_regime_state = candidate["ticker_regime_state"]
+    signal_result = candidate["signal_result"]
+    composite = candidate["composite"]
+    signals_snap = candidate["signals_snap"]
+    atr_data = candidate["atr_data"]
+    regime_debug = candidate["regime_debug"]
+    news_headline = candidate["news_headline"]
+    setup_context = candidate["setup_context"]
+    ev_result = candidate["ev_result"]
+    capital_base = candidate["capital_base"]
 
     # 5. LLM decision (gated by hourly limit)
     if not _can_call_llm():
         log_event("WARN", "llm_limit_hit", {"ticker": ticker})
+        _record_blocked_opportunity(
+            ticker, candidate.get("action_hint"), composite, signals_snap, setup_context,
+            ticker_regime, "llm", "llm_limit_hit", ev_result=ev_result,
+        )
         return
 
     llm_result = llm_signal_decision(
@@ -1062,6 +1436,12 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "composite": composite,
             "rationale": llm_result.get("rationale", ""),
         })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "llm",
+            llm_result.get("rationale", "llm_hold_veto"),
+            ev_result=ev_result,
+        )
         if action == "SELL":
             _log_short_candidate(
                 "short_candidate_llm_hold", ticker, composite,
@@ -1077,6 +1457,12 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "llm_action": suggested_action,
             "rationale": llm_result.get("rationale", ""),
         })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "llm",
+            llm_result.get("rationale", "llm_direction_conflict"),
+            ev_result=ev_result,
+        )
         if action == "SELL":
             _log_short_candidate(
                 "short_candidate_llm_conflict", ticker, composite,
@@ -1092,6 +1478,11 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             "conviction": conviction,
             "min_conviction": profile["min_conviction"],
         })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "conviction", "conviction_below_threshold",
+            ev_result=ev_result,
+        )
         if action == "SELL":
             _log_short_candidate(
                 "short_candidate_conviction_blocked", ticker, composite,
@@ -1103,6 +1494,8 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     # 6. Size and submit order
     sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, ticker_regime_state)
     final_size = sizing["size_eur"]
+    ev_size_multiplier = float(ev_result.get("size_multiplier") or 1.0)
+    final_size *= ev_size_multiplier
     if action == "SELL":
         final_size = _cap_short_notional(final_size, capital_base, profile)
     max_notional = _env_float(
@@ -1111,12 +1504,21 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     )
     final_size = min(final_size, max_notional)
     sizing["size_eur"] = round(final_size, 2)
+    sizing["ev_decision"] = ev_result.get("ev_decision")
+    sizing["ev_size_multiplier"] = round(ev_size_multiplier, 3)
+    sizing["ev_result"] = ev_result
+    sizing["setup_context"] = setup_context
 
     import yfinance as yf
     bar = yf.download(ticker, period="1d", interval="1m",
                       progress=False, auto_adjust=True)
     if bar.empty:
         log_event("WARN", "price_unavailable", {"ticker": ticker})
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "price", "price_unavailable",
+            ev_result=ev_result,
+        )
         return
     current_price = float(bar["Close"].squeeze().iloc[-1])
     final_size_usd = _eur_to_usd(final_size)
@@ -1129,6 +1531,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     except (TypeError, ValueError):
         hold_minutes = 30
     mean_reversion_trade = bool(signal_result.get("mean_reversion_signal"))
+    event_risk_probe = bool(setup_context.get("event_risk_intraday_probe"))
     hold_extension = None
     if mean_reversion_trade:
         hold_minutes = 2880
@@ -1137,22 +1540,34 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
             int(profile.get("min_hold_minutes", 1)),
             min(int(profile.get("max_hold_minutes", 60)), hold_minutes),
         )
-        hold_minutes, hold_extension = _apply_learned_hold_extension(
-            ticker=ticker,
-            hold_minutes=hold_minutes,
-            conviction=conviction,
-            composite=composite,
-            profile=profile,
-            portfolio_state=portfolio_state,
-        )
-        if hold_extension:
-            log_event("INFO", "learned_hold_extended", hold_extension)
+        if event_risk_probe:
+            hold_minutes = min(
+                hold_minutes,
+                int(profile.get("event_risk_max_hold_minutes", 30)),
+            )
+        else:
+            hold_minutes, hold_extension = _apply_learned_hold_extension(
+                ticker=ticker,
+                hold_minutes=hold_minutes,
+                conviction=conviction,
+                composite=composite,
+                profile=profile,
+                portfolio_state=portfolio_state,
+            )
+            if hold_extension:
+                log_event("INFO", "learned_hold_extended", hold_extension)
 
     stop_loss_pct = sizing.get("stop_pct") or float(llm_result.get("stop_loss_pct", profile["stop_loss_pct"]))
     if mean_reversion_trade:
         raw_atr_pct = atr_data.get("atr_pct")
         if raw_atr_pct:
             stop_loss_pct = max(stop_loss_pct, round(float(raw_atr_pct) * 2.0, 3))
+    if event_risk_probe:
+        stop_loss_pct = max(
+            float(profile.get("event_risk_min_stop_pct", 0.25)),
+            stop_loss_pct * float(profile.get("event_risk_stop_multiplier", 0.75)),
+        )
+        sizing["event_risk_intraday_only"] = True
 
     order = submit_market_order(
         ticker       = ticker,
@@ -1203,7 +1618,7 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "horizon":       "short",
         "sizing_json":   sizing,
         "mean_reversion_trade": mean_reversion_trade,
-        "swing_trade":   mean_reversion_trade,
+        "swing_trade":   False if event_risk_probe else mean_reversion_trade,
         "llm_conviction": conviction,
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
@@ -1217,9 +1632,22 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
         "rationale": llm_result.get("rationale"),
         "sizing": sizing,
         "mean_reversion_trade": mean_reversion_trade,
+        "event_risk_intraday_probe": event_risk_probe,
+        "ev_decision": ev_result.get("ev_decision"),
         "exposure_direction": exposure_direction,
         "strategy_family": strategy_family,
     })
+
+
+def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_trades,
+                    regime_state, shock_result):
+    """Compatibility wrapper for one-off ticker processing."""
+    candidate = _evaluate_ticker_candidate(
+        ticker, regime, weights, profile, portfolio_state, recent_trades,
+        regime_state, shock_result,
+    )
+    if candidate:
+        _execute_trade_candidate(candidate, profile, portfolio_state)
 
 
 def _check_exits(portfolio_state, profile):

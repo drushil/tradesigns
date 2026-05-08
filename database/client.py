@@ -241,6 +241,91 @@ def insert_signal(signal: dict) -> dict:
             return {"error": str(e)}
 
 
+def insert_blocked_opportunity(opportunity: dict) -> dict:
+    """Best-effort record for replaying blocked/skipped trade opportunities."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "ticker": opportunity.get("ticker"),
+            "action_hint": opportunity.get("action_hint"),
+            "composite_score": opportunity.get("composite_score"),
+            "block_stage": opportunity.get("block_stage"),
+            "block_reason": opportunity.get("block_reason"),
+            "candidate_rank_score": opportunity.get("candidate_rank_score"),
+            "breakout_quality": opportunity.get("breakout_quality"),
+            "ev_decision": opportunity.get("ev_decision"),
+            "ev_net_pct": opportunity.get("ev_net_pct"),
+            "ev_result_json": opportunity.get("ev_result_json"),
+            "signals_json": opportunity.get("signals_json"),
+            "setup_context_json": opportunity.get("setup_context_json"),
+            "regime": opportunity.get("regime"),
+            "market_regime": opportunity.get("market_regime"),
+            "strategy_family": opportunity.get("strategy_family"),
+            "event_risk_active": opportunity.get("event_risk_active"),
+            "reference_price": opportunity.get("reference_price"),
+        }
+        result = db.table("blocked_opportunities").insert(record).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 50) -> list:
+    """Fetch blocked opportunities old enough to replay against subsequent price action."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("blocked_opportunities")
+                  .select("*")
+                  .is_("replay_checked_at", "null")
+                  .lte("created_at", cutoff)
+                  .order("created_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[BLOCKED_OPPORTUNITY_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_blocked_opportunity_replay(opportunity_id: int, replay: dict) -> dict:
+    """Persist replay stats for a blocked opportunity."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "replay_checked_at": datetime.utcnow().isoformat() + "Z",
+            "max_favorable_pct": replay.get("max_favorable_pct"),
+            "max_adverse_pct": replay.get("max_adverse_pct"),
+            "close_after_pct": replay.get("close_after_pct"),
+            "replay_result_json": replay.get("replay_result_json") or {},
+        }
+        result = (db.table("blocked_opportunities")
+                  .update(record)
+                  .eq("id", opportunity_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[BLOCKED_OPPORTUNITY_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_blocked_opportunities(days: int = 7, limit: int = 500) -> list:
+    """Recent blocked/skipped opportunities, including replay metrics when available."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("blocked_opportunities")
+                  .select("*")
+                  .gte("created_at", cutoff)
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[BLOCKED_OPPORTUNITY_STATS_FAILED] {str(e)[:200]}")
+        return []
+
+
 def get_recent_signals(hours: int = 24) -> list:
     db = get_client()
     result = (db.table("signals")

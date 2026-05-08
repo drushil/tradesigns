@@ -247,3 +247,82 @@ def render():
                       delta=f"≈€{gated_n*0.001:.2f} saved")
     except Exception:
         pass
+
+    st.markdown("---")
+
+    # ── Blocked opportunity replay ────────────────────────────────────────
+    st.markdown("### Blocked Opportunity Replay")
+    st.caption("What happened after the agent blocked or skipped a candidate")
+
+    try:
+        from database.client import get_blocked_opportunities
+        blocked = get_blocked_opportunities(days=7, limit=500)
+        if blocked:
+            df_b = pd.DataFrame(blocked)
+            for col in ["max_favorable_pct", "max_adverse_pct", "close_after_pct",
+                        "candidate_rank_score", "breakout_quality", "composite_score"]:
+                if col in df_b.columns:
+                    df_b[col] = pd.to_numeric(df_b[col], errors="coerce")
+            checked = df_b[df_b.get("replay_checked_at").notna()] if "replay_checked_at" in df_b.columns else pd.DataFrame()
+            missed = checked[checked["max_favorable_pct"].fillna(0) >= 0.5] if len(checked) else pd.DataFrame()
+            saved = checked[checked["max_adverse_pct"].fillna(0) <= -0.35] if len(checked) else pd.DataFrame()
+
+            b1, b2, b3, b4 = st.columns(4)
+            b1.metric("Blocked/skipped (7d)", len(df_b))
+            b2.metric("Replayed", len(checked))
+            b3.metric("Potential misses", len(missed), delta="MFE ≥ 0.5%")
+            b4.metric("Likely saves", len(saved), delta="MAE ≤ -0.35%")
+
+            if len(checked):
+                by_stage = (checked.groupby("block_stage", dropna=False)
+                            .agg(
+                                count=("ticker", "count"),
+                                avg_mfe=("max_favorable_pct", "mean"),
+                                avg_mae=("max_adverse_pct", "mean"),
+                                avg_close=("close_after_pct", "mean"),
+                            )
+                            .reset_index()
+                            .sort_values("avg_mfe", ascending=False))
+                col_bo1, col_bo2 = st.columns([1, 1])
+                with col_bo1:
+                    fig_bo = px.bar(
+                        by_stage,
+                        x="block_stage",
+                        y="avg_mfe",
+                        color="block_stage",
+                        text=by_stage["avg_mfe"].map(lambda v: f"{v:+.2f}%"),
+                        template="plotly_dark",
+                        labels={"block_stage": "Block stage", "avg_mfe": "Avg max favorable move (%)"},
+                    )
+                    fig_bo.update_layout(paper_bgcolor="rgba(0,0,0,0)",
+                                         plot_bgcolor="rgba(0,0,0,0)", height=260,
+                                         margin=dict(l=0, r=0, t=10, b=0),
+                                         showlegend=False)
+                    st.plotly_chart(fig_bo, width="stretch")
+                with col_bo2:
+                    display_stage = by_stage.rename(columns={
+                        "block_stage": "Stage",
+                        "count": "Count",
+                        "avg_mfe": "Avg MFE",
+                        "avg_mae": "Avg MAE",
+                        "avg_close": "Avg Close",
+                    })
+                    for pct_col in ["Avg MFE", "Avg MAE", "Avg Close"]:
+                        display_stage[pct_col] = display_stage[pct_col].map(lambda v: f"{v:+.2f}%" if pd.notna(v) else "—")
+                    st.dataframe(display_stage, width="stretch", hide_index=True)
+
+                recent_cols = [
+                    "created_at", "ticker", "action_hint", "block_stage", "block_reason",
+                    "candidate_rank_score", "breakout_quality",
+                    "max_favorable_pct", "max_adverse_pct", "close_after_pct",
+                ]
+                existing_cols = [c for c in recent_cols if c in checked.columns]
+                recent = checked.sort_values("created_at", ascending=False)[existing_cols].head(25)
+                st.markdown("##### Recent Replayed Blocks")
+                st.dataframe(recent, width="stretch", hide_index=True)
+            else:
+                st.info("Blocked opportunities are being recorded. Replay metrics will appear after enough time has passed.")
+        else:
+            st.info("No blocked opportunities recorded yet.")
+    except Exception as e:
+        st.caption(f"Blocked opportunity stats unavailable: {e}")

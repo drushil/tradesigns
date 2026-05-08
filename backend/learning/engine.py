@@ -158,16 +158,35 @@ def build_weight_engine_from_trades(priors: dict, trades: list) -> RegimeAwareWe
 # ── Expected Value Gate ───────────────────────────────────────────────────────
 
 def compute_expected_value(composite_score: float, size_eur: float,
-                           trades: list, regime: str) -> dict:
+                           trades: list, regime: str,
+                           setup_context: dict = None,
+                           profile: dict = None) -> dict:
     """
     Computes expected value of a potential trade net of all costs.
-    Blocks trades with negative EV.
+    Uses EV to choose full/reduced/probe sizing, blocking only when the
+    setup quality does not justify the learned downside.
     """
+    setup_context = setup_context or {}
+    profile = profile or {}
+    breakout_quality = float(setup_context.get("breakout_quality") or 0)
+    event_risk = bool(setup_context.get("event_risk_intraday_probe"))
+    strategy_family = str(setup_context.get("strategy_family") or "")
+    momentum_setup = strategy_family in {"trend_following", "signal_composite"} and breakout_quality > 0
+
+    reduced_floor = float(profile.get("ev_reduced_size_floor_pct", -0.02))
+    probe_floor = float(profile.get("ev_probe_floor_pct", -0.10))
+    breakout_min_quality = float(profile.get("ev_breakout_probe_min_quality", 0.65))
+    reduced_multiplier = float(profile.get("ev_reduced_size_multiplier", 0.65))
+    probe_multiplier = float(profile.get("ev_probe_size_multiplier", 0.35))
+    event_multiplier = float(profile.get("event_risk_probe_size_multiplier", probe_multiplier))
+
     # Filter similar historical trades (same regime, similar score)
     if size_eur <= 0:
         return {
             "ev": None,
             "decision": "block",
+            "ev_decision": "blocked",
+            "size_multiplier": 0.0,
             "reason": "position size must be positive",
             "sample_size": 0,
             "confidence": 0.0,
@@ -185,18 +204,35 @@ def compute_expected_value(composite_score: float, size_eur: float,
 
     if len(similar) < EV_MIN_SAMPLE_SIZE:
         allow_exploration = os.getenv("EV_ALLOW_EXPLORATION", "true").strip().lower() != "false"
-        return {"ev": None, "decision": "proceed",
+        if allow_exploration:
+            if event_risk:
+                ev_decision, multiplier = "event_probe_size", event_multiplier
+            elif momentum_setup and breakout_quality >= breakout_min_quality:
+                ev_decision, multiplier = "probe_size", probe_multiplier
+            else:
+                ev_decision, multiplier = "exploration_full_size", 1.0
+            return {
+                "ev": None,
+                "decision": "proceed",
+                "ev_decision": ev_decision,
+                "size_multiplier": round(multiplier, 3),
                 "sample_size": len(similar),
                 "exploration": True,
                 "confidence": 0.0,
-                "reason": f"insufficient history ({len(similar)} similar trades)"
-                } if allow_exploration else {
-                "ev": None, "decision": "block",
-                "sample_size": len(similar),
-                "exploration": False,
-                "confidence": 0.0,
-                "reason": f"insufficient history ({len(similar)} similar trades)"
-                }
+                "breakout_quality": round(breakout_quality, 3),
+                "reason": f"insufficient history ({len(similar)} similar trades)",
+            }
+        return {
+            "ev": None,
+            "decision": "block",
+            "ev_decision": "blocked",
+            "size_multiplier": 0.0,
+            "sample_size": len(similar),
+            "exploration": False,
+            "confidence": 0.0,
+            "breakout_quality": round(breakout_quality, 3),
+            "reason": f"insufficient history ({len(similar)} similar trades)",
+        }
 
     pnl_pcts  = [t["net_pnl_pct"] for t in similar]
     wins      = [p for p in pnl_pcts if p > 0]
@@ -215,6 +251,17 @@ def compute_expected_value(composite_score: float, size_eur: float,
     gross_ev *= shrinkage
     net_ev   = gross_ev - total_cost_pct
 
+    if net_ev > EV_MIN_NET_PCT:
+        decision, ev_decision, multiplier = "proceed", "full_size", 1.0
+    elif net_ev >= reduced_floor:
+        decision, ev_decision, multiplier = "proceed", "reduced_size", reduced_multiplier
+    elif event_risk and breakout_quality >= breakout_min_quality and net_ev >= probe_floor:
+        decision, ev_decision, multiplier = "proceed", "event_probe_size", event_multiplier
+    elif momentum_setup and breakout_quality >= breakout_min_quality and net_ev >= probe_floor:
+        decision, ev_decision, multiplier = "proceed", "probe_size", probe_multiplier
+    else:
+        decision, ev_decision, multiplier = "block", "blocked", 0.0
+
     return {
         "win_rate":       round(win_rate, 3),
         "avg_gain_pct":   round(avg_gain, 3),
@@ -225,7 +272,10 @@ def compute_expected_value(composite_score: float, size_eur: float,
         "sample_size":    len(similar),
         "confidence":     round(shrinkage, 3),
         "exploration":    False,
-        "decision":       "proceed" if net_ev > EV_MIN_NET_PCT else "block",
+        "decision":       decision,
+        "ev_decision":    ev_decision,
+        "size_multiplier": round(multiplier, 3),
+        "breakout_quality": round(breakout_quality, 3),
         "reason":         f"net EV {net_ev:.3f}% vs {EV_MIN_NET_PCT:.3f}% threshold",
     }
 
