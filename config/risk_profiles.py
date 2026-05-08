@@ -190,7 +190,7 @@ RISK_PROFILES = {
         "max_trades_per_day": 12,
         "min_hold_minutes": 10,
         "max_hold_minutes": 60,
-        "allowed_instruments": ["SPY", "QQQ", "GLD", "TLT", "AAPL", "TSLA", "NVDA", "META"],
+        "allowed_instruments": ["SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLF", "NVDA", "TSLA", "IBIT", "SMH", "PLTR", "AVGO", "AMD", "META"],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
         "allow_short_selling": True,

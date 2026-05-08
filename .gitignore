@@ -37,3 +37,4 @@ skills/
 
 # Nested local copies/worktrees should not be committed as submodules
 tradesigns/
+.mcp.json
