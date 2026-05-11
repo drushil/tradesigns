@@ -237,6 +237,14 @@ def _minutes_to_regular_close(now: datetime = None) -> Optional[int]:
     return max(0, close - current)
 
 
+def _is_eod_final_force_exit_window(now: datetime = None) -> bool:
+    """Return True in the final EOD window where intraday positions must close."""
+    minutes_to_close = _minutes_to_regular_close(now)
+    if minutes_to_close is None:
+        return False
+    return minutes_to_close <= _env_int("EOD_FINAL_FORCE_EXIT_MINUTES", 5)
+
+
 def _is_new_intraday_entry_too_late(ticker: str, now: datetime = None) -> Optional[dict]:
     """Block fresh intraday entries near close unless the ticker is swing-eligible."""
     minutes_to_close = _minutes_to_regular_close(now)
@@ -593,6 +601,20 @@ def _event_risk_active(ticker: str) -> dict:
         return info if info.get("blocked") else {}
     except Exception:
         return {}
+
+
+def _overnight_event_risk_active(ticker: str) -> dict:
+    """Return cached overnight event/filing risk if the guard has data."""
+    info = _event_risk_active(ticker)
+    if not info:
+        return {}
+    days = info.get("days_to_filing")
+    try:
+        if days is not None and int(days) <= 1:
+            return info
+    except (TypeError, ValueError):
+        pass
+    return info if info.get("blocked") else {}
 
 
 def _breakout_quality(side: str, composite: float, signals: dict, market_regime: str = None) -> float:
@@ -1025,14 +1047,36 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
                           profile: dict, regime_state=None) -> bool:
     """
     Called at intraday time_exit boundary. If momentum is still intact and
-    the trade is profitable, promote it to a 3-5 day swing instead of closing.
+    the trade is profitable or only within a controlled loss floor, promote it
+    to a 3-5 day swing instead of closing.
     Returns True if promoted (caller should skip the close).
     """
-    # Must be profitable to promote
+    ticker = str(ticker or "").upper()
+    if ticker not in SWING_TICKERS:
+        log_event("INFO", "eod_carry_blocked_not_swing_ticker", {"ticker": ticker})
+        return False
+
     if (trade.get("entry_price") or 0) <= 0:
         return False
+    entry_price = float(trade.get("entry_price") or 0)
     pnl_pct = _trade_pnl_pct(trade, current_price)
-    if pnl_pct <= 0:
+    stop_pct_for_floor = float(
+        trade.get("stop_pct")
+        or profile.get("stop_loss_pct")
+        or 2.5
+    )
+    max_loss_r = _env_float(
+        "EOD_CARRY_MAX_LOSS_R",
+        float(profile.get("eod_carry_max_loss_r", 0.5)),
+    )
+    max_carry_loss_pct = -1 * abs(stop_pct_for_floor) * max_loss_r
+    if pnl_pct < max_carry_loss_pct:
+        log_event("INFO", "eod_carry_blocked_loss_too_deep", {
+            "ticker": ticker,
+            "pnl_pct": round(pnl_pct, 4),
+            "max_carry_loss_pct": round(max_carry_loss_pct, 4),
+            "max_loss_r": max_loss_r,
+        })
         return False
 
     # Don't promote mean-reversion trades
@@ -1043,6 +1087,14 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
     if _is_leveraged_etf(ticker, profile):
         return False
 
+    overnight_event_risk = _overnight_event_risk_active(ticker)
+    if overnight_event_risk:
+        log_event("INFO", "eod_carry_blocked_event_risk", {
+            "ticker": ticker,
+            "event_risk": overnight_event_risk,
+        })
+        return False
+
     # Check concurrent swing limit before running expensive signal computation
     open_swing_count = sum(1 for d in _open_trades.values() if d.get("swing_trade"))
     max_swings = int(profile.get("max_concurrent_swings", 2))
@@ -1051,6 +1103,22 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
             "ticker": ticker,
             "open_swings": open_swing_count,
             "max_swings": max_swings,
+        })
+        return False
+
+    overnight_count = sum(
+        1 for t, d in _open_trades.items()
+        if t != ticker and d.get("swing_trade")
+    )
+    max_overnight = _env_int(
+        "MAX_OVERNIGHT_CARRIES",
+        int(profile.get("max_overnight_carries", 1)),
+    )
+    if overnight_count >= max_overnight:
+        log_event("INFO", "eod_carry_blocked_overnight_cap", {
+            "ticker": ticker,
+            "open_overnight_carries": overnight_count,
+            "max_overnight_carries": max_overnight,
         })
         return False
 
@@ -1129,6 +1197,8 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         "protective_stop_order_id": protective_order.get("order_id"),
         "hold_decision_json": {
             "promoted_at_pnl_pct": round(pnl_pct, 3),
+            "eod_decision":        "carry_overnight" if pnl_pct <= 0 else "promote_swing",
+            "max_carry_loss_pct":  round(max_carry_loss_pct, 4),
             "swing_check":         swing_check,
             "cancelled_bracket_legs": cancel_results,
             "protective_stop_order": protective_order,
@@ -2180,7 +2250,9 @@ def _check_exits(portfolio_state, profile):
     """Check all open trades for stop-loss, chandelier stop, or time-based exit."""
     import yfinance as yf
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC for hold_elapsed arithmetic
-    eod_cleanup = _is_eod_intraday_cleanup_window(datetime.now(timezone.utc))
+    now_aware = datetime.now(timezone.utc)
+    eod_cleanup = _is_eod_intraday_cleanup_window(now_aware)
+    eod_final_force = _is_eod_final_force_exit_window(now_aware)
     _regime_cache: dict[str, object] = {}  # per-call cache: ticker → regime_state
 
     for ticker, trade in list(_open_trades.items()):
@@ -2291,27 +2363,47 @@ def _check_exits(portfolio_state, profile):
 
                 if exit_reason is None:
                     if eod_cleanup:
-                        # Near close: promote strong winners to swing, close everything else.
-                        # Regime is cached per-call to avoid duplicate detect_regime fetches.
-                        cached_regime = _regime_cache.get(ticker)
-                        if cached_regime is None:
-                            cached_regime = detect_regime(ticker)
-                            _regime_cache[ticker] = cached_regime
-                        if _try_promote_to_swing(ticker, trade, current_price, profile, cached_regime):
-                            log_event("INFO", "eod_intraday_promoted", {
+                        # Near close: promote/carry strong swing-eligible trades, close everything else.
+                        if eod_final_force:
+                            pnl_pct_eod = _trade_pnl_pct(trade, current_price)
+                            log_event("INFO", "eod_intraday_cleanup_exit", {
                                 "ticker": ticker,
-                                "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
+                                "pnl_pct": round(pnl_pct_eod, 4),
+                                "outcome": "loser" if pnl_pct_eod < 0 else (
+                                    "flat" if pnl_pct_eod < 0.05 else "winner_final_window"
+                                ),
+                                "eod_decision": "final_window_force_exit",
+                                "minutes_to_close": _minutes_to_regular_close(now_aware),
                             })
-                            continue
-                        pnl_pct_eod = _trade_pnl_pct(trade, current_price)
-                        log_event("INFO", "eod_intraday_cleanup_exit", {
-                            "ticker": ticker,
-                            "pnl_pct": round(pnl_pct_eod, 4),
-                            "outcome": "loser" if pnl_pct_eod < 0 else (
-                                "flat" if pnl_pct_eod < 0.05 else "winner_not_swing_qualified"
-                            ),
-                        })
-                        exit_reason = "eod_cleanup"
+                            exit_reason = "eod_cleanup"
+                        else:
+                            # Regime is cached per-call to avoid duplicate detect_regime fetches.
+                            cached_regime = _regime_cache.get(ticker)
+                            if cached_regime is None:
+                                cached_regime = detect_regime(ticker)
+                                _regime_cache[ticker] = cached_regime
+                            if _try_promote_to_swing(ticker, trade, current_price, profile, cached_regime):
+                                eod_decision = (
+                                    "carry_overnight"
+                                    if _trade_pnl_pct(trade, current_price) <= 0
+                                    else "promote_swing"
+                                )
+                                log_event("INFO", "eod_intraday_promoted", {
+                                    "ticker": ticker,
+                                    "pnl_pct": round(_trade_pnl_pct(trade, current_price), 4),
+                                    "eod_decision": eod_decision,
+                                })
+                                continue
+                            pnl_pct_eod = _trade_pnl_pct(trade, current_price)
+                            log_event("INFO", "eod_intraday_cleanup_exit", {
+                                "ticker": ticker,
+                                "pnl_pct": round(pnl_pct_eod, 4),
+                                "outcome": "loser" if pnl_pct_eod < 0 else (
+                                    "flat" if pnl_pct_eod < 0.05 else "winner_not_swing_qualified"
+                                ),
+                                "eod_decision": "force_exit",
+                            })
+                            exit_reason = "eod_cleanup"
                     elif hold_elapsed >= hold_target:
                         exit_reason = _handle_hold_deadline(
                             ticker, trade, current_price, profile, portfolio_state
