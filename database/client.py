@@ -136,26 +136,16 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
         try:
             result = db.table("open_trades").upsert(record, on_conflict="ticker").execute()
         except Exception:
+            # Fallback strips only columns added in later migrations that may not
+            # exist on older deployments. Critical state fields (partial_exit_done,
+            # swing_trade, hold_extension_count, etc.) are intentionally kept —
+            # losing them causes incorrect exit decisions on the next cold-start.
             fallback = {
                 k: v for k, v in record.items()
-                if k not in {"quantity", "hold_minutes", "hold_days", "horizon",
-                             "submitted_qty", "implied_qty", "size_usd",
-                             "intended_size_eur", "executed_size_eur",
-                             "executed_size_usd", "bracket_floor_qty_loss_pct",
-                             "macro_regime", "macro_multiplier", "dip_type",
-                             "sizing_json", "mean_reversion_trade", "swing_trade",
-                             "promoted_to_swing", "promoted_at", "initial_horizon",
-                             "swing_conviction", "swing_reasons",
-                             "highest_price_since_entry", "trailing_stop_price",
-                             "stop_multiplier", "stop_pct", "max_hold_minutes",
-                             "daily_reeval_count", "hold_extension_count", "hold_decision_json",
-                             "peak_directional_score",
-                             "protective_stop_order_id",
-                             "exposure_direction", "strategy_family", "regime_debug_json",
-                             "setup_grade", "sector_confirmation", "percentile_rank",
-                             "grade_reasons", "partial_target_price", "partial_exit_pct",
-                             "partial_exit_done", "partial_exit_qty", "runner_atr_mult",
-                             "runner_stop_price", "vwap_thesis_strike_count"}
+                if k not in {"implied_qty", "bracket_floor_qty_loss_pct",
+                             "intended_size_eur", "executed_size_eur", "executed_size_usd",
+                             "sizing_json", "regime_debug_json", "percentile_rank",
+                             "grade_reasons", "runner_atr_mult", "vwap_thesis_strike_count"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}

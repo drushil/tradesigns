@@ -1352,10 +1352,16 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         },
     })
 
-    try:
-        save_open_trade(ticker, _open_trades[ticker])
-    except Exception:
-        pass
+    save_result = save_open_trade(ticker, _open_trades[ticker])
+    if save_result.get("error"):
+        # swing_trade=True exists in memory but not DB — next cold-start will
+        # treat this as an intraday trade and may EOD-exit it incorrectly.
+        log_event("ERROR", "swing_promotion_save_failed", {
+            "ticker": ticker,
+            "error": save_result["error"],
+            "swing_trade": True,
+            "protective_stop_order_id": protective_order.get("order_id"),
+        })
 
     log_event("INFO", "swing_promoted", {
         "ticker":          ticker,
@@ -1364,6 +1370,7 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         "reasons":         swing_check["reasons"],
         "pnl_at_promotion": round(pnl_pct, 3),
         "protective_stop_order_id": protective_order.get("order_id"),
+        "state_persisted": not bool(save_result.get("error")),
     })
     _send_discord_alert(
         f"Swing promoted: {ticker} "
@@ -2285,6 +2292,7 @@ def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
     if vwap_against:
         count = int(_open_trades[ticker].get("vwap_thesis_strike_count", 0)) + 1
         _open_trades[ticker]["vwap_thesis_strike_count"] = count
+        save_open_trade(ticker, _open_trades[ticker])
         if count >= 2:
             log_event("INFO", "thesis_invalidated_vwap_2strike", {
                 "ticker": ticker, "vwap_score": round(vwap_score, 3),
@@ -2298,7 +2306,9 @@ def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
             })
             return "thesis_invalidated"
     else:
-        _open_trades[ticker]["vwap_thesis_strike_count"] = 0
+        if _open_trades[ticker].get("vwap_thesis_strike_count", 0) != 0:
+            _open_trades[ticker]["vwap_thesis_strike_count"] = 0
+            save_open_trade(ticker, _open_trades[ticker])
     return None
 
 
@@ -2376,6 +2386,17 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
     if not stop_order.get("error"):
         _open_trades[ticker]["protective_stop_order_id"] = stop_order.get("order_id")
 
+    save_result = save_open_trade(ticker, _open_trades[ticker])
+    if save_result.get("error"):
+        # Partial exit executed at broker but state not persisted — next cold-start
+        # will hydrate partial_exit_done=False and risk a duplicate partial exit.
+        log_event("ERROR", "partial_exit_save_failed", {
+            "ticker": ticker,
+            "error": save_result["error"],
+            "partial_exit_done": True,
+            "remaining_qty": remaining_qty,
+        })
+
     log_event("TRADE", "partial_exit_executed", {
         "ticker": ticker, "side": side, "close_qty": close_qty,
         "remaining_qty": remaining_qty, "partial_pct": partial_pct,
@@ -2383,11 +2404,8 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
         "runner_stop": round(runner_stop, 4), "runner_atr_mult": runner_atr_mult,
         "order_id": result.get("order_id"),
         "runner_stop_order_id": stop_order.get("order_id"),
+        "state_persisted": not bool(save_result.get("error")),
     })
-    try:
-        save_open_trade(ticker, _open_trades[ticker])
-    except Exception:
-        pass
 
 
 def _check_exits(portfolio_state, profile):
