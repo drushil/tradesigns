@@ -240,15 +240,26 @@ def grade_setup(
         if score * direction > 0.08:
             confirmations += 1
 
-    # VWAP: for BUY, slightly below or at VWAP is fine (mean-reversion entry)
-    # Strongly above VWAP for BUY = potential overextension (bearish for our grade)
+    # ── ORB ───────────────────────────────────────────────────────────────────
+    orb_active = abs(orb_score) > 0.5 and (orb_score * direction > 0)
+
+    # VWAP: strongly above VWAP can be overextension, but for confirmed
+    # momentum/ORB breakouts it is expected and should not block A+.
     vwap_val = signals.get("vwap_deviation")
     vwap_score = float((vwap_val or {}).get("score", 0) if isinstance(vwap_val, dict) else 0)
     # vwap_score > 0 means price is BELOW vwap (bullish for mean-reversion)
     # vwap_score < 0 means price is ABOVE vwap
+    macd_score = float((signals.get("macd_crossover") or {}).get("score", 0) or 0)
+    tape_score = float((signals.get("tape_aggression") or {}).get("score", 0) or 0)
+    rel_score = float((signals.get("relative_strength") or {}).get("score", 0) or 0)
+    momentum_confirms = (
+        macd_score * direction > 0.25
+        and tape_score * direction > 0.20
+        and rel_score * direction > 0.20
+    )
     vwap_not_against = (
-        (direction == 1 and vwap_score >= -0.5) or   # not strongly above VWAP for BUY
-        (direction == -1 and vwap_score <= 0.5)        # not strongly below VWAP for SELL
+        (direction == 1 and (vwap_score >= -0.5 or momentum_confirms or orb_active)) or
+        (direction == -1 and (vwap_score <= 0.5 or momentum_confirms or orb_active))
     )
 
     # ── Regime ────────────────────────────────────────────────────────────────
@@ -260,9 +271,6 @@ def grade_setup(
         (direction == -1 and market_regime in {"bear", "transitioning"})
     )
     not_high_vol = intraday_regime != "high_vol"
-
-    # ── ORB ───────────────────────────────────────────────────────────────────
-    orb_active = abs(orb_score) > 0.5 and (orb_score * direction > 0)
 
     # ── Grade determination ───────────────────────────────────────────────────
     reasons: list[str] = []

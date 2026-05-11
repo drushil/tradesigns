@@ -46,6 +46,7 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           insert_blocked_opportunity,
                                           get_unchecked_blocked_opportunities,
                                           update_blocked_opportunity_replay,
+                                          update_signal,
                                           get_signal_percentiles,
                                           upsert_signal_percentiles)
 from backend.grading.engine      import (grade_setup, compute_sector_confirmation,
@@ -657,6 +658,8 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             "strategy_family": (setup_context or {}).get("strategy_family"),
             "event_risk_active": bool((setup_context or {}).get("event_risk_active")),
             "reference_price": reference_price,
+            "setup_grade": (setup_context or {}).get("setup_grade"),
+            "a_plus_blocked": (setup_context or {}).get("setup_grade") == "A+",
         }
         result = insert_blocked_opportunity(payload)
         if result.get("error"):
@@ -1257,6 +1260,16 @@ def run_signal_cycle():
                     effective_profile,
                 )
                 candidate["setup_grade"] = setup_grade
+                candidate["setup_context"]["setup_grade"] = setup_grade.grade
+                candidate["setup_context"]["sector_confirmation"] = setup_grade.sector_confirmation
+                candidate["setup_context"]["percentile_rank"] = setup_grade.percentile_rank
+                if candidate.get("signal_id"):
+                    update_signal(candidate["signal_id"], {
+                        "setup_grade": setup_grade.grade,
+                        "sector_confirmation": setup_grade.sector_confirmation,
+                        "percentile_rank": setup_grade.percentile_rank,
+                        "orb_score": candidate.get("orb_score", 0.0),
+                    })
 
                 # EV-blocked candidates: A+/A override with probe size; B/C drop
                 if candidate.get("ev_blocked"):
@@ -1462,8 +1475,9 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
     )
     strategy_family_hint = setup_context["strategy_family"]
 
-    # 3. Log signal to DB
-    insert_signal({
+    # 3. Log signal to DB. Grade metadata is updated after the full cycle
+    # because sector confirmation depends on all tickers' composites.
+    signal_row = insert_signal({
         "ticker":                 ticker,
         "composite_score":        composite,
         "order_book_score":       signals_snap.get("order_book_imbalance", {}).get("score", 0),
@@ -1496,7 +1510,9 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         "gated":                  not gate_ok,
         "gate_reason":            gate_reason if not gate_ok else None,
         "llm_called":             False,
+        "orb_score":              signal_result.get("orb_score", 0.0),
     })
+    signal_id = signal_row.get("id") if isinstance(signal_row, dict) else None
 
     if not gate_ok:
         log_event("INFO", "trade_gated", {
@@ -1553,6 +1569,7 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         "capital_base": capital_base,
         "action_hint": action_hint,
         "orb_score": signal_result.get("orb_score", 0.0),
+        "signal_id": signal_id,
     }
 
 
@@ -1966,6 +1983,13 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
     if close_qty <= 0:
         return
 
+    cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
+    if cancel_results:
+        log_event("INFO", "bracket_orders_cancelled_for_partial_exit", {
+            "ticker": ticker,
+            "results": cancel_results[:4],
+        })
+
     close_side = "sell" if side == "BUY" else "buy"
     result = close_partial_position(ticker, close_qty, close_side)
     if result.get("error"):
@@ -1987,13 +2011,26 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
 
     if side == "BUY":
         runner_stop = current_price - atr_raw * runner_atr_mult
+        stop_side = "sell"
     else:
         runner_stop = current_price + atr_raw * runner_atr_mult
+        stop_side = "buy"
+
+    stop_order = submit_stop_order(ticker, stop_side, remaining_qty, runner_stop, time_in_force="day")
+    if stop_order.get("error"):
+        log_event("WARN", "runner_stop_submit_failed", {
+            "ticker": ticker,
+            "remaining_qty": remaining_qty,
+            "runner_stop": round(runner_stop, 4),
+            "error": stop_order["error"],
+        })
 
     _open_trades[ticker]["partial_exit_done"] = True
     _open_trades[ticker]["partial_exit_qty"] = close_qty
     _open_trades[ticker]["quantity"] = remaining_qty
     _open_trades[ticker]["runner_stop_price"] = round(runner_stop, 4)
+    if not stop_order.get("error"):
+        _open_trades[ticker]["protective_stop_order_id"] = stop_order.get("order_id")
 
     log_event("TRADE", "partial_exit_executed", {
         "ticker": ticker, "side": side, "close_qty": close_qty,
@@ -2001,6 +2038,7 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
         "exit_price": current_price, "partial_target": round(partial_target, 4),
         "runner_stop": round(runner_stop, 4), "runner_atr_mult": runner_atr_mult,
         "order_id": result.get("order_id"),
+        "runner_stop_order_id": stop_order.get("order_id"),
     })
     try:
         save_open_trade(ticker, _open_trades[ticker])
@@ -2540,6 +2578,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "atr_at_entry":    trade.get("atr_pct"),
         "stop_pct_used":   round(float(trade.get("stop_pct") or PROFILE.get("stop_loss_pct", 2.5)), 4),
         "r_multiple":      round(net_pnl_pct / max(float(trade.get("stop_pct") or PROFILE.get("stop_loss_pct", 2.5)), 0.1), 4),
+        "setup_grade":     trade.get("setup_grade"),
+        "partial_exit_done": bool(trade.get("partial_exit_done")),
+        "entry_tranche_count": int(trade.get("entry_tranche_count") or 1),
     }
 
     insert_trade(trade_record)

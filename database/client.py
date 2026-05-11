@@ -57,6 +57,7 @@ def insert_trade(trade: dict) -> dict:
             "risk_profile", "horizon",
             "atr_at_entry", "r_multiple", "stop_pct_used",
             "hold_decision_json", "hold_extension_count",
+            "setup_grade", "partial_exit_done", "entry_tranche_count",
         }
         fallback = {k: v for k, v in trade.items() if k in base_columns}
         try:
@@ -113,6 +114,17 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "exposure_direction": trade.get("exposure_direction"),
             "strategy_family": trade.get("strategy_family"),
             "regime_debug_json": trade.get("regime_debug_json"),
+            "setup_grade": trade.get("setup_grade"),
+            "sector_confirmation": trade.get("sector_confirmation"),
+            "percentile_rank": trade.get("percentile_rank"),
+            "grade_reasons": trade.get("grade_reasons"),
+            "partial_target_price": trade.get("partial_target_price"),
+            "partial_exit_pct": trade.get("partial_exit_pct"),
+            "partial_exit_done": trade.get("partial_exit_done"),
+            "partial_exit_qty": trade.get("partial_exit_qty"),
+            "runner_atr_mult": trade.get("runner_atr_mult"),
+            "runner_stop_price": trade.get("runner_stop_price"),
+            "vwap_thesis_strike_count": trade.get("vwap_thesis_strike_count"),
             "status": "open",
         }
         try:
@@ -131,7 +143,11 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                              "daily_reeval_count", "hold_extension_count", "hold_decision_json",
                              "peak_directional_score",
                              "protective_stop_order_id",
-                             "exposure_direction", "strategy_family", "regime_debug_json"}
+                             "exposure_direction", "strategy_family", "regime_debug_json",
+                             "setup_grade", "sector_confirmation", "percentile_rank",
+                             "grade_reasons", "partial_target_price", "partial_exit_pct",
+                             "partial_exit_done", "partial_exit_qty", "runner_atr_mult",
+                             "runner_stop_price", "vwap_thesis_strike_count"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}
@@ -232,6 +248,9 @@ def insert_signal(signal: dict) -> dict:
             "atr_stop_pct", "volatility_regime",
             "macro_regime", "macro_multiplier",
             "market_regime", "regime_bull_bear", "shock_detected", "shock_classification",
+            "yield_curve", "yield_curve_state",
+            "action_hint", "exposure_direction", "strategy_family", "regime_debug_json",
+            "setup_grade", "sector_confirmation", "orb_score", "percentile_rank",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:
@@ -239,6 +258,16 @@ def insert_signal(signal: dict) -> dict:
             return result.data[0] if result.data else {}
         except Exception:
             return {"error": str(e)}
+
+
+def update_signal(signal_id: int, updates: dict) -> dict:
+    """Best-effort update for signal metadata computed after initial insert."""
+    try:
+        db = get_client(write=True)
+        result = db.table("signals").update(updates).eq("id", signal_id).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def insert_blocked_opportunity(opportunity: dict) -> dict:
@@ -263,11 +292,25 @@ def insert_blocked_opportunity(opportunity: dict) -> dict:
             "strategy_family": opportunity.get("strategy_family"),
             "event_risk_active": opportunity.get("event_risk_active"),
             "reference_price": opportunity.get("reference_price"),
+            "setup_grade": opportunity.get("setup_grade"),
+            "a_plus_blocked": opportunity.get("a_plus_blocked"),
         }
         result = db.table("blocked_opportunities").insert(record).execute()
         return result.data[0] if result.data else {}
     except Exception as e:
-        return {"error": str(e)}
+        base_columns = {
+            "ticker", "action_hint", "composite_score", "block_stage", "block_reason",
+            "candidate_rank_score", "breakout_quality", "ev_decision", "ev_net_pct",
+            "ev_result_json", "signals_json", "setup_context_json", "regime",
+            "market_regime", "strategy_family", "event_risk_active", "reference_price",
+            "setup_grade", "a_plus_blocked",
+        }
+        fallback = {k: v for k, v in record.items() if k in base_columns}
+        try:
+            result = db.table("blocked_opportunities").insert(fallback).execute()
+            return result.data[0] if result.data else {}
+        except Exception:
+            return {"error": str(e)}
 
 
 def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 50) -> list:

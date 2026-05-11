@@ -78,6 +78,21 @@ class TestGradeSetup:
         assert grade.grade == "A+"
         assert grade.orb_active is True
 
+    def test_a_plus_allows_above_vwap_when_momentum_confirms(self):
+        signals = _bullish_signals(0.5)
+        signals["vwap_deviation"]["score"] = -0.8
+        grade = grade_setup(
+            ticker="NVDA",
+            composite=0.42,
+            signals=signals,
+            regime_state=_make_regime("bull", "trending"),
+            sector_conf=0.75,
+            percentile_rank=90.0,
+            orb_score=0.0,
+            profile={},
+        )
+        assert grade.grade == "A+"
+
     def test_a_grade(self):
         grade = grade_setup(
             ticker="QQQ",
