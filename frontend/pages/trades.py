@@ -31,6 +31,13 @@ def render():
         df["hold_days_actual"] = pd.to_numeric(df["hold_days_actual"], errors="coerce")
     if "swing_conviction" in df.columns:
         df["swing_conviction"] = pd.to_numeric(df["swing_conviction"], errors="coerce")
+    for col in [
+        "post_exit_max_favorable_pct",
+        "post_exit_max_adverse_pct",
+        "post_exit_close_after_pct",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     def _truthy(value) -> bool:
         if pd.isna(value):
@@ -250,6 +257,75 @@ def render():
                                margin=dict(l=0,r=0,t=10,b=0))
             st.plotly_chart(fig4, width="stretch")
 
+    # ── Post-exit replay ────────────────────────────────────────────────────
+    replay_cols = {
+        "post_exit_max_favorable_pct",
+        "post_exit_max_adverse_pct",
+        "post_exit_close_after_pct",
+    }
+    if replay_cols.issubset(set(fdf.columns)):
+        replay_df = fdf[fdf["post_exit_max_favorable_pct"].notna()].copy()
+        if not replay_df.empty:
+            st.markdown("---")
+            section_title("Post-Exit Replay")
+            left_money = replay_df[replay_df["post_exit_max_favorable_pct"] >= 0.5]
+
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            metric(rc1, "Replayed exits", len(replay_df))
+            metric(rc2, "Avg missed upside", f"{replay_df['post_exit_max_favorable_pct'].mean():+.2f}%")
+            metric(rc3, "Avg adverse avoided", f"{replay_df['post_exit_max_adverse_pct'].mean():+.2f}%")
+            metric(rc4, "Left money count", len(left_money))
+
+            col_reason, col_table = st.columns(2)
+            with col_reason:
+                by_exit = (
+                    replay_df.groupby("exit_reason", dropna=False)
+                    .agg(
+                        trades=("ticker", "count"),
+                        avg_missed=("post_exit_max_favorable_pct", "mean"),
+                        avg_close_after=("post_exit_close_after_pct", "mean"),
+                    )
+                    .reset_index()
+                    .sort_values("avg_missed", ascending=False)
+                )
+                fig_replay = px.bar(
+                    by_exit,
+                    x="exit_reason",
+                    y="avg_missed",
+                    color="trades",
+                    template="plotly_dark",
+                    labels={
+                        "exit_reason": "Exit reason",
+                        "avg_missed": "Avg post-exit favorable move (%)",
+                    },
+                )
+                fig_replay.add_hline(y=0, line_dash="dot", line_color="#555")
+                fig_replay.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    height=280,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                )
+                st.plotly_chart(fig_replay, width="stretch")
+
+            with col_table:
+                top_left = (
+                    replay_df.sort_values("post_exit_max_favorable_pct", ascending=False)
+                    .head(12)
+                )
+                cols = [
+                    "created_at", "ticker", "exit_reason", "net_pnl_pct",
+                    "post_exit_max_favorable_pct", "post_exit_max_adverse_pct",
+                    "post_exit_close_after_pct",
+                ]
+                cols = [c for c in cols if c in top_left.columns]
+                st.dataframe(
+                    top_left[cols],
+                    width="stretch",
+                    hide_index=True,
+                    column_config=column_config(cols),
+                )
+
     # ── Trade table ────────────────────────────────────────────────────────
     section_title("All Trades")
 
@@ -265,7 +341,8 @@ def render():
     display_cols = ["created_at", "ticker", "side", "hold_type", "net_pnl_pct",
                     "pnl_eur", "hold_minutes", "exit_reason", "regime",
                     "exposure_direction", "strategy_family",
-                    "composite_score", "llm_conviction"]
+                    "composite_score", "llm_conviction",
+                    "post_exit_max_favorable_pct", "post_exit_close_after_pct"]
     available = [c for c in display_cols if c in fdf.columns]
     show_df = fdf[available].sort_values("created_at", ascending=False).head(100)
 

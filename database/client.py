@@ -201,6 +201,49 @@ def get_recent_trades(days: int = 30, ticker: str = None) -> list:
     return result.data or []
 
 
+def get_unchecked_closed_trades_for_replay(min_age_minutes: int = 20, limit: int = 50,
+                                           exit_reasons: list[str] = None) -> list:
+    """Fetch closed trades old enough to replay against post-exit price action."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        q = (db.table("trades")
+             .select("id,ticker,side,exit_price,exit_reason,exit_time,created_at,net_pnl_pct,setup_grade")
+             .is_("post_exit_checked_at", "null")
+             .lte("created_at", cutoff)
+             .order("created_at", desc=False)
+             .limit(limit))
+        if exit_reasons:
+            q = q.in_("exit_reason", exit_reasons)
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[CLOSED_TRADE_REPLAY_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_trade_post_exit_replay(trade_id: int, replay: dict) -> dict:
+    """Persist post-exit replay stats for a closed trade."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "post_exit_checked_at": datetime.utcnow().isoformat() + "Z",
+            "post_exit_horizon_minutes": replay.get("post_exit_horizon_minutes"),
+            "post_exit_max_favorable_pct": replay.get("post_exit_max_favorable_pct"),
+            "post_exit_max_adverse_pct": replay.get("post_exit_max_adverse_pct"),
+            "post_exit_close_after_pct": replay.get("post_exit_close_after_pct"),
+            "post_exit_result_json": replay.get("post_exit_result_json") or {},
+        }
+        result = (db.table("trades")
+                  .update(record)
+                  .eq("id", trade_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[CLOSED_TRADE_REPLAY_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 def get_trade_stats(days: int = 30) -> dict:
     """Try the pre-computed view first, fall back to Python aggregation."""
     try:

@@ -80,6 +80,11 @@ HELP_TEXT = {
     "Exit Reason Breakdown": "How often each exit rule closed a trade.",
     "P&L by Strategy": "Average P&L grouped by strategy family.",
     "P&L by Exposure": "Average P&L grouped by long, short, or other exposure direction.",
+    "Post-Exit Replay": "Checks what price did after a trade closed to measure whether the exit was early, late, or well-timed.",
+    "Replayed exits": "Closed trades with enough post-exit market data to evaluate.",
+    "Avg missed upside": "Average favorable move after exit; higher values suggest the system may have exited too early.",
+    "Avg adverse avoided": "Average adverse move after exit; more negative values suggest the exit avoided further loss.",
+    "Left money count": "Replayed exits where price later moved favorably by at least 0.5%.",
     "All Trades": "Latest closed trades with the most relevant execution and signal fields.",
     "Swing Trade Details": "Per-trade swing metadata, including conviction and re-evaluation count.",
     "Conviction": "Stored swing conviction score for the position.",
@@ -179,6 +184,9 @@ HELP_TEXT = {
     "exit_reason": "Exit rule or condition that closed the trade.",
     "composite_score": "Weighted signal score at decision time.",
     "llm_conviction": "LLM confidence score stored with the trade decision.",
+    "post_exit_max_favorable_pct": "Maximum favorable move after this trade exited.",
+    "post_exit_max_adverse_pct": "Maximum adverse move after this trade exited.",
+    "post_exit_close_after_pct": "Directional move from exit price to the replay horizon close.",
     "Status": "Visual status marker for the row.",
 }
 

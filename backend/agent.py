@@ -47,6 +47,8 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           insert_blocked_opportunity,
                                           get_unchecked_blocked_opportunities,
                                           update_blocked_opportunity_replay,
+                                          get_unchecked_closed_trades_for_replay,
+                                          update_trade_post_exit_replay,
                                           update_signal,
                                           get_signal_percentiles,
                                           upsert_signal_percentiles)
@@ -730,23 +732,31 @@ def _parse_supabase_time(value: str) -> Optional[datetime]:
         return None
 
 
-def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
+def _replay_price_window(ticker: str, action: str, start_at: datetime,
+                         reference_price: float, horizon_minutes: int,
+                         period: str = "5d") -> dict:
     import yfinance as yf
 
-    ticker = str(opp.get("ticker") or "").upper()
-    action = str(opp.get("action_hint") or "BUY").upper()
-    created_at = _parse_supabase_time(opp.get("created_at"))
-    if not ticker or not created_at:
+    ticker = str(ticker or "").upper()
+    action = str(action or "BUY").upper()
+    if not ticker or not start_at:
         return {}
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+
+    try:
+        reference_price = float(reference_price)
+    except (TypeError, ValueError):
+        reference_price = 0
 
     now_utc = datetime.now(timezone.utc)
-    end_at = min(now_utc, created_at + timedelta(minutes=horizon_minutes))
-    if end_at <= created_at:
+    end_at = min(now_utc, start_at + timedelta(minutes=horizon_minutes))
+    if end_at <= start_at:
         return {}
 
     bars = yf.download(
         ticker,
-        period="1d",
+        period=period,
         interval="1m",
         progress=False,
         auto_adjust=True,
@@ -759,17 +769,14 @@ def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
     else:
         bars.index = bars.index.tz_convert("UTC")
 
-    window = bars[(bars.index >= created_at) & (bars.index <= end_at)]
+    window = bars[(bars.index >= start_at) & (bars.index <= end_at)]
     if window.empty:
         return {}
 
     close_series = window["Close"].squeeze()
     high_series = window["High"].squeeze()
     low_series = window["Low"].squeeze()
-    reference_price = opp.get("reference_price")
-    try:
-        reference_price = float(reference_price)
-    except (TypeError, ValueError):
+    if reference_price <= 0:
         reference_price = float(close_series.iloc[0])
     if reference_price <= 0:
         return {}
@@ -787,12 +794,43 @@ def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
         "max_favorable_pct": round(max_favorable, 4),
         "max_adverse_pct": round(max_adverse, 4),
         "close_after_pct": round(close_after, 4),
+        "bars_seen": int(len(window)),
+        "reference_price": round(reference_price, 4),
+        "start": start_at.isoformat(),
+        "end": end_at.isoformat(),
+        "action": action,
+    }
+
+
+def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
+    ticker = str(opp.get("ticker") or "").upper()
+    action = str(opp.get("action_hint") or "BUY").upper()
+    created_at = _parse_supabase_time(opp.get("created_at"))
+    if not ticker or not created_at:
+        return {}
+
+    reference_price = opp.get("reference_price")
+    try:
+        reference_price = float(reference_price)
+    except (TypeError, ValueError):
+        reference_price = 0
+
+    replay = _replay_price_window(
+        ticker, action, created_at, reference_price, horizon_minutes, period="5d"
+    )
+    if not replay:
+        return {}
+
+    return {
+        "max_favorable_pct": replay["max_favorable_pct"],
+        "max_adverse_pct": replay["max_adverse_pct"],
+        "close_after_pct": replay["close_after_pct"],
         "replay_result_json": {
             "horizon_minutes": horizon_minutes,
-            "bars_seen": int(len(window)),
-            "reference_price": round(reference_price, 4),
-            "start": created_at.isoformat(),
-            "end": end_at.isoformat(),
+            "bars_seen": replay["bars_seen"],
+            "reference_price": replay["reference_price"],
+            "start": replay["start"],
+            "end": replay["end"],
             "action": action,
             "block_stage": opp.get("block_stage"),
             "block_reason": opp.get("block_reason"),
@@ -830,6 +868,97 @@ def _replay_blocked_opportunities():
             })
     if checked:
         log_event("INFO", "blocked_opportunity_replay_complete", {
+            "checked": checked,
+            "updated": updated,
+            "horizon_minutes": horizon,
+        })
+
+
+def _closed_trade_replay_exit_reasons() -> list[str]:
+    raw = _env_value(
+        "CLOSED_TRADE_REPLAY_EXIT_REASONS",
+        "time_exit,eod_cleanup,thesis_invalidated,momentum_peak_decay,"
+        "take_profit,stop_loss,chandelier_stop,leveraged_etf_time_exit,"
+        "partial_runner_stop,a_plus_override",
+    )
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _replay_one_closed_trade_exit(trade: dict, horizon_minutes: int) -> dict:
+    ticker = str(trade.get("ticker") or "").upper()
+    side = str(trade.get("side") or "BUY").upper()
+    exited_at = _parse_supabase_time(
+        trade.get("exit_time") or trade.get("created_at")
+    )
+    if not ticker or not exited_at:
+        return {}
+
+    try:
+        exit_price = float(trade.get("exit_price") or 0)
+    except (TypeError, ValueError):
+        exit_price = 0
+
+    replay = _replay_price_window(
+        ticker, side, exited_at, exit_price, horizon_minutes, period="5d"
+    )
+    if not replay:
+        return {}
+
+    result_json = {
+        "horizon_minutes": horizon_minutes,
+        "bars_seen": replay["bars_seen"],
+        "reference_price": replay["reference_price"],
+        "start": replay["start"],
+        "end": replay["end"],
+        "action": side,
+        "exit_reason": trade.get("exit_reason"),
+        "net_pnl_pct": trade.get("net_pnl_pct"),
+        "setup_grade": trade.get("setup_grade"),
+    }
+    return {
+        "post_exit_horizon_minutes": horizon_minutes,
+        "post_exit_max_favorable_pct": replay["max_favorable_pct"],
+        "post_exit_max_adverse_pct": replay["max_adverse_pct"],
+        "post_exit_close_after_pct": replay["close_after_pct"],
+        "post_exit_result_json": result_json,
+    }
+
+
+def _replay_closed_trade_exits():
+    if not _env_bool("CLOSED_TRADE_REPLAY_ENABLED", True):
+        return
+
+    min_age = _env_int("CLOSED_TRADE_REPLAY_MIN_AGE_MINUTES", 20)
+    horizon = _env_int("CLOSED_TRADE_REPLAY_HORIZON_MINUTES", 120)
+    limit = _env_int("CLOSED_TRADE_REPLAY_LIMIT", 25)
+    trades = get_unchecked_closed_trades_for_replay(
+        min_age_minutes=min_age,
+        limit=limit,
+        exit_reasons=_closed_trade_replay_exit_reasons(),
+    )
+    if not trades:
+        return
+
+    checked = 0
+    updated = 0
+    for trade in trades:
+        checked += 1
+        try:
+            replay = _replay_one_closed_trade_exit(trade, horizon)
+            if not replay:
+                continue
+            result = update_trade_post_exit_replay(trade.get("id"), replay)
+            if not result.get("error"):
+                updated += 1
+        except Exception as e:
+            log_event("WARN", "closed_trade_exit_replay_failed", {
+                "ticker": trade.get("ticker"),
+                "id": trade.get("id"),
+                "exit_reason": trade.get("exit_reason"),
+                "error": str(e)[:160],
+            })
+    if checked:
+        log_event("INFO", "closed_trade_exit_replay_complete", {
             "checked": checked,
             "updated": updated,
             "horizon_minutes": horizon,
@@ -1505,6 +1634,9 @@ def run_signal_cycle():
 
     # Measure whether blocked/skipped candidates would have worked afterward.
     _replay_blocked_opportunities()
+
+    # Measure whether recent exits left follow-through on the table.
+    _replay_closed_trade_exits()
 
     # Save portfolio snapshot
     _save_snapshot(portfolio_state, regime)
@@ -2775,6 +2907,8 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
         "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
+        "entry_time":      trade["entry_time"].isoformat() + "Z",
+        "exit_time":       now_close.isoformat() + "Z",
         "hold_minutes":    hold_minutes_actual,
         "hold_days_actual": hold_days_actual,
         "exit_reason":     exit_reason,
