@@ -569,8 +569,16 @@ create table if not exists signal_percentiles (
 create index if not exists idx_signal_percentiles_ticker on signal_percentiles (ticker);
 
 alter table if exists signal_percentiles enable row level security;
-create policy if not exists "anon_read_signal_percentiles"
-    on signal_percentiles for select using (true);
+do $$ begin
+  if not exists (
+    select 1 from pg_policies
+    where tablename = 'signal_percentiles'
+      and policyname = 'anon_read_signal_percentiles'
+  ) then
+    execute 'create policy "anon_read_signal_percentiles"
+      on signal_percentiles for select using (true)';
+  end if;
+end $$;
 
 -- 2. open_trades — grade metadata + partial exit tracking
 alter table if exists open_trades
