@@ -1733,6 +1733,144 @@ def detect_momentum_swing(
     }
 
 
+# ── Signal 11: Opening Range Breakout (tuned for 5-min cycle latency) ─────────
+
+_orb_cache: dict = {}
+_ORB_CACHE_TTL = 240   # 4 minutes — refresh every other cycle
+
+
+def _et_minutes_since_midnight() -> Optional[int]:
+    """Return current ET minutes-since-midnight, or None if unavailable."""
+    try:
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        now_et = _dt.datetime.now(ZoneInfo("America/New_York"))
+        return now_et.hour * 60 + now_et.minute
+    except Exception:
+        try:
+            import pytz
+            import datetime as _dt
+            et = pytz.timezone("America/New_York")
+            now_et = _dt.datetime.now(et)
+            return now_et.hour * 60 + now_et.minute
+        except Exception:
+            return None
+
+
+def opening_range_breakout_score(ticker: str) -> tuple[float, dict]:
+    """
+    Opening Range Breakout signal tuned for 5-minute polling latency.
+
+    Opening range = high/low of 9:30-9:45 ET (first 3 × 5-min bars).
+    Signal is active in two windows:
+      Primary:      9:45-10:30 ET  — score breakouts above/below range with volume
+      Continuation: 10:30-11:15 ET — score pullback-to-VWAP + re-confirm holds
+
+    Returns 0.0 outside active windows so it never distorts off-hours signals.
+    Score > 0: bullish (price above range + volume + VWAP hold).
+    Score < 0: bearish (price below range + volume + VWAP break).
+    """
+    cache_key = ticker.upper()
+    now_ts = time.time()
+    if cache_key in _orb_cache:
+        cached_ts, cached_result = _orb_cache[cache_key]
+        if now_ts - cached_ts < _ORB_CACHE_TTL:
+            return cached_result
+
+    # Window check
+    et_min = _et_minutes_since_midnight()
+    primary_start = 9 * 60 + 45   # 9:45
+    primary_end   = 10 * 60 + 30  # 10:30
+    cont_end      = 11 * 60 + 15  # 11:15
+
+    inactive = (0.0, {"active": False, "reason": "outside_orb_window"})
+    if et_min is None or et_min < primary_start or et_min >= cont_end:
+        _orb_cache[cache_key] = (now_ts, inactive)
+        return inactive
+
+    is_primary = et_min < primary_end
+
+    df = _get_bars(ticker, period="1d", interval="5m")
+    if df is None or len(df) < 6:
+        result = (0.0, {"active": False, "reason": "insufficient_data"})
+        _orb_cache[cache_key] = (now_ts, result)
+        return result
+
+    # Opening range = first 3 bars (≈9:30, 9:35, 9:40)
+    or_bars = df.head(3)
+    or_high = float(or_bars["High"].max())
+    or_low  = float(or_bars["Low"].min())
+    or_range = max(or_high - or_low, 1e-6)
+
+    current_price = float(df["Close"].squeeze().iloc[-1])
+
+    # Volume context
+    vol_series = df["Volume"].squeeze()
+    vol_mean = float(vol_series.rolling(20).mean().iloc[-1]) if len(vol_series) >= 20 else float(vol_series.mean())
+    vol_now  = float(vol_series.iloc[-1])
+    vol_ratio = vol_now / vol_mean if vol_mean > 0 else 1.0
+
+    # Intraday VWAP
+    high_s  = df["High"].squeeze()
+    low_s   = df["Low"].squeeze()
+    close_s = df["Close"].squeeze()
+    typical = (high_s + low_s + close_s) / 3
+    vwap = float((typical * vol_series).cumsum().iloc[-1] / vol_series.cumsum().iloc[-1])
+
+    score = 0.0
+    reason = "inside_range"
+
+    if current_price > or_high:
+        # Bullish breakout above OR
+        extension = (current_price - or_high) / or_range
+        base = 0.55 + min(0.30, extension * 0.6)
+        if vol_ratio >= 1.5:
+            base = min(1.0, base + 0.15)
+        if current_price >= vwap:
+            base = min(1.0, base + 0.10)  # holding above VWAP is confirmation
+        score = base
+        reason = "bullish_breakout"
+
+    elif current_price < or_low:
+        # Bearish breakdown
+        extension = (or_low - current_price) / or_range
+        base = -(0.55 + min(0.30, extension * 0.6))
+        if vol_ratio >= 1.5:
+            base = max(-1.0, base - 0.15)
+        if current_price <= vwap:
+            base = max(-1.0, base - 0.10)
+        score = base
+        reason = "bearish_breakdown"
+
+    elif not is_primary:
+        # Continuation window: look for pullback-to-VWAP from a prior breakout direction
+        prev_bars = df.head(6)  # first 30 min
+        prev_high = float(prev_bars["High"].max())
+        prev_low  = float(prev_bars["Low"].min())
+        if prev_high > or_high and current_price >= vwap:
+            # Had a bullish breakout earlier, price has pulled back but holds VWAP
+            score = 0.35
+            reason = "bullish_continuation_vwap_hold"
+        elif prev_low < or_low and current_price <= vwap:
+            score = -0.35
+            reason = "bearish_continuation_vwap_break"
+
+    result = (_clamp(score), {
+        "active":        True,
+        "window":        "primary" if is_primary else "continuation",
+        "or_high":       round(or_high, 4),
+        "or_low":        round(or_low, 4),
+        "or_range":      round(or_range, 4),
+        "current_price": round(current_price, 4),
+        "vwap":          round(vwap, 4),
+        "vol_ratio":     round(vol_ratio, 2),
+        "reason":        reason,
+        "et_minutes":    et_min,
+    })
+    _orb_cache[cache_key] = (now_ts, result)
+    return result
+
+
 # ── Master signal composer ────────────────────────────────────────────────────
 
 def compute_all_signals(ticker: str, weights: dict,
@@ -1796,6 +1934,11 @@ def compute_all_signals(ticker: str, weights: dict,
     except Exception:
         s11, m11 = 0.0, {"mean_reversion_signal": False, "error": "signal_crashed"}
 
+    try:
+        s12, m12 = opening_range_breakout_score(ticker)
+    except Exception:
+        s12, m12 = 0.0, {"active": False, "error": "signal_crashed"}
+
     atr_data = compute_atr(ticker)
 
     pre_news_signals = {
@@ -1840,6 +1983,7 @@ def compute_all_signals(ticker: str, weights: dict,
     results["bollinger_squeeze"]    = {"score": s9,  "meta": m9}
     results["put_call_ratio"]       = {"score": s10, "meta": m10}
     results["mean_reversion"]       = {"score": s11, "meta": m11}
+    results["orb"]                  = {"score": s12, "meta": m12}
 
     # Weighted composite (earnings_proximity is a multiplier, not a weight)
     weighted_signals = {
@@ -1950,6 +2094,9 @@ def compute_all_signals(ticker: str, weights: dict,
         "atr_stop_multiplier": 2.0 if regime_state.intraday_regime == "high_vol" else 1.5,
         "mean_reversion_signal": bool(m11.get("mean_reversion_signal")),
         "mean_reversion_meta": m11,
+        "orb_score":           s12,
+        "orb_meta":            m12,
+        "orb_active":          bool(m12.get("active", False)),
         "dividend_opportunity": div_opportunity,
         "computed_at":         datetime.utcnow().isoformat(),
     }

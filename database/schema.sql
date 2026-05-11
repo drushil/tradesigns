@@ -542,5 +542,78 @@ alter table if exists trades
         'chandelier_stop','swing_exit','earnings_tomorrow',
         'regime_turned_bear','momentum_reversed',
         'macro_shock','take_profit_8pct','swing_promoted',
-        'momentum_peak_decay','eod_cleanup'
+        'momentum_peak_decay','eod_cleanup',
+        'thesis_invalidated','partial_runner_stop','a_plus_override'
+    ));
+
+-- ============================================================
+-- MIGRATION v3 — Grading engine + ORB + adaptive percentiles
+-- Run in Supabase SQL Editor after v2 schema is applied.
+-- ============================================================
+
+-- 1. signal_percentiles — rolling composite window per ticker
+create table if not exists signal_percentiles (
+    id                  bigint generated always as identity primary key,
+    created_at          timestamptz not null default now(),
+    updated_at          timestamptz not null default now(),
+    ticker              text not null unique,
+    sample_count        integer default 0,
+    p50                 numeric(8,4),
+    p70                 numeric(8,4),
+    p85                 numeric(8,4),
+    p90                 numeric(8,4),
+    p95                 numeric(8,4),
+    window_composites   jsonb default '[]'::jsonb
+);
+
+create index if not exists idx_signal_percentiles_ticker on signal_percentiles (ticker);
+
+alter table if exists signal_percentiles enable row level security;
+create policy if not exists "anon_read_signal_percentiles"
+    on signal_percentiles for select using (true);
+
+-- 2. open_trades — grade metadata + partial exit tracking
+alter table if exists open_trades
+    add column if not exists setup_grade            text check (setup_grade in ('A+','A','B','C',null)),
+    add column if not exists sector_confirmation    numeric(4,3),
+    add column if not exists percentile_rank        numeric(5,1),
+    add column if not exists grade_reasons          jsonb default '[]'::jsonb,
+    add column if not exists partial_target_price   numeric(12,4),
+    add column if not exists partial_exit_pct       numeric(4,2),
+    add column if not exists partial_exit_done      boolean default false,
+    add column if not exists partial_exit_qty       numeric(14,6) default 0,
+    add column if not exists runner_atr_mult        numeric(4,2),
+    add column if not exists runner_stop_price      numeric(12,4),
+    add column if not exists vwap_thesis_strike_count smallint default 0;
+
+-- 3. signals — grade + ORB signal column
+alter table if exists signals
+    add column if not exists setup_grade            text,
+    add column if not exists sector_confirmation    numeric(4,3),
+    add column if not exists orb_score              real,
+    add column if not exists percentile_rank        numeric(5,1);
+
+-- 4. trades — grade columns for post-trade analysis
+alter table if exists trades
+    add column if not exists setup_grade            text,
+    add column if not exists partial_exit_done      boolean default false,
+    add column if not exists entry_tranche_count    smallint default 1;
+
+-- 5. blocked_opportunities — grade + A+ flag
+alter table if exists blocked_opportunities
+    add column if not exists setup_grade            text,
+    add column if not exists a_plus_blocked         boolean default false;
+
+-- Widen exit_reason constraint again to include new types
+alter table if exists trades drop constraint if exists trades_exit_reason_check;
+alter table if exists trades
+    add constraint trades_exit_reason_check check (exit_reason in (
+        'stop_loss','take_profit','time_exit',
+        'signal_reversal','manual','circuit_breaker',
+        'chandelier_stop','swing_exit','earnings_tomorrow',
+        'regime_turned_bear','momentum_reversed',
+        'macro_shock','take_profit_8pct','swing_promoted',
+        'momentum_peak_decay','eod_cleanup',
+        'thesis_invalidated','partial_runner_stop','a_plus_override',
+        'stale_no_position'
     ));

@@ -283,29 +283,54 @@ def compute_expected_value(composite_score: float, size_eur: float,
 # ── Dynamic risk tightening ───────────────────────────────────────────────────
 
 def get_effective_profile(base_profile: dict, portfolio_state: dict) -> dict:
-    """Dynamically tightens risk when conditions deteriorate."""
+    """
+    Dynamically tightens or expands risk based on current portfolio conditions.
+
+    Dynamic risk budget layers (applied in priority order):
+      1. Hard daily-loss stop: drawdown >= 3% → no new trades at all
+      2. Reduced mode:         drawdown >= 2% → minimum grade A only, reduced sizes
+      3. Consecutive losses:   >= 3 losses    → halve size, raise conviction
+      4. High VIX:             VIX > 25       → reduce size 30%, cap hold time
+      5. Drawdown approaching: > 60% of limit → scale down further
+      6. Risk-on loosening:    5+ wins        → small size increase (capped)
+    """
     p = base_profile.copy()
     consecutive_losses = portfolio_state.get("consecutive_losses", 0)
     drawdown_today     = portfolio_state.get("drawdown_today", 0.0)
     consecutive_wins   = portfolio_state.get("consecutive_wins", 0)
     vix                = portfolio_state.get("vix", 20.0)
 
-    # Tighten after 3+ consecutive losses
+    # Layer 1: Hard daily-loss stop — no new entries
+    if drawdown_today >= 3.0:
+        p["max_trades_per_day"]    = 0
+        p["min_signal_score"]      = 99.0   # effectively blocks everything
+        p["daily_loss_limit_hit"]  = True
+        p["capital_per_trade_pct"] = round(p["capital_per_trade_pct"], 2)
+        return p
+
+    # Layer 2: Reduced mode — A-grade and above only, smaller sizes
+    if drawdown_today >= 2.0:
+        p["capital_per_trade_pct"] *= 0.5
+        p["min_conviction"]        = min(0.80, p["min_conviction"] + 0.10)
+        p["min_grade_required"]    = "A"    # grade engine respects this
+        p["reduced_mode"]          = True
+
+    # Layer 3: Consecutive losses
     if consecutive_losses >= 3:
         p["capital_per_trade_pct"] *= 0.5
         p["min_conviction"]        = min(0.85, p["min_conviction"] + 0.15)
 
-    # Tighten in high-vol
+    # Layer 4: High VIX
     if vix > 25:
         p["capital_per_trade_pct"] *= 0.7
         p["max_hold_minutes"]       = min(p["max_hold_minutes"], 30)
 
-    # Tighten as drawdown approaches limit
+    # Layer 5: Drawdown approaching limit
     drawdown_ratio = drawdown_today / max(p["max_drawdown_pct"], 0.01)
     if drawdown_ratio > 0.6:
         p["capital_per_trade_pct"] *= max(0.3, 1 - drawdown_ratio * 0.5)
 
-    # Very slight loosening after 5+ consecutive wins (capped)
+    # Layer 6: Risk-on loosening after sustained winning
     if consecutive_wins >= 5:
         base_cap = base_profile["capital_per_trade_pct"] * 1.2
         p["capital_per_trade_pct"] = min(
