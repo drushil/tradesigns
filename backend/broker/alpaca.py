@@ -631,7 +631,8 @@ def compute_position_size(ticker: str, total_capital: float, profile: dict,
     atr_pct is accepted from compute_atr as a percentage value.
     """
     atr_data = atr_data or {}
-    target_risk_eur = total_capital * 0.01
+    risk_per_trade_pct = float(profile.get("risk_per_trade_pct", 1.0) or 1.0)
+    target_risk_eur = total_capital * risk_per_trade_pct / 100
 
     raw_atr_pct = atr_data.get("atr_pct")
     if raw_atr_pct is None:
@@ -669,6 +670,7 @@ def compute_position_size(ticker: str, total_capital: float, profile: dict,
         "size_eur":         size_eur,
         "stop_pct":         round(stop_distance_pct * 100, 3),
         "target_risk_eur":  round(target_risk_eur, 2),
+        "risk_per_trade_pct": round(risk_per_trade_pct, 3),
         "conviction_scalar": round(conviction_scalar, 2),
         "regime_scalar":    regime_scalar,
         "vix_scalar":       round(vix_scalar, 2),

@@ -306,11 +306,13 @@ def get_effective_profile(base_profile: dict, portfolio_state: dict) -> dict:
         p["min_signal_score"]      = 99.0   # effectively blocks everything
         p["daily_loss_limit_hit"]  = True
         p["capital_per_trade_pct"] = round(p["capital_per_trade_pct"], 2)
+        p["risk_per_trade_pct"]    = round(p.get("risk_per_trade_pct", 1.0), 3)
         return p
 
     # Layer 2: Reduced mode — A-grade and above only, smaller sizes
     if drawdown_today >= 2.0:
         p["capital_per_trade_pct"] *= 0.5
+        p["risk_per_trade_pct"]     = p.get("risk_per_trade_pct", 1.0) * 0.5
         p["min_conviction"]        = min(0.80, p["min_conviction"] + 0.10)
         p["min_grade_required"]    = "A"    # grade engine respects this
         p["reduced_mode"]          = True
@@ -318,17 +320,21 @@ def get_effective_profile(base_profile: dict, portfolio_state: dict) -> dict:
     # Layer 3: Consecutive losses
     if consecutive_losses >= 3:
         p["capital_per_trade_pct"] *= 0.5
+        p["risk_per_trade_pct"]     = p.get("risk_per_trade_pct", 1.0) * 0.5
         p["min_conviction"]        = min(0.85, p["min_conviction"] + 0.15)
 
     # Layer 4: High VIX
     if vix > 25:
         p["capital_per_trade_pct"] *= 0.7
+        p["risk_per_trade_pct"]     = p.get("risk_per_trade_pct", 1.0) * 0.7
         p["max_hold_minutes"]       = min(p["max_hold_minutes"], 30)
 
     # Layer 5: Drawdown approaching limit
     drawdown_ratio = drawdown_today / max(p["max_drawdown_pct"], 0.01)
     if drawdown_ratio > 0.6:
-        p["capital_per_trade_pct"] *= max(0.3, 1 - drawdown_ratio * 0.5)
+        drawdown_scalar = max(0.3, 1 - drawdown_ratio * 0.5)
+        p["capital_per_trade_pct"] *= drawdown_scalar
+        p["risk_per_trade_pct"]     = p.get("risk_per_trade_pct", 1.0) * drawdown_scalar
 
     # Layer 6: Risk-on loosening after sustained winning
     if consecutive_wins >= 5:
@@ -336,8 +342,13 @@ def get_effective_profile(base_profile: dict, portfolio_state: dict) -> dict:
         p["capital_per_trade_pct"] = min(
             p["capital_per_trade_pct"] * 1.1, base_cap
         )
+        base_risk = base_profile.get("risk_per_trade_pct", 1.0) * 1.2
+        p["risk_per_trade_pct"] = min(
+            p.get("risk_per_trade_pct", 1.0) * 1.1, base_risk
+        )
 
     p["capital_per_trade_pct"] = round(p["capital_per_trade_pct"], 2)
+    p["risk_per_trade_pct"] = round(p.get("risk_per_trade_pct", 1.0), 3)
     return p
 
 

@@ -6,6 +6,7 @@ signals → risk gate → EV check → LLM decision → execution → learning �
 import os
 import time
 import asyncio
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from dotenv import load_dotenv
@@ -221,6 +222,36 @@ def _is_eod_intraday_cleanup_window(now: datetime) -> bool:
     close = _env_int("EOD_CLEANUP_NY_CLOSE_HOUR", 16) * 60 + _env_int("EOD_CLEANUP_NY_CLOSE_MINUTE", 0)
     current = ny_now.hour * 60 + ny_now.minute
     return close - _env_int("EOD_CLEANUP_BUFFER_MINUTES", 30) <= current < close
+
+
+def _minutes_to_regular_close(now: datetime = None) -> Optional[int]:
+    """Minutes until regular US market close, or None outside regular hours."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if not is_regular_us_market_hours(now):
+        return None
+    ny_now = _to_new_york_time(now)
+    close = _env_int("EOD_CLEANUP_NY_CLOSE_HOUR", 16) * 60 + _env_int("EOD_CLEANUP_NY_CLOSE_MINUTE", 0)
+    current = ny_now.hour * 60 + ny_now.minute
+    return max(0, close - current)
+
+
+def _is_new_intraday_entry_too_late(ticker: str, now: datetime = None) -> Optional[dict]:
+    """Block fresh intraday entries near close unless the ticker is swing-eligible."""
+    minutes_to_close = _minutes_to_regular_close(now)
+    if minutes_to_close is None:
+        return None
+    buffer_minutes = _env_int("EOD_NEW_ENTRY_BLOCK_MINUTES", 25)
+    ticker = str(ticker or "").upper()
+    if minutes_to_close < buffer_minutes and ticker not in SWING_TICKERS:
+        return {
+            "ticker": ticker,
+            "minutes_to_close": minutes_to_close,
+            "buffer_minutes": buffer_minutes,
+            "reason": "eod_new_intraday_entry_block",
+        }
+    return None
 
 
 def _is_leveraged_etf(ticker: str, profile: dict) -> bool:
@@ -911,6 +942,12 @@ def _hydrate_open_trades():
             "horizon": record.get("horizon") or "short",
             "size_eur": float(record.get("size_eur") or 0),
             "size_usd": float(record.get("size_usd") or 0),
+            "intended_size_eur": float(record.get("intended_size_eur") or record.get("size_eur") or 0),
+            "executed_size_eur": float(record.get("executed_size_eur") or record.get("size_eur") or 0),
+            "executed_size_usd": float(record.get("executed_size_usd") or record.get("size_usd") or 0),
+            "submitted_qty": float(record.get("submitted_qty") or record.get("quantity") or 0),
+            "implied_qty": float(record.get("implied_qty") or record.get("quantity") or 0),
+            "bracket_floor_qty_loss_pct": float(record.get("bracket_floor_qty_loss_pct") or 0),
             "side": record.get("side", "BUY"),
             "composite_score": float(record.get("composite_score") or 0),
             "signals_json": record.get("signals_json") or {},
@@ -1429,6 +1466,22 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
     # 2. Pre-trade gate (hard rules)
     capital_base = _trading_capital(portfolio_state["equity"])
     action_hint = _deterministic_action(composite)
+    eod_entry_block = _is_new_intraday_entry_too_late(ticker)
+    if eod_entry_block:
+        setup_context = _trade_setup_context(
+            ticker, action_hint, composite, signals_snap, signal_result,
+            ticker_regime_state, gate_reason=eod_entry_block["reason"],
+        )
+        log_event("INFO", "eod_new_entry_block", {
+            "ticker": ticker,
+            "composite": round(composite, 4),
+            **eod_entry_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "time", eod_entry_block["reason"],
+        )
+        return
     pre_size = compute_position_size(ticker, capital_base, profile, 0.7, atr_data, ticker_regime_state)
     size_eur = pre_size["size_eur"]
     if action_hint == "SELL":
@@ -1756,9 +1809,68 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         )
         return
     current_price = float(bar["Close"].squeeze().iloc[-1])
+    intended_size_eur = float(final_size or 0)
+    use_bracket_orders = _env_value("USE_BRACKET_ORDERS", "true").lower() != "false"
+
+    if setup_grade is not None and setup_grade.grade in {"A+", "A"} and current_price > 0:
+        min_grade_shares = _env_float("GRADE_MIN_EXECUTABLE_SHARES", 2.0)
+        min_buffer = max(0.0, _env_float("GRADE_MIN_NOTIONAL_BUFFER_PCT", 0.5)) / 100
+        min_notional_eur = (current_price * min_grade_shares * (1 + min_buffer)) / _eurusd_rate()
+        if final_size < min_notional_eur:
+            capped_min_size = min(min_notional_eur, max_notional)
+            if capped_min_size > final_size:
+                final_size = capped_min_size
+                sizing["grade_min_executable_shares"] = min_grade_shares
+                sizing["grade_min_notional_eur"] = round(min_notional_eur, 2)
+                sizing["grade_min_notional_buffer_pct"] = round(min_buffer * 100, 3)
+                sizing["grade_min_notional_applied"] = True
+                log_event("INFO", "grade_min_notional_applied", {
+                    "ticker": ticker,
+                    "grade": setup_grade.grade,
+                    "previous_size_eur": round(intended_size_eur, 2),
+                    "new_size_eur": round(final_size, 2),
+                    "min_shares": min_grade_shares,
+                    "buffer_pct": round(min_buffer * 100, 3),
+                    "current_price": round(current_price, 4),
+                })
+            else:
+                sizing["grade_min_notional_applied"] = False
+                sizing["grade_min_notional_capped"] = True
+                sizing["grade_min_notional_eur"] = round(min_notional_eur, 2)
+                sizing["grade_min_notional_buffer_pct"] = round(min_buffer * 100, 3)
+
     final_size_usd = _eur_to_usd(final_size)
+    sizing["size_eur"] = round(final_size, 2)
     sizing["size_usd"] = round(final_size_usd, 2)
     qty = final_size_usd / current_price
+    floor_qty = math.floor(qty) if use_bracket_orders else round(qty, 6)
+    bracket_floor_qty_loss_pct = (
+        round(max(0.0, (qty - floor_qty) / qty * 100), 4)
+        if use_bracket_orders and qty > 0 else 0.0
+    )
+    sizing["intended_size_eur"] = round(intended_size_eur, 2)
+    sizing["implied_qty"] = round(qty, 6)
+    sizing["floor_qty"] = floor_qty
+    sizing["bracket_floor_qty_loss_pct"] = bracket_floor_qty_loss_pct
+
+    if use_bracket_orders and floor_qty < 1:
+        reason = "bracket_floor_would_waste_trade"
+        log_event("INFO", "bracket_floor_preflight_block", {
+            "ticker": ticker,
+            "grade": setup_grade.grade if setup_grade else None,
+            "final_size_eur": round(final_size, 2),
+            "size_usd": round(final_size_usd, 2),
+            "current_price": round(current_price, 4),
+            "implied_qty": round(qty, 6),
+            "floor_qty": floor_qty,
+            "ev_decision": ev_result.get("ev_decision"),
+        })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "sizing", reason,
+            ev_result=ev_result, reference_price=current_price,
+        )
+        return
 
     raw_hold_minutes = llm_result.get("hold_minutes", 30)
     try:
@@ -1817,6 +1929,13 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         log_event("ERROR", "order_failed", {"ticker": ticker, "error": order["error"]})
         return
 
+    submitted_qty = float(order.get("qty") or floor_qty or round(qty, 6))
+    executed_size_usd = submitted_qty * current_price
+    executed_size_eur = executed_size_usd / _eurusd_rate()
+    sizing["submitted_qty"] = round(submitted_qty, 6)
+    sizing["executed_size_usd"] = round(executed_size_usd, 2)
+    sizing["executed_size_eur"] = round(executed_size_eur, 2)
+
     # Track open trade for exit monitoring
     if action == "BUY":
         stop_price = current_price * (1 - stop_loss_pct / 100)
@@ -1849,14 +1968,20 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     _open_trades[ticker] = {
         "entry_time":    datetime.utcnow(),
         "entry_price":   current_price,
-        "quantity":      order.get("qty", round(qty, 6)),
+        "quantity":      submitted_qty,
+        "submitted_qty": submitted_qty,
+        "implied_qty":   round(qty, 6),
         "stop_price":    stop_price,
         "take_profit_price": take_profit_price,
         "hold_minutes":  hold_minutes,
         "hold_extension_count": 0,
         "hold_decision_json": hold_extension,
-        "size_eur":      final_size,
-        "size_usd":      final_size_usd,
+        "size_eur":      executed_size_eur,
+        "size_usd":      executed_size_usd,
+        "intended_size_eur": intended_size_eur,
+        "executed_size_eur": executed_size_eur,
+        "executed_size_usd": executed_size_usd,
+        "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
         "side":          action,
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
@@ -1892,7 +2017,12 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
 
     log_event("TRADE", "order_submitted", {
         "ticker": ticker, "side": action,
-        "size_eur": round(final_size, 2), "conviction": conviction,
+        "size_eur": round(executed_size_eur, 2),
+        "intended_size_eur": round(intended_size_eur, 2),
+        "submitted_qty": round(submitted_qty, 6),
+        "implied_qty": round(qty, 6),
+        "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
+        "conviction": conviction,
         "composite": composite, "order_class": order.get("order_class"),
         "rationale": llm_result.get("rationale"),
         "sizing": sizing,
@@ -2503,8 +2633,18 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     if trade["side"] == "SELL":
         pnl_pct = -pnl_pct
 
-    size_eur    = trade["size_eur"]
-    size_usd    = trade.get("size_usd") or _eur_to_usd(size_eur)
+    size_eur    = float(trade.get("executed_size_eur") or trade.get("size_eur") or 0)
+    size_usd    = float(trade.get("executed_size_usd") or trade.get("size_usd") or _eur_to_usd(size_eur))
+    if size_eur <= 0:
+        size_eur = float(trade.get("intended_size_eur") or 0)
+        size_usd = _eur_to_usd(size_eur)
+    if size_eur <= 0:
+        log_event("WARN", "trade_close_missing_exposure", {
+            "ticker": ticker,
+            "exit_reason": exit_reason,
+        })
+        size_eur = 1.0
+        size_usd = _eur_to_usd(size_eur)
     slippage    = size_eur * 0.0008   # Alpaca = $0 commission
     llm_cost    = 0.002
     net_pnl_pct = pnl_pct - (slippage + llm_cost) / size_eur * 100
@@ -2530,10 +2670,16 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "entry_price":     round(entry_price, 4),
         "exit_price":      round(exit_price, 4),
         "quantity":        trade.get("quantity"),
+        "submitted_qty":   trade.get("submitted_qty") or trade.get("quantity"),
+        "implied_qty":     trade.get("implied_qty"),
         "stop_price":      round(float(trade.get("stop_price") or 0), 4),
         "take_profit_price": round(float(trade.get("take_profit_price") or 0), 4),
         "size_eur":        round(size_eur, 2),
         "size_usd":        round(size_usd, 2),
+        "intended_size_eur": round(float(trade.get("intended_size_eur") or size_eur), 2),
+        "executed_size_eur": round(size_eur, 2),
+        "executed_size_usd": round(size_usd, 2),
+        "bracket_floor_qty_loss_pct": trade.get("bracket_floor_qty_loss_pct"),
         "pnl_pct":         round(pnl_pct, 4),
         "net_pnl_pct":     round(net_pnl_pct, 4),
         "pnl_eur":         round(net_pnl_pct / 100 * size_eur, 2),
@@ -2667,6 +2813,7 @@ def _submit_horizon_order(
         profile.get("max_trade_notional_eur", size_eur),
     )
     size_eur = min(size_eur, max_notional)
+    intended_size_eur = float(size_eur or 0)
     sizing["size_eur"] = round(size_eur, 2)
 
     current_price = _current_daily_price(ticker)
@@ -2677,6 +2824,28 @@ def _submit_horizon_order(
     size_usd = _eur_to_usd(size_eur)
     sizing["size_usd"] = round(size_usd, 2)
     qty = size_usd / current_price
+    use_bracket_orders = _env_value("USE_BRACKET_ORDERS", "true").lower() != "false"
+    floor_qty = math.floor(qty) if use_bracket_orders else round(qty, 6)
+    bracket_floor_qty_loss_pct = (
+        round(max(0.0, (qty - floor_qty) / qty * 100), 4)
+        if use_bracket_orders and qty > 0 else 0.0
+    )
+    sizing["intended_size_eur"] = round(intended_size_eur, 2)
+    sizing["implied_qty"] = round(qty, 6)
+    sizing["floor_qty"] = floor_qty
+    sizing["bracket_floor_qty_loss_pct"] = bracket_floor_qty_loss_pct
+    if use_bracket_orders and floor_qty < 1:
+        log_event("INFO", "bracket_floor_preflight_block", {
+            "ticker": ticker,
+            "horizon": horizon,
+            "size_eur": round(size_eur, 2),
+            "size_usd": round(size_usd, 2),
+            "current_price": round(current_price, 4),
+            "implied_qty": round(qty, 6),
+            "floor_qty": floor_qty,
+            "reason": "bracket_floor_would_waste_trade",
+        })
+        return {"error": "bracket_floor_would_waste_trade", "ticker": ticker}
     take_profit_pct = profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2)
     order = submit_market_order(
         ticker=ticker,
@@ -2693,6 +2862,13 @@ def _submit_horizon_order(
             "error": order["error"],
         })
         return order
+
+    submitted_qty = float(order.get("qty") or floor_qty or round(qty, 6))
+    executed_size_usd = submitted_qty * current_price
+    executed_size_eur = executed_size_usd / _eurusd_rate()
+    sizing["submitted_qty"] = round(submitted_qty, 6)
+    sizing["executed_size_usd"] = round(executed_size_usd, 2)
+    sizing["executed_size_eur"] = round(executed_size_eur, 2)
 
     if side.upper() == "BUY":
         stop_price = current_price * (1 - stop_loss_pct / 100)
@@ -2714,13 +2890,19 @@ def _submit_horizon_order(
     record = {
         "entry_time": datetime.utcnow(),
         "entry_price": current_price,
-        "quantity": order.get("qty", round(qty, 6)),
+        "quantity": submitted_qty,
+        "submitted_qty": submitted_qty,
+        "implied_qty": round(qty, 6),
         "stop_price": stop_price,
         "take_profit_price": take_profit_price,
         "hold_minutes": hold_minutes or 0,
         "hold_days": hold_days or 0,
-        "size_eur": size_eur,
-        "size_usd": size_usd,
+        "size_eur": executed_size_eur,
+        "size_usd": executed_size_usd,
+        "intended_size_eur": intended_size_eur,
+        "executed_size_eur": executed_size_eur,
+        "executed_size_usd": executed_size_usd,
+        "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
         "side": side.upper(),
         "composite_score": composite_score,
         "signals_json": signals_json or {},
@@ -2746,7 +2928,11 @@ def _submit_horizon_order(
         "ticker": ticker,
         "side": side.upper(),
         "horizon": horizon,
-        "size_eur": round(size_eur, 2),
+        "size_eur": round(executed_size_eur, 2),
+        "intended_size_eur": round(intended_size_eur, 2),
+        "submitted_qty": round(submitted_qty, 6),
+        "implied_qty": round(qty, 6),
+        "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
         "conviction": conviction,
         "composite": composite_score,
         "order_class": order.get("order_class"),

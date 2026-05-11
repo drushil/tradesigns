@@ -35,6 +35,7 @@ def render():
         params = {
             "Max drawdown": f"{profile['max_drawdown_pct']}%",
             "Max position":    f"{profile['max_position_pct']}%",
+            "Risk/trade":      f"{profile.get('risk_per_trade_pct', 1.0)}%",
             "Capital/trade":   f"{profile['capital_per_trade_pct']}%",
             "Cash buffer":     f"{profile['cash_buffer_pct']}%",
             "Stop loss":       f"{profile['stop_loss_pct']}%",
@@ -120,6 +121,7 @@ def render():
                 margin-bottom:8px">{p['display_name']} {'✓' if active else ''}</div>
           <div style="font-size:11px;color:#555;line-height:1.8">
             Max loss: {p['max_drawdown_pct']}%<br>
+            Risk/trade: {p.get('risk_per_trade_pct', 1.0)}%<br>
             Per trade: {p['capital_per_trade_pct']}%<br>
             VIX cap: {p['vix_ceiling']}<br>
             Shorts: {'yes' if p.get('allow_short_selling') else 'no'}<br>

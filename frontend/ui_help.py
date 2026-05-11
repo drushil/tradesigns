@@ -146,6 +146,7 @@ HELP_TEXT = {
 
     # Config and logs
     "Active Risk Profile": "Risk profile currently loaded from environment configuration.",
+    "Risk/trade": "Percent of capital the ATR sizing model is allowed to risk on one trade before grade and EV multipliers.",
     "Ticker Universe": "Symbols the agent scans, scores, and can trade.",
     "Signal Weights (current priors)": "Profile-level starting weights before learning adjustments.",
     "All Profiles Comparison": "Side-by-side summary of available risk profiles.",
