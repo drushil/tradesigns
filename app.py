@@ -50,6 +50,7 @@ PAGES = {
     "📡 Live Signals":     "signals",
     "🔄 Trades":           "trades",
     "📈 Performance":      "performance",
+    "🏆 Grading":          "grading",
     "🧠 Learning":         "learning",
     "💰 Yield & Sweep":    "yield",
     "📋 Portfolio Review": "portfolio_review",
