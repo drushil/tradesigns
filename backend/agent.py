@@ -222,6 +222,21 @@ def _is_eod_intraday_cleanup_window(now: datetime) -> bool:
     return close - _env_int("EOD_CLEANUP_BUFFER_MINUTES", 30) <= current < close
 
 
+def _is_leveraged_etf(ticker: str, profile: dict) -> bool:
+    """Return True if ticker is a leveraged ETF defined in the profile."""
+    if not profile.get("allow_leveraged_etfs"):
+        return False
+    return ticker.upper() in [t.upper() for t in profile.get("leveraged_etf_tickers", [])]
+
+
+def _leveraged_etf_max_hold_window(now: datetime = None) -> bool:
+    """Return True if we are past the leveraged ETF max-hold cutoff (default 3:45 PM ET)."""
+    now = now or datetime.now(timezone.utc)
+    ny_now = _to_new_york_time(now)
+    cutoff_minutes = 15 * 60 + 45  # 3:45 PM default
+    return (ny_now.hour * 60 + ny_now.minute) >= cutoff_minutes
+
+
 def _init_learning_engine() -> RegimeAwareWeightEngine:
     """Load latest weights from DB or use profile priors."""
     saved = get_latest_weights("global")
@@ -926,6 +941,16 @@ def _hydrate_open_trades():
             "llm_conviction": float(record.get("llm_conviction") or 0),
             "llm_rationale": record.get("llm_rationale") or "",
             "order_id": record.get("order_id"),
+            # Grading / partial-exit fields (added in migration v3)
+            "setup_grade":              record.get("setup_grade"),
+            "sector_confirmation":      record.get("sector_confirmation"),
+            "partial_target_price":     float(record["partial_target_price"]) if record.get("partial_target_price") is not None else None,
+            "partial_exit_pct":         float(record.get("partial_exit_pct") or 0.5),
+            "partial_exit_done":        bool(record.get("partial_exit_done") or False),
+            "partial_exit_qty":         float(record.get("partial_exit_qty") or 0),
+            "runner_atr_mult":          float(record.get("runner_atr_mult") or 0.8),
+            "runner_stop_price":        float(record["runner_stop_price"]) if record.get("runner_stop_price") is not None else None,
+            "vwap_thesis_strike_count": int(record.get("vwap_thesis_strike_count") or 0),
         }
 
 
@@ -972,6 +997,10 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
 
     # Don't promote mean-reversion trades
     if trade.get("mean_reversion_trade"):
+        return False
+
+    # Never promote leveraged ETFs to swing — daily decay makes overnight holds dangerous
+    if _is_leveraged_etf(ticker, profile):
         return False
 
     # Check concurrent swing limit before running expensive signal computation
@@ -1251,6 +1280,21 @@ def run_signal_cycle():
                         )
                         continue
 
+                # Leveraged ETFs require A+ grade — drop anything weaker
+                if _is_leveraged_etf(t, effective_profile) and setup_grade.grade != "A+":
+                    log_event("INFO", "leveraged_etf_grade_block", {
+                        "ticker": t, "grade": setup_grade.grade,
+                        "reason": "leveraged_etf_requires_a_plus",
+                    })
+                    _record_blocked_opportunity(
+                        t, candidate.get("action_hint"), candidate["composite"],
+                        candidate["signals_snap"], candidate["setup_context"],
+                        candidate["ticker_regime"], "ranking",
+                        "leveraged_etf_not_a_plus",
+                        ev_result=candidate.get("ev_result"),
+                    )
+                    continue
+
                 # Enforce minimum grade from dynamic risk budget
                 if grade_sort_key(setup_grade.grade) < grade_sort_key(min_grade):
                     log_event("INFO", "grade_below_minimum", {
@@ -1390,6 +1434,28 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         market_regime=getattr(ticker_regime_state, "market_regime", None),
         signals=signals_snap,
     )
+
+    # Leveraged ETF pre-entry gate (A+-only, VIX cap, no entries after 3:45 PM ET)
+    if _is_leveraged_etf(ticker, profile):
+        vix_now = float(portfolio_state.get("vix") or 20.0)
+        lev_vix_ceiling = float(profile.get("leveraged_etf_vix_ceiling", 22))
+        if vix_now >= lev_vix_ceiling:
+            log_event("INFO", "leveraged_etf_vix_block", {
+                "ticker": ticker, "vix": vix_now, "ceiling": lev_vix_ceiling,
+            })
+            return
+        if _leveraged_etf_max_hold_window():
+            log_event("INFO", "leveraged_etf_time_block", {
+                "ticker": ticker, "reason": "past_3_45pm_et_no_new_entries",
+            })
+            return
+        # Leveraged ETFs are A+-only entries
+        # setup_grade not yet computed here — defer to the grading pass via ev_blocked flag
+        # but we mark the candidate so the grading pass can enforce the A+ requirement
+        gate_reason = gate_reason or {}
+        if isinstance(gate_reason, dict):
+            gate_reason["leveraged_etf"] = True
+
     setup_context = _trade_setup_context(
         ticker, action_hint, composite, signals_snap, signal_result,
         ticker_regime_state, gate_reason=gate_reason,
@@ -1967,6 +2033,19 @@ def _check_exits(portfolio_state, profile):
             hold_target   = trade.get("max_hold_minutes") or trade["hold_minutes"]
 
             exit_reason = None
+
+            # Leveraged ETFs must be closed by profile's max_hold cutoff (default 3:45 PM ET)
+            if exit_reason is None and _is_leveraged_etf(ticker, profile):
+                max_hold_min = int(profile.get("leveraged_etf_max_hold_minutes", 345))
+                ny_now = _to_new_york_time(datetime.now(timezone.utc))
+                market_open_minutes = ny_now.hour * 60 + ny_now.minute - (9 * 60 + 30)
+                if market_open_minutes >= max_hold_min:
+                    exit_reason = "leveraged_etf_time_exit"
+                    log_event("INFO", "leveraged_etf_time_exit", {
+                        "ticker": ticker,
+                        "market_open_minutes": market_open_minutes,
+                        "max_hold_minutes": max_hold_min,
+                    })
 
             if trade.get("promoted_to_swing"):
                 # Chandelier trailing stop: highest_since_entry - (ATR × stop_mult)

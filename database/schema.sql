@@ -623,5 +623,5 @@ alter table if exists trades
         'macro_shock','take_profit_8pct','swing_promoted',
         'momentum_peak_decay','eod_cleanup',
         'thesis_invalidated','partial_runner_stop','a_plus_override',
-        'stale_no_position'
+        'stale_no_position','leveraged_etf_time_exit'
     ));
