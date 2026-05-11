@@ -1229,6 +1229,28 @@ def run_signal_cycle():
                 )
                 candidate["setup_grade"] = setup_grade
 
+                # EV-blocked candidates: A+/A override with probe size; B/C drop
+                if candidate.get("ev_blocked"):
+                    if setup_grade.grade in {"A+", "A"}:
+                        ev_override = candidate["ev_result"].copy()
+                        ev_override["size_multiplier"] = 0.35
+                        ev_override["ev_decision"] = "grade_ev_override_probe"
+                        ev_override["decision"] = "proceed"
+                        candidate["ev_result"] = ev_override
+                        log_event("INFO", "ev_block_overridden_by_grade", {
+                            "ticker": t, "grade": setup_grade.grade,
+                            "original_reason": candidate["ev_result"].get("reason"),
+                        })
+                    else:
+                        _record_blocked_opportunity(
+                            t, candidate.get("action_hint"), candidate["composite"],
+                            candidate["signals_snap"], candidate["setup_context"],
+                            candidate["ticker_regime"], "ev",
+                            candidate["ev_result"].get("reason", "ev_blocked"),
+                            ev_result=candidate["ev_result"],
+                        )
+                        continue
+
                 # Enforce minimum grade from dynamic risk budget
                 if grade_sort_key(setup_grade.grade) < grade_sort_key(min_grade):
                     log_event("INFO", "grade_below_minimum", {
@@ -1433,19 +1455,11 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         setup_context=setup_context,
         profile=profile,
     )
-    if ev_result["decision"] == "block":
-        log_event("INFO", "ev_blocked", {"ticker": ticker, **ev_result})
-        if action_hint == "SELL":
-            _log_short_candidate(
-                "short_candidate_ev_blocked", ticker, composite,
-                ev_result.get("reason", "ev_blocked"), profile, ticker_regime_state, ev_result,
-            )
-        _record_blocked_opportunity(
-            ticker, action_hint, composite, signals_snap, setup_context,
-            ticker_regime, "ev", ev_result.get("reason", "ev_blocked"),
-            ev_result=ev_result,
-        )
-        return
+    ev_blocked = ev_result["decision"] == "block"
+    if ev_blocked:
+        # Don't hard-block here — carry forward to grading pass.
+        # A+/A grades will override with probe size; B/C will be dropped there.
+        log_event("INFO", "ev_blocked_pending_grade", {"ticker": ticker, **ev_result})
     if ev_result.get("ev_decision") not in {None, "full_size", "exploration_full_size"}:
         log_event("INFO", "ev_sizing_adjusted", {
             "ticker": ticker,
@@ -1469,6 +1483,7 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         "news_headline": news_headline,
         "setup_context": setup_context,
         "ev_result": ev_result,
+        "ev_blocked": ev_blocked,
         "capital_base": capital_base,
         "action_hint": action_hint,
         "orb_score": signal_result.get("orb_score", 0.0),
