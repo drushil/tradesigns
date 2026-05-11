@@ -1790,7 +1790,10 @@ def opening_range_breakout_score(ticker: str) -> tuple[float, dict]:
 
     is_primary = et_min < primary_end
 
-    df = _get_bars(ticker, period="1d", interval="5m")
+    try:
+        df = _get_bars(ticker, period="1d", interval="5m")
+    except Exception:
+        df = None
     if df is None or len(df) < 6:
         result = (0.0, {"active": False, "reason": "insufficient_data"})
         _orb_cache[cache_key] = (now_ts, result)
