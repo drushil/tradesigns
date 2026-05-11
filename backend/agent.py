@@ -1632,12 +1632,6 @@ def run_signal_cycle():
     # Check open trades for stop-loss / time exit
     _check_exits(portfolio_state, effective_profile)
 
-    # Measure whether blocked/skipped candidates would have worked afterward.
-    _replay_blocked_opportunities()
-
-    # Measure whether recent exits left follow-through on the table.
-    _replay_closed_trade_exits()
-
     # Save portfolio snapshot
     _save_snapshot(portfolio_state, regime)
 
@@ -3495,6 +3489,23 @@ def run_nightly_sweep():
             )
     except Exception as e:
         log_event("ERROR", "nightly_sweep_failed", {"error": str(e)[:100]})
+
+
+# ── Post-market analytics (runs after market close, Mon–Fri) ─────────────────
+
+def run_post_market_analytics():
+    """
+    Runs after US market close (21:05 UTC / 5:05 PM ET).
+    Replays blocked opportunities and closed trade exits against post-event
+    price action. Kept out of the signal cycle to avoid I/O overhead.
+    """
+    try:
+        log_event("INFO", "post_market_analytics_start", {})
+        _replay_blocked_opportunities()
+        _replay_closed_trade_exits()
+        log_event("INFO", "post_market_analytics_complete", {})
+    except Exception as e:
+        log_event("ERROR", "post_market_analytics_failed", {"error": str(e)[:160]})
 
 
 # ── Weekly portfolio review (advisory, observation only) ─────────────────────
