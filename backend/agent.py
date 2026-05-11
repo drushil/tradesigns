@@ -1403,6 +1403,8 @@ def run_signal_cycle():
     """Main cycle: compute signals → gate → decide → execute."""
     global _learning_engine
 
+    cycle_start_utc = datetime.now(timezone.utc)
+
     missing_config = _missing_runtime_config()
     if missing_config:
         log_event("ERROR", "runtime_config_missing", {
@@ -1430,6 +1432,21 @@ def run_signal_cycle():
     weights          = _learning_engine.get_weights(regime)
     recent_trades    = get_recent_trades(days=30)
     _hydrate_open_trades()
+
+    # Staleness guard: if this cycle started too late (queued behind a cancelled
+    # run), skip signal computation and only run exit checks. Bracket orders
+    # protect positions at the broker; signal decisions on stale data cause harm.
+    cycle_age_seconds = (datetime.now(timezone.utc) - cycle_start_utc).total_seconds()
+    stale_threshold = _env_int("CYCLE_STALENESS_THRESHOLD_SECONDS", 180)
+    cycle_stale = cycle_age_seconds > stale_threshold
+    if cycle_stale:
+        log_event("WARN", "cycle_stale_exits_only", {
+            "cycle_age_seconds": round(cycle_age_seconds),
+            "threshold_seconds": stale_threshold,
+        })
+        _check_exits(portfolio_state, effective_profile)
+        _save_snapshot(portfolio_state, regime)
+        return
 
     log_event("INFO", "cycle_start", {
         "regime": regime, "equity": portfolio_state["equity"],

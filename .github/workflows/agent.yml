@@ -26,7 +26,7 @@ env:
 
 concurrency:
   group: trading-agent-cycle
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-agent-cycle:
