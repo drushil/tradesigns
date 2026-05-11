@@ -593,6 +593,55 @@ def get_logs(level: str = None, limit: int = 100) -> list:
     return result.data or []
 
 
+# ── Signal percentile baselines ───────────────────────────────────────────────
+
+def get_signal_percentiles(tickers: list) -> dict:
+    """
+    Returns {ticker: {sample_count, p50, p70, p85, p90, p95, window_composites}}
+    for all requested tickers. Missing tickers return {}.
+    """
+    if not tickers:
+        return {}
+    try:
+        db = get_client()
+        upper_tickers = [t.upper() for t in tickers]
+        result = (
+            db.table("signal_percentiles")
+            .select("ticker,sample_count,p50,p70,p85,p90,p95,window_composites")
+            .in_("ticker", upper_tickers)
+            .execute()
+        )
+        return {row["ticker"]: row for row in (result.data or [])}
+    except Exception as e:
+        print(f"[PERCENTILE_READ_FAILED] {str(e)[:200]}")
+        return {}
+
+
+def upsert_signal_percentiles(ticker: str, data: dict) -> dict:
+    """
+    Persist updated percentile thresholds and rolling window for a ticker.
+    data: {sample_count, p50, p70, p85, p90, p95, window_composites (list)}
+    """
+    try:
+        db = get_client(write=True)
+        record = {
+            "ticker":            ticker.upper(),
+            "updated_at":        datetime.utcnow().isoformat() + "Z",
+            "sample_count":      int(data.get("sample_count") or 0),
+            "p50":               data.get("p50"),
+            "p70":               data.get("p70"),
+            "p85":               data.get("p85"),
+            "p90":               data.get("p90"),
+            "p95":               data.get("p95"),
+            "window_composites": data.get("window_composites") or [],
+        }
+        result = db.table("signal_percentiles").upsert(record, on_conflict="ticker").execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[PERCENTILE_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 # ── Views ─────────────────────────────────────────────────────────────────────
 
 def get_regime_performance_view() -> list:

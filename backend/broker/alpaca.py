@@ -297,6 +297,37 @@ def close_position(ticker: str) -> dict:
         return {"error": str(e), "ticker": ticker}
 
 
+def close_partial_position(ticker: str, qty: float, side: str) -> dict:
+    """
+    Close a fractional part of an open position via a plain market order.
+    side: 'sell' to reduce a long, 'buy' to reduce a short.
+    """
+    try:
+        from alpaca.trading.requests import MarketOrderRequest
+        from alpaca.trading.enums import OrderSide, TimeInForce
+
+        close_qty = round(qty, 6)
+        if close_qty <= 0:
+            return {"error": "partial_qty_zero", "ticker": ticker}
+        client = _get_trading_client()
+        req = MarketOrderRequest(
+            symbol=ticker,
+            qty=close_qty,
+            side=OrderSide.SELL if side.lower() == "sell" else OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = client.submit_order(req)
+        return {
+            "order_id": str(order.id),
+            "ticker": ticker,
+            "side": side,
+            "qty": float(order.qty or close_qty),
+            "status": str(order.status),
+        }
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker}
+
+
 def close_all_positions() -> dict:
     """Emergency close-all for circuit breaker."""
     try:

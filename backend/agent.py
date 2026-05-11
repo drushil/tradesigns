@@ -29,7 +29,8 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
                                           scan_for_macro_shock,
                                           detect_momentum_swing)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
-                                          close_position, pre_trade_gate, compute_position_size,
+                                          close_position, close_partial_position,
+                                          pre_trade_gate, compute_position_size,
                                           scan_for_extreme_dips, get_order_by_id,
                                           cancel_order_by_id, submit_stop_order,
                                           cancel_open_orders_for_symbol)
@@ -44,7 +45,15 @@ from database.client             import (insert_trade, insert_signal, get_recent
                                           close_open_trade_record,
                                           insert_blocked_opportunity,
                                           get_unchecked_blocked_opportunities,
-                                          update_blocked_opportunity_replay)
+                                          update_blocked_opportunity_replay,
+                                          get_signal_percentiles,
+                                          upsert_signal_percentiles)
+from backend.grading.engine      import (grade_setup, compute_sector_confirmation,
+                                          get_ticker_percentile_rank,
+                                          merge_percentile_window,
+                                          compute_percentile_thresholds,
+                                          grade_sort_key, effective_size_multiplier,
+                                          a_plus_hard_blocks, SetupGrade)
 from backend.sweep.agent         import (compute_sweep_plan, execute_sweep,
                                           recall_sweep, has_active_sweep)
 from backend.dividends.scanner   import (scan_dividend_calendar, log_dividend_opportunity)
@@ -128,6 +137,12 @@ _last_shock_result   = {
 # Per-cycle signal cache — keyed by ticker, expires after 8 min (one cycle apart at 10-min cadence)
 _signal_cache: dict[str, tuple[datetime, dict]] = {}
 _SIGNAL_CACHE_TTL_SECONDS = 480
+
+# Composites collected across all tickers this cycle — used for sector confirmation
+_cycle_composites: dict[str, float] = {}
+
+# Percentile baseline from DB — loaded once per cycle
+_cycle_db_percentiles: dict[str, dict] = {}
 
 def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
     first = date(year, month, 1)
@@ -1073,6 +1088,22 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
     return True
 
 
+# ── Percentile window update ─────────────────────────────────────────────────
+
+def _update_signal_percentiles(cycle_composites: dict, db_percentiles: dict):
+    """Best-effort per-ticker percentile window update after each cycle."""
+    for ticker, composite in cycle_composites.items():
+        try:
+            existing = db_percentiles.get(ticker, {})
+            window = list(existing.get("window_composites") or [])
+            window = merge_percentile_window(composite, window, max_window=200)
+            thresholds = compute_percentile_thresholds(window)
+            thresholds["window_composites"] = window
+            upsert_signal_percentiles(ticker, thresholds)
+        except Exception:
+            pass  # never crash the cycle on percentile writes
+
+
 # ── Core cycle ────────────────────────────────────────────────────────────────
 
 def run_signal_cycle():
@@ -1150,6 +1181,10 @@ def run_signal_cycle():
         log_event("WARN", "earnings_guard_scan_failed", {"error": str(e)[:100]})
 
     if _allows_intraday():
+        # Reset cycle-level state
+        global _cycle_composites, _cycle_db_percentiles
+        _cycle_composites = {}
+
         candidates = []
         for ticker in TICKERS:
             try:
@@ -1162,8 +1197,85 @@ def run_signal_cycle():
                     candidates.append(candidate)
             except Exception as e:
                 log_event("ERROR", f"ticker_error_{ticker}", {"error": str(e)})
+
+        # ── Grading pass (uses full cycle composites for sector confirmation) ─
+        _cycle_db_percentiles = {}
+        try:
+            _cycle_db_percentiles = get_signal_percentiles(list(_cycle_composites.keys()))
+        except Exception as e:
+            log_event("WARN", "percentile_load_failed", {"error": str(e)[:120]})
+
+        # Update percentile windows for all tickers computed this cycle
+        _update_signal_percentiles(_cycle_composites, _cycle_db_percentiles)
+
+        min_grade = effective_profile.get("min_grade_required", "B")
+        graded_candidates = []
+        for candidate in candidates:
+            try:
+                t = candidate["ticker"]
+                sector_conf = compute_sector_confirmation(t, _cycle_composites)
+                pct_rank = get_ticker_percentile_rank(
+                    t, candidate["composite"], _cycle_db_percentiles
+                )
+                setup_grade = grade_setup(
+                    t,
+                    candidate["composite"],
+                    candidate["signals_snap"],
+                    candidate["ticker_regime_state"],
+                    sector_conf,
+                    pct_rank,
+                    candidate.get("orb_score", 0.0),
+                    effective_profile,
+                )
+                candidate["setup_grade"] = setup_grade
+
+                # EV-blocked candidates: A+/A override with probe size; B/C drop
+                if candidate.get("ev_blocked"):
+                    if setup_grade.grade in {"A+", "A"}:
+                        ev_override = candidate["ev_result"].copy()
+                        ev_override["size_multiplier"] = 0.35
+                        ev_override["ev_decision"] = "grade_ev_override_probe"
+                        ev_override["decision"] = "proceed"
+                        candidate["ev_result"] = ev_override
+                        log_event("INFO", "ev_block_overridden_by_grade", {
+                            "ticker": t, "grade": setup_grade.grade,
+                            "original_reason": candidate["ev_result"].get("reason"),
+                        })
+                    else:
+                        _record_blocked_opportunity(
+                            t, candidate.get("action_hint"), candidate["composite"],
+                            candidate["signals_snap"], candidate["setup_context"],
+                            candidate["ticker_regime"], "ev",
+                            candidate["ev_result"].get("reason", "ev_blocked"),
+                            ev_result=candidate["ev_result"],
+                        )
+                        continue
+
+                # Enforce minimum grade from dynamic risk budget
+                if grade_sort_key(setup_grade.grade) < grade_sort_key(min_grade):
+                    log_event("INFO", "grade_below_minimum", {
+                        "ticker": t, "grade": setup_grade.grade,
+                        "min_grade": min_grade, "composite": candidate["composite"],
+                    })
+                    _record_blocked_opportunity(
+                        t, candidate.get("action_hint"), candidate["composite"],
+                        candidate["signals_snap"], candidate["setup_context"],
+                        candidate["ticker_regime"], "ranking",
+                        f"grade_{setup_grade.grade}_below_min_{min_grade}",
+                        ev_result=candidate.get("ev_result"),
+                    )
+                    continue
+
+                graded_candidates.append(candidate)
+            except Exception as e:
+                log_event("WARN", f"grade_error_{candidate['ticker']}", {"error": str(e)[:120]})
+                candidate["setup_grade"] = None
+                graded_candidates.append(candidate)
+
+        candidates = graded_candidates
         candidates.sort(
             key=lambda c: (
+                grade_sort_key((c.get("setup_grade") or SetupGrade("B", 0.6, 0.5, 0.8, False, [], 0, 0.5, 40, False)).grade),
                 float(c.get("setup_context", {}).get("candidate_rank_score") or 0),
                 abs(float(c.get("composite") or 0)),
             ),
@@ -1249,6 +1361,8 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
     )
     _signal_cache[ticker] = (datetime.now(timezone.utc), signal_result)
     composite     = signal_result["composite_score"]
+    # Capture for sector confirmation (used after the full evaluation loop)
+    _cycle_composites[ticker] = composite
     signals_snap  = signal_result["signals"]
     atr_data       = signal_result.get("atr_data") or {}
     regime_debug   = _regime_debug_payload(ticker_regime_state, signal_result)
@@ -1341,19 +1455,11 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         setup_context=setup_context,
         profile=profile,
     )
-    if ev_result["decision"] == "block":
-        log_event("INFO", "ev_blocked", {"ticker": ticker, **ev_result})
-        if action_hint == "SELL":
-            _log_short_candidate(
-                "short_candidate_ev_blocked", ticker, composite,
-                ev_result.get("reason", "ev_blocked"), profile, ticker_regime_state, ev_result,
-            )
-        _record_blocked_opportunity(
-            ticker, action_hint, composite, signals_snap, setup_context,
-            ticker_regime, "ev", ev_result.get("reason", "ev_blocked"),
-            ev_result=ev_result,
-        )
-        return
+    ev_blocked = ev_result["decision"] == "block"
+    if ev_blocked:
+        # Don't hard-block here — carry forward to grading pass.
+        # A+/A grades will override with probe size; B/C will be dropped there.
+        log_event("INFO", "ev_blocked_pending_grade", {"ticker": ticker, **ev_result})
     if ev_result.get("ev_decision") not in {None, "full_size", "exploration_full_size"}:
         log_event("INFO", "ev_sizing_adjusted", {
             "ticker": ticker,
@@ -1377,8 +1483,10 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         "news_headline": news_headline,
         "setup_context": setup_context,
         "ev_result": ev_result,
+        "ev_blocked": ev_blocked,
         "capital_base": capital_base,
         "action_hint": action_hint,
+        "orb_score": signal_result.get("orb_score", 0.0),
     }
 
 
@@ -1397,25 +1505,50 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     ev_result = candidate["ev_result"]
     capital_base = candidate["capital_base"]
 
-    # 5. LLM decision (gated by hourly limit)
-    if not _can_call_llm():
-        log_event("WARN", "llm_limit_hit", {"ticker": ticker})
-        _record_blocked_opportunity(
-            ticker, candidate.get("action_hint"), composite, signals_snap, setup_context,
-            ticker_regime, "llm", "llm_limit_hit", ev_result=ev_result,
-        )
-        return
+    # ── A+ setup grade — override soft LLM blocks ────────────────────────────
+    setup_grade: Optional[SetupGrade] = candidate.get("setup_grade")
+    is_a_plus = setup_grade is not None and setup_grade.grade == "A+"
+    hard_blocks = a_plus_hard_blocks()
+    action = _deterministic_action(composite)
 
-    llm_result = llm_signal_decision(
-        ticker, composite, ticker_regime, news_headline, profile,
-        signal_scores   = signals_snap,
-        atr_data        = atr_data,
-        regime_context  = {
-            "market_regime": getattr(ticker_regime_state, "market_regime", ""),
-            "vix":           portfolio_state.get("vix", ""),
-        },
-    )
-    _record_llm_call()
+    # 5. LLM decision (gated by hourly limit)
+    llm_result = None
+    if not _can_call_llm():
+        if is_a_plus:
+            # A+ escalation: skip LLM, proceed with probe size
+            log_event("INFO", "a_plus_llm_limit_override", {
+                "ticker": ticker, "composite": composite,
+                "grade": setup_grade.grade, "action": action,
+            })
+            llm_result = {
+                "action": action,
+                "conviction": max(abs(composite), 0.55),
+                "hold_minutes": int(profile.get("max_hold_minutes", 45)),
+                "stop_loss_pct": float(profile.get("stop_loss_pct", 2.0)),
+                "rationale": "a_plus_llm_limit_override",
+            }
+            ev_result = ev_result.copy()
+            ev_result["size_multiplier"] = min(ev_result.get("size_multiplier", 1.0), 0.35)
+            ev_result["ev_decision"] = "a_plus_probe"
+        else:
+            log_event("WARN", "llm_limit_hit", {"ticker": ticker})
+            _record_blocked_opportunity(
+                ticker, candidate.get("action_hint"), composite, signals_snap, setup_context,
+                ticker_regime, "llm", "llm_limit_hit", ev_result=ev_result,
+            )
+            return
+
+    if llm_result is None:
+        llm_result = llm_signal_decision(
+            ticker, composite, ticker_regime, news_headline, profile,
+            signal_scores   = signals_snap,
+            atr_data        = atr_data,
+            regime_context  = {
+                "market_regime": getattr(ticker_regime_state, "market_regime", ""),
+                "vix":           portfolio_state.get("vix", ""),
+            },
+        )
+        _record_llm_call()
     suggested_action = str(llm_result.get("action", "HOLD")).upper()
     action = _deterministic_action(composite)
     raw_llm_conviction = llm_result.get("conviction", 0)
@@ -1431,24 +1564,36 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     })
 
     if suggested_action == "HOLD":
-        log_event("INFO", "llm_hold_veto", {
-            "ticker": ticker,
-            "composite": composite,
-            "rationale": llm_result.get("rationale", ""),
-        })
-        _record_blocked_opportunity(
-            ticker, action, composite, signals_snap, setup_context,
-            ticker_regime, "llm",
-            llm_result.get("rationale", "llm_hold_veto"),
-            ev_result=ev_result,
-        )
-        if action == "SELL":
-            _log_short_candidate(
-                "short_candidate_llm_hold", ticker, composite,
-                llm_result.get("rationale", "llm_hold"), profile, ticker_regime_state,
-                {"llm_conviction": llm_conviction},
+        if is_a_plus:
+            # A+ escalation: override LLM HOLD — deterministic action with probe size
+            log_event("INFO", "a_plus_llm_hold_override", {
+                "ticker": ticker, "composite": composite,
+                "grade": setup_grade.grade, "llm_rationale": llm_result.get("rationale", ""),
+            })
+            suggested_action = action
+            # Force probe size — don't go full size on an LLM-overridden entry
+            ev_result = ev_result.copy()
+            ev_result["size_multiplier"] = min(ev_result.get("size_multiplier", 1.0), 0.35)
+            ev_result["ev_decision"] = "a_plus_probe"
+        else:
+            log_event("INFO", "llm_hold_veto", {
+                "ticker": ticker,
+                "composite": composite,
+                "rationale": llm_result.get("rationale", ""),
+            })
+            _record_blocked_opportunity(
+                ticker, action, composite, signals_snap, setup_context,
+                ticker_regime, "llm",
+                llm_result.get("rationale", "llm_hold_veto"),
+                ev_result=ev_result,
             )
-        return
+            if action == "SELL":
+                _log_short_candidate(
+                    "short_candidate_llm_hold", ticker, composite,
+                    llm_result.get("rationale", "llm_hold"), profile, ticker_regime_state,
+                    {"llm_conviction": llm_conviction},
+                )
+            return
     if suggested_action in {"BUY", "SELL"} and suggested_action != action:
         log_event("INFO", "llm_direction_conflict", {
             "ticker": ticker,
@@ -1495,7 +1640,12 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, ticker_regime_state)
     final_size = sizing["size_eur"]
     ev_size_multiplier = float(ev_result.get("size_multiplier") or 1.0)
-    final_size *= ev_size_multiplier
+    # Apply grade multiplier on top of EV multiplier (capped at 2.0× to prevent runaway sizing)
+    if setup_grade is not None and setup_grade.size_multiplier > 0:
+        combined_mult = effective_size_multiplier(setup_grade, ev_size_multiplier)
+    else:
+        combined_mult = ev_size_multiplier
+    final_size *= combined_mult
     if action == "SELL":
         final_size = _cap_short_notional(final_size, capital_base, profile)
     max_notional = _env_float(
@@ -1506,6 +1656,8 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     sizing["size_eur"] = round(final_size, 2)
     sizing["ev_decision"] = ev_result.get("ev_decision")
     sizing["ev_size_multiplier"] = round(ev_size_multiplier, 3)
+    sizing["grade_size_multiplier"] = round(setup_grade.size_multiplier, 3) if setup_grade else 1.0
+    sizing["combined_size_multiplier"] = round(combined_mult, 3)
     sizing["ev_result"] = ev_result
     sizing["setup_context"] = setup_context
 
@@ -1595,6 +1747,22 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         ticker, action, ticker_regime, signal_result,
         horizon="short", mean_reversion_trade=mean_reversion_trade,
     )
+
+    # Compute grade-differentiated partial exit target and runner ATR stop
+    atr_raw = float(atr_data.get("atr_raw") or (current_price * float(atr_data.get("atr_pct", 2.5)) / 100))
+    if setup_grade is not None and setup_grade.grade in {"A+", "A", "B"}:
+        partial_atr_mult = 1.5 if setup_grade.grade == "A+" else 1.2
+        if action == "BUY":
+            partial_target_price = current_price + atr_raw * partial_atr_mult
+        else:
+            partial_target_price = current_price - atr_raw * partial_atr_mult
+        partial_exit_pct = setup_grade.partial_exit_pct
+        runner_atr_mult = setup_grade.runner_atr_multiplier
+    else:
+        partial_target_price = None
+        partial_exit_pct = 0.5
+        runner_atr_mult = 0.8
+
     _open_trades[ticker] = {
         "entry_time":    datetime.utcnow(),
         "entry_price":   current_price,
@@ -1622,6 +1790,20 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "llm_conviction": conviction,
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
+        # Grade metadata
+        "setup_grade":   setup_grade.grade if setup_grade else None,
+        "sector_confirmation": setup_grade.sector_confirmation if setup_grade else None,
+        "percentile_rank": setup_grade.percentile_rank if setup_grade else None,
+        "grade_reasons": setup_grade.reasons if setup_grade else [],
+        # Partial exit + runner tracking
+        "partial_target_price": partial_target_price,
+        "partial_exit_pct":    partial_exit_pct,
+        "partial_exit_done":   False,
+        "partial_exit_qty":    0.0,
+        "runner_atr_mult":     runner_atr_mult,
+        "runner_stop_price":   None,
+        # Thesis invalidation strike counter
+        "vwap_thesis_strike_count": 0,
     }
     save_open_trade(ticker, _open_trades[ticker])
 
@@ -1648,6 +1830,116 @@ def _process_ticker(ticker, regime, weights, profile, portfolio_state, recent_tr
     )
     if candidate:
         _execute_trade_candidate(candidate, profile, portfolio_state)
+
+
+def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
+    """
+    2 consecutive cycles where price is on the wrong side of VWAP kills the breakout thesis.
+    Uses only the signal cache — zero extra API calls.
+    OR: 1 VWAP strike + tape deterioration → immediate exit.
+    """
+    cached = _signal_cache.get(ticker)
+    if cached is None:
+        return None
+    signals_now = cached[1].get("signals", {})
+    vwap_val = signals_now.get("vwap_deviation") or {}
+    tape_val = signals_now.get("tape_aggression") or {}
+    vwap_score = float(vwap_val.get("score", 0) if isinstance(vwap_val, dict) else 0)
+    tape_score = float(tape_val.get("score", 0) if isinstance(tape_val, dict) else 0)
+
+    side = trade.get("side", "BUY")
+    direction = 1 if side == "BUY" else -1
+
+    # vwap_score > 0 = price BELOW VWAP. For a BUY breakout that's a thesis threat.
+    # vwap_score < 0 = price ABOVE VWAP. For a SELL breakout that's a thesis threat.
+    vwap_against = (direction == 1 and vwap_score > 0.2) or (direction == -1 and vwap_score < -0.2)
+    tape_against = (tape_score * direction) < -0.2
+
+    if vwap_against:
+        count = int(_open_trades[ticker].get("vwap_thesis_strike_count", 0)) + 1
+        _open_trades[ticker]["vwap_thesis_strike_count"] = count
+        if count >= 2:
+            log_event("INFO", "thesis_invalidated_vwap_2strike", {
+                "ticker": ticker, "vwap_score": round(vwap_score, 3),
+                "strikes": count, "side": side,
+            })
+            return "thesis_invalidated"
+        if tape_against:
+            log_event("INFO", "thesis_invalidated_vwap_tape", {
+                "ticker": ticker, "vwap_score": round(vwap_score, 3),
+                "tape_score": round(tape_score, 3), "side": side,
+            })
+            return "thesis_invalidated"
+    else:
+        _open_trades[ticker]["vwap_thesis_strike_count"] = 0
+    return None
+
+
+def _check_partial_exit(ticker: str, trade: dict, current_price: float):
+    """
+    Execute a partial exit if the price has reached the grade-defined target.
+    Updates _open_trades with runner stop after the partial.
+    No-op if partial target is not set or already done.
+    """
+    partial_target = trade.get("partial_target_price")
+    if not partial_target:
+        return
+
+    side = trade.get("side", "BUY")
+    target_hit = (side == "BUY" and current_price >= partial_target) or \
+                 (side == "SELL" and current_price <= partial_target)
+    if not target_hit:
+        return
+
+    total_qty = float(trade.get("quantity") or 0)
+    if total_qty <= 0:
+        return
+
+    partial_pct = float(trade.get("partial_exit_pct") or 0.5)
+    close_qty = round(total_qty * partial_pct, 6)
+    if close_qty <= 0:
+        return
+
+    close_side = "sell" if side == "BUY" else "buy"
+    result = close_partial_position(ticker, close_qty, close_side)
+    if result.get("error"):
+        log_event("WARN", "partial_exit_failed", {
+            "ticker": ticker, "close_qty": close_qty, "error": result["error"],
+        })
+        return
+
+    remaining_qty = total_qty - close_qty
+    runner_atr_mult = float(trade.get("runner_atr_mult") or 1.0)
+
+    # Compute runner trailing stop from current price
+    try:
+        from backend.signals.engine import compute_atr as _compute_atr
+        atr_info = _compute_atr(ticker)
+        atr_raw = float(atr_info.get("atr_raw") or (current_price * 0.025))
+    except Exception:
+        atr_raw = current_price * 0.025
+
+    if side == "BUY":
+        runner_stop = current_price - atr_raw * runner_atr_mult
+    else:
+        runner_stop = current_price + atr_raw * runner_atr_mult
+
+    _open_trades[ticker]["partial_exit_done"] = True
+    _open_trades[ticker]["partial_exit_qty"] = close_qty
+    _open_trades[ticker]["quantity"] = remaining_qty
+    _open_trades[ticker]["runner_stop_price"] = round(runner_stop, 4)
+
+    log_event("TRADE", "partial_exit_executed", {
+        "ticker": ticker, "side": side, "close_qty": close_qty,
+        "remaining_qty": remaining_qty, "partial_pct": partial_pct,
+        "exit_price": current_price, "partial_target": round(partial_target, 4),
+        "runner_stop": round(runner_stop, 4), "runner_atr_mult": runner_atr_mult,
+        "order_id": result.get("order_id"),
+    })
+    try:
+        save_open_trade(ticker, _open_trades[ticker])
+    except Exception:
+        pass
 
 
 def _check_exits(portfolio_state, profile):
@@ -1726,8 +2018,17 @@ def _check_exits(portfolio_state, profile):
                 if exit_reason is None and int(trade.get("hold_extension_count") or 0) > 0:
                     exit_reason = _check_momentum_exit(ticker, trade, profile)
 
+                # Partial exit + runner check (before stop/TP — runner may have its own stop)
+                if exit_reason is None and not trade.get("partial_exit_done"):
+                    _check_partial_exit(ticker, trade, current_price)
+
+                # Thesis invalidation: 2 consecutive VWAP-against closes
+                if exit_reason is None and not trade.get("mean_reversion_trade"):
+                    exit_reason = _check_thesis_invalidation(ticker, trade)
+
                 # Stop-loss and take-profit always evaluated first
-                stop_price        = trade["stop_price"]
+                # If runner is active, use runner_stop_price in place of original stop
+                stop_price = float(trade.get("runner_stop_price") or 0) or trade["stop_price"]
                 take_profit_price = trade.get("take_profit_price")
 
                 if trade["side"] == "SELL":
