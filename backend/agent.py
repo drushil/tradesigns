@@ -851,11 +851,20 @@ def _replay_blocked_opportunities():
 
     checked = 0
     updated = 0
+    skipped = 0
     for opp in opportunities:
         checked += 1
         try:
             replay = _replay_one_blocked_opportunity(opp, horizon)
             if not replay:
+                # No bars returned — mark as checked so this row is never retried.
+                update_blocked_opportunity_replay(opp.get("id"), {
+                    "max_favorable_pct": None,
+                    "max_adverse_pct": None,
+                    "close_after_pct": None,
+                    "replay_result_json": {"skipped": "no_bars", "horizon_minutes": horizon},
+                })
+                skipped += 1
                 continue
             result = update_blocked_opportunity_replay(opp.get("id"), replay)
             if not result.get("error"):
@@ -870,6 +879,7 @@ def _replay_blocked_opportunities():
         log_event("INFO", "blocked_opportunity_replay_complete", {
             "checked": checked,
             "updated": updated,
+            "skipped_no_bars": skipped,
             "horizon_minutes": horizon,
         })
 
@@ -941,11 +951,18 @@ def _replay_closed_trade_exits():
 
     checked = 0
     updated = 0
+    skipped = 0
     for trade in trades:
         checked += 1
         try:
             replay = _replay_one_closed_trade_exit(trade, horizon)
             if not replay:
+                # No bars returned — mark as checked so this row is never retried.
+                update_trade_post_exit_replay(trade.get("id"), {
+                    "post_exit_horizon_minutes": horizon,
+                    "post_exit_result_json": {"skipped": "no_bars", "horizon_minutes": horizon},
+                })
+                skipped += 1
                 continue
             result = update_trade_post_exit_replay(trade.get("id"), replay)
             if not result.get("error"):
@@ -961,6 +978,7 @@ def _replay_closed_trade_exits():
         log_event("INFO", "closed_trade_exit_replay_complete", {
             "checked": checked,
             "updated": updated,
+            "skipped_no_bars": skipped,
             "horizon_minutes": horizon,
         })
 

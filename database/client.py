@@ -202,15 +202,23 @@ def get_recent_trades(days: int = 30, ticker: str = None) -> list:
 
 
 def get_unchecked_closed_trades_for_replay(min_age_minutes: int = 20, limit: int = 50,
-                                           exit_reasons: list[str] = None) -> list:
-    """Fetch closed trades old enough to replay against post-exit price action."""
+                                           exit_reasons: list[str] = None,
+                                           max_age_days: int = 4) -> list:
+    """Fetch closed trades eligible for post-exit replay.
+
+    Only fetches trades within the yfinance 1m data window (max_age_days, default 4).
+    Oldest-first ordering within that window ensures newest trades are never starved.
+    """
     try:
-        cutoff = (datetime.utcnow() - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        now = datetime.utcnow()
+        recent_cutoff = (now - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        oldest_cutoff = (now - timedelta(days=max_age_days)).isoformat() + "Z"
         db = get_client()
         q = (db.table("trades")
              .select("id,ticker,side,exit_price,exit_reason,exit_time,created_at,net_pnl_pct,setup_grade")
              .is_("post_exit_checked_at", "null")
-             .lte("created_at", cutoff)
+             .gte("created_at", oldest_cutoff)
+             .lte("created_at", recent_cutoff)
              .order("created_at", desc=False)
              .limit(limit))
         if exit_reasons:
@@ -364,15 +372,22 @@ def insert_blocked_opportunity(opportunity: dict) -> dict:
             return {"error": str(e)}
 
 
-def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 50) -> list:
-    """Fetch blocked opportunities old enough to replay against subsequent price action."""
+def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 50,
+                                        max_age_days: int = 4) -> list:
+    """Fetch blocked opportunities eligible for replay against subsequent price action.
+
+    Only fetches rows within the yfinance 1m data window (max_age_days, default 4).
+    """
     try:
-        cutoff = (datetime.utcnow() - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        now = datetime.utcnow()
+        recent_cutoff = (now - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        oldest_cutoff = (now - timedelta(days=max_age_days)).isoformat() + "Z"
         db = get_client()
         result = (db.table("blocked_opportunities")
                   .select("*")
                   .is_("replay_checked_at", "null")
-                  .lte("created_at", cutoff)
+                  .gte("created_at", oldest_cutoff)
+                  .lte("created_at", recent_cutoff)
                   .order("created_at", desc=False)
                   .limit(limit)
                   .execute())
