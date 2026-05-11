@@ -3,7 +3,9 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import os
+import html
 from frontend.ticker_profiles import ticker_profile_html
+from frontend.ui_help import button, info_label, metric
 
 # ── All 10 signals + earnings multiplier ─────────────────────────────────────
 ALL_SIGNALS = {
@@ -85,13 +87,13 @@ def render():
 
     weighted_count = sum(1 for meta in ALL_SIGNALS.values() if meta["db_col"])
     c_total, c_weighted, c_multiplier = st.columns(3)
-    c_total.metric("Signals", len(ALL_SIGNALS))
-    c_weighted.metric("Weighted scores", weighted_count)
-    c_multiplier.metric("Multiplier", "Earnings")
+    metric(c_total, "Signals", len(ALL_SIGNALS))
+    metric(c_weighted, "Weighted scores", weighted_count)
+    metric(c_multiplier, "Multiplier", "Earnings")
 
     col_r, col_info = st.columns([1, 4])
     with col_r:
-        run_now = st.button("🔄 Compute Signals Now", width="stretch")
+        run_now = button("🔄 Compute Signals Now", width="stretch")
     with col_info:
         st.info("Auto-refreshes every 5 min during market hours. Click to compute now.")
 
@@ -311,10 +313,10 @@ def _render_live_cards(results: dict, weights: dict):
                     )
                 atr_data = result.get("atr_data", {})
                 sizing = result.get("sizing_preview", {})
-                st.metric("ATR", f"{atr_data.get('atr_pct', 0) or 0:.3f}%")
+                metric(st, "ATR", f"{atr_data.get('atr_pct', 0) or 0:.3f}%")
                 if sizing:
-                    st.metric("Size preview", f"EUR {sizing.get('size_eur', 0):,.2f}",
-                              delta=f"stop {sizing.get('stop_pct', 0):.2f}%")
+                    metric(st, "Size preview", f"EUR {sizing.get('size_eur', 0):,.2f}",
+                           delta=f"stop {sizing.get('stop_pct', 0):.2f}%")
 
             # 8-signal breakdown
             with col_signals:
@@ -329,11 +331,12 @@ def _render_live_cards(results: dict, weights: dict):
                         color = "#EF9F27" if mult > 1.0 else "#444"
                         label_txt = (f"{ed}d to earnings · ×{mult:.1f}"
                                      if ed is not None else "earnings: unknown")
+                        desc = html.escape(meta["desc"], quote=True)
                         st.markdown(f"""
                         <div style="margin-bottom:8px">
                           <div style="display:flex;justify-content:space-between;
                                font-size:12px;color:#888;margin-bottom:3px">
-                            <span>{meta['label']} 🆕 <span style="font-size:10px">(multiplier)</span></span>
+                            <span title="{desc}" style="cursor:help">{meta['label']} <span style="font-size:10px">(multiplier)</span></span>
                             <span style="font-family:'DM Mono',monospace;color:{color}">{label_txt}</span>
                           </div>
                           <div style="background:#1a1a1a;border-radius:3px;height:4px">
@@ -349,12 +352,13 @@ def _render_live_cards(results: dict, weights: dict):
                     bar_w    = int(abs(score) * 100)
                     color    = "#00d4a0" if score > 0 else ("#ff5c5c" if score < 0 else "#444")
                     new_badge= " 🆕" if meta["new"] else ""
+                    desc = html.escape(meta["desc"], quote=True)
 
                     st.markdown(f"""
                     <div style="margin-bottom:8px">
                       <div style="display:flex;justify-content:space-between;
                            font-size:12px;color:#888;margin-bottom:3px">
-                        <span>{meta['label']}{new_badge}</span>
+                        <span title="{desc}" style="cursor:help">{meta['label']}{new_badge}</span>
                         <span style="font-family:'DM Mono',monospace">
                           <span style="color:{color}">{score:+.3f}</span>
                           &nbsp;·&nbsp;wt {w:.0%}</span>
@@ -451,34 +455,35 @@ def _render_db_cards(latest: dict):
                 st.markdown(profile_html, unsafe_allow_html=True)
 
             # Row 1: original 5
-            st.markdown("**Original signals**")
+            st.markdown(f"**{info_label('Original signals', 'Core intraday signals that formed the first version of the composite score.')}**", unsafe_allow_html=True)
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Order Book",   f"{row.get('order_book_score',    0) or 0:+.3f}")
-            c2.metric("Tape Aggrssn",f"{row.get('tape_aggression_score',0) or 0:+.3f}")
-            c3.metric("RSI Diverg",  f"{row.get('rsi_divergence_score', 0) or 0:+.3f}")
-            c4.metric("News Sntmnt", f"{row.get('news_sentiment_score', 0) or 0:+.3f}")
-            c5.metric("VWAP Dev",    f"{row.get('vwap_deviation_score', 0) or 0:+.3f}")
+            metric(c1, "Order Book",   f"{row.get('order_book_score',    0) or 0:+.3f}")
+            metric(c2, "Tape Aggrssn", f"{row.get('tape_aggression_score',0) or 0:+.3f}")
+            metric(c3, "RSI Diverg",   f"{row.get('rsi_divergence_score', 0) or 0:+.3f}")
+            metric(c4, "News Sntmnt",  f"{row.get('news_sentiment_score', 0) or 0:+.3f}")
+            metric(c5, "VWAP Dev",     f"{row.get('vwap_deviation_score', 0) or 0:+.3f}")
 
             # Row 2: MACD, RS, Bollinger, Put/Call
-            st.markdown("**New signals 🆕**")
+            st.markdown(f"**{info_label('New signals', 'Additional momentum, relative-strength, compression, and options-sentiment inputs.')}**", unsafe_allow_html=True)
             n1, n2, n3, n4 = st.columns(4)
-            n1.metric("MACD",         fmt_score(row, "macd_score"))
-            n2.metric("Rel Strength", fmt_score(row, "rel_strength_score"))
-            n3.metric("BB Squeeze",   fmt_score(row, "bollinger_score"))
-            n4.metric("Put/Call",     fmt_score(row, "put_call_score"))
+            metric(n1, "MACD",         fmt_score(row, "macd_score"))
+            metric(n2, "Rel Strength", fmt_score(row, "rel_strength_score"))
+            metric(n3, "BB Squeeze",   fmt_score(row, "bollinger_score"))
+            metric(n4, "Put/Call",     fmt_score(row, "put_call_score"))
 
             # Row 3: earnings + ATR
-            st.markdown("**Multiplier & volatility**")
+            st.markdown(f"**{info_label('Multiplier & volatility')}**", unsafe_allow_html=True)
             x1, x2, x3 = st.columns(3)
-            x1.metric(
+            metric(
+                x1,
                 "Earnings ×",
                 "not stored" if "earnings_mult" not in row else (
                     f"×{e_mult:.1f}" + (f" ({e_days}d)" if e_days is not None else "")
                 ),
             )
             atr_val = row.get("atr_pct")
-            x2.metric("ATR %", f"{atr_val:.3f}%" if atr_val else "—")
-            x3.metric("Regime", f"{market_regime} | {macro_regime} ×{macro_mult:.2f}")
+            metric(x2, "ATR %", f"{atr_val:.3f}%" if atr_val else "—")
+            metric(x3, "Regime", f"{market_regime} | {macro_regime} ×{macro_mult:.2f}")
 
             if gated:
                 st.warning(f"Gated: {row.get('gate_reason', '—')}")

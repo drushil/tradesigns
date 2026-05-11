@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 from datetime import datetime, timezone, timedelta
+from frontend.ui_help import column_config, help_text, info_label, metric, section_header
 
 
 # ── Colour palette ────────────────────────────────────────────────────────────
@@ -24,8 +25,12 @@ def render():
     # ── Sidebar controls ──────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### Grading filters")
-        days = st.slider("Look-back (days)", 1, 30, 7)
-        min_fav = st.slider("Alpha leakage threshold (%)", 0.1, 2.0, 0.5, step=0.1)
+        days = st.slider("Look-back (days)", 1, 30, 7, help=help_text("Look-back (days)"))
+        min_fav = st.slider(
+            "Alpha leakage threshold (%)",
+            0.1, 2.0, 0.5, step=0.1,
+            help=help_text("Alpha leakage threshold (%)"),
+        )
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
@@ -108,12 +113,12 @@ def render():
     pct_tickers = len(pdf) if not pdf.empty else 0
     leakage_count = int((bdf["max_favorable_pct"] >= min_fav).sum()) if not bdf.empty and "max_favorable_pct" in bdf.columns else 0
 
-    k1.metric("Graded signals", f"{total_graded:,}")
-    k2.metric("A+ setups", f"{a_plus_count:,}")
-    k3.metric("A setups", f"{a_count:,}")
-    k4.metric("A+ win rate", f"{a_plus_win_rate:.0f}%", help="Closed trades graded A+")
-    k5.metric("A+ avg P&L", f"{a_plus_avg_pnl:+.2f}%")
-    k6.metric("Missed alpha", f"{leakage_count}", help=f"Blocked ops with ≥{min_fav}% favorable move")
+    metric(k1, "Graded signals", f"{total_graded:,}")
+    metric(k2, "A+ setups", f"{a_plus_count:,}")
+    metric(k3, "A setups", f"{a_count:,}")
+    metric(k4, "A+ win rate", f"{a_plus_win_rate:.0f}%")
+    metric(k5, "A+ avg P&L", f"{a_plus_avg_pnl:+.2f}%")
+    metric(k6, "Missed alpha", f"{leakage_count}", help=f"Blocked ops with ≥{min_fav}% favorable move")
 
     st.markdown("---")
 
@@ -123,7 +128,7 @@ def render():
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.markdown('<div class="section-header">Grade distribution — signals</div>', unsafe_allow_html=True)
+        section_header("Grade distribution - signals", help_key="Count of recent computed signals by setup grade.")
         if not sdf.empty and "setup_grade" in sdf.columns:
             grade_counts = sdf["setup_grade"].value_counts().reindex(_GRADE_ORDER, fill_value=0).reset_index()
             grade_counts.columns = ["grade", "count"]
@@ -146,7 +151,7 @@ def render():
             st.info("No graded signals yet — agent will populate this once running.")
 
     with col_right:
-        st.markdown('<div class="section-header">Avg P&L % by grade — closed trades</div>', unsafe_allow_html=True)
+        section_header("Avg P&L % by grade - closed trades", help_key="Average realised trade return grouped by entry setup grade.")
         if not tdf.empty and "setup_grade" in tdf.columns and "net_pnl_pct" in tdf.columns:
             graded = tdf[tdf["setup_grade"].isin(_GRADE_ORDER)].copy()
             if not graded.empty:
@@ -185,7 +190,7 @@ def render():
     col_a, col_b = st.columns(2)
 
     with col_a:
-        st.markdown('<div class="section-header">A+ / A setups over time</div>', unsafe_allow_html=True)
+        section_header("A+ / A setups over time", help_key="Hourly count of high-grade setups in the selected look-back window.")
         if not sdf.empty and "created_at" in sdf.columns:
             sdf["ts"] = pd.to_datetime(sdf["created_at"], utc=True, errors="coerce")
             sdf["hour"] = sdf["ts"].dt.floor("H")
@@ -210,7 +215,7 @@ def render():
             st.info("No signal data yet.")
 
     with col_b:
-        st.markdown('<div class="section-header">Sector confirmation by ticker (A+/A only)</div>', unsafe_allow_html=True)
+        section_header("Sector confirmation by ticker (A+/A only)", help_key="Average confirmation from related sector or peer tickers for high-grade setups.")
         if not sdf.empty and "sector_confirmation" in sdf.columns:
             top = sdf[sdf["setup_grade"].isin(["A+", "A"])].copy()
             if not top.empty:
@@ -251,7 +256,7 @@ def render():
     # ROW 4 — Adaptive percentile baselines
     # ══════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown('<div class="section-header">Adaptive percentile baselines — composite score windows</div>', unsafe_allow_html=True)
+    section_header("Adaptive percentile baselines - composite score windows", help_key="Per-ticker rolling composite-score thresholds used to decide whether a setup is unusually strong.")
 
     if not pdf.empty:
         display_pdf = pdf.copy()
@@ -275,6 +280,7 @@ def render():
         st.dataframe(
             display_pdf.style.apply(_row_style, axis=1),
             use_container_width=True, hide_index=True, height=220,
+            column_config=column_config(display_pdf.columns),
         )
         st.caption("Grey rows: < 20 samples — cold-start mode (uses fixed threshold instead of percentile).")
     else:
@@ -284,7 +290,7 @@ def render():
     # ROW 5 — Alpha leakage analysis
     # ══════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown('<div class="section-header">Alpha leakage — blocked opportunities</div>', unsafe_allow_html=True)
+    section_header("Alpha leakage - blocked opportunities", help_key="Alpha leakage — blocked opportunities")
 
     if not bdf.empty and "max_favorable_pct" in bdf.columns:
         replayed = bdf[bdf["max_favorable_pct"].notna()].copy()
@@ -295,16 +301,16 @@ def render():
         profitable = (replayed["max_favorable_pct"] >= min_fav).sum()
         hit_rate = profitable / len(replayed) * 100 if len(replayed) else 0
 
-        c1.metric("Total blocked", f"{total_blocked:,}")
-        c2.metric("Replayed", f"{total_replayed:,}")
-        c3.metric(f"Profitable if taken (≥{min_fav}%)", f"{int(profitable)}")
-        c4.metric("Hit rate", f"{hit_rate:.0f}%")
+        metric(c1, "Total blocked", f"{total_blocked:,}")
+        metric(c2, "Replayed", f"{total_replayed:,}")
+        metric(c3, f"Profitable if taken (≥{min_fav}%)", f"{int(profitable)}", help_key="Profitable if taken")
+        metric(c4, "Hit rate", f"{hit_rate:.0f}%")
 
         if not replayed.empty:
             col_leak1, col_leak2 = st.columns(2)
 
             with col_leak1:
-                st.markdown("**By block stage**")
+                st.markdown(f"**{info_label('By block stage', 'Replay outcome grouped by the gate or decision stage that blocked the trade.')}**", unsafe_allow_html=True)
                 stage_summary = (
                     replayed.groupby("block_stage")
                     .agg(
@@ -323,10 +329,11 @@ def render():
                         "profitable": "Profitable", "hit_rate": "Hit rate", "avg_fav": "Avg fav move",
                     }),
                     use_container_width=True, hide_index=True,
+                    column_config=column_config(["Stage", "Blocks", "Profitable", "Hit rate", "Avg fav move"]),
                 )
 
             with col_leak2:
-                st.markdown("**Favorable move distribution (replayed)**")
+                st.markdown(f"**{info_label('Favorable move distribution (replayed)', 'Distribution of maximum favorable moves after blocked candidates.')}**", unsafe_allow_html=True)
                 fig5 = go.Figure()
                 missed = replayed[replayed["max_favorable_pct"] >= min_fav]["max_favorable_pct"]
                 correct = replayed[replayed["max_favorable_pct"] < min_fav]["max_favorable_pct"]
@@ -347,7 +354,7 @@ def render():
                 st.plotly_chart(fig5, use_container_width=True)
 
             # Top missed opportunities table
-            st.markdown("**Top missed opportunities**")
+            st.markdown(f"**{info_label('Top missed opportunities', 'Blocked candidates with the largest later favorable move.')}**", unsafe_allow_html=True)
             top_missed = (
                 replayed[replayed["max_favorable_pct"] >= min_fav]
                 .sort_values("max_favorable_pct", ascending=False)
@@ -361,11 +368,17 @@ def render():
                 for col in ["composite_score", "max_favorable_pct", "max_adverse_pct"]:
                     if col in fmt.columns:
                         fmt[col] = fmt[col].apply(lambda x: f"{x:+.3f}" if pd.notna(x) else "—")
-                st.dataframe(fmt.rename(columns={
+                missed_display = fmt.rename(columns={
                     "ticker": "Ticker", "block_stage": "Stage", "block_reason": "Reason",
                     "setup_grade": "Grade", "composite_score": "Composite",
                     "max_favorable_pct": "Max fav %", "max_adverse_pct": "Max adverse %",
-                }), use_container_width=True, hide_index=True)
+                })
+                st.dataframe(
+                    missed_display,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=column_config(missed_display.columns),
+                )
     else:
         st.info("No replayed blocked opportunities yet. They populate ~20 min after each block.")
 
@@ -376,13 +389,19 @@ def render():
         partials = tdf[tdf["partial_exit_done"].astype(str).str.lower().isin({"true", "1", "t"})]
         if not partials.empty:
             st.markdown("---")
-            st.markdown('<div class="section-header">Partial exits + runners</div>', unsafe_allow_html=True)
+            section_header("Partial exits + runners", help_key="Closed trades where the strategy took partial profits and left a runner position.")
             pcols = ["ticker", "setup_grade", "side", "net_pnl_pct", "hold_minutes", "exit_reason"]
             pcols = [c for c in pcols if c in partials.columns]
             pdisplay = partials[pcols].copy()
             if "net_pnl_pct" in pdisplay.columns:
                 pdisplay["net_pnl_pct"] = pdisplay["net_pnl_pct"].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "—")
-            st.dataframe(pdisplay.rename(columns={
+            partial_display = pdisplay.rename(columns={
                 "ticker": "Ticker", "setup_grade": "Grade", "side": "Side",
                 "net_pnl_pct": "Net P&L", "hold_minutes": "Hold (min)", "exit_reason": "Exit reason",
-            }), use_container_width=True, hide_index=True)
+            })
+            st.dataframe(
+                partial_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config=column_config(partial_display.columns),
+            )

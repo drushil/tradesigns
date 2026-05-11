@@ -2,6 +2,7 @@
 import streamlit as st
 import os
 from frontend.ticker_profiles import get_ticker_profile, ticker_profile_html
+from frontend.ui_help import column_config, info_label, section_title
 
 
 def render():
@@ -15,7 +16,7 @@ def render():
     from config.risk_profiles import get_profile, RISK_PROFILES
     profile = get_profile(profile_name)
 
-    st.markdown("### Active Risk Profile")
+    section_title("Active Risk Profile", level=3)
     c1, c2 = st.columns(2)
     with c1:
         st.markdown(f"""
@@ -58,13 +59,12 @@ def render():
             st.markdown(f"""
             <div style="display:flex;justify-content:space-between;padding:6px 0;
                  border-bottom:0.5px solid #1a1a1a;font-size:13px">
-              <span style="color:#888">{k}</span>
+              <span style="color:#888">{info_label(k)}</span>
               <span style="color:#eee;font-family:'DM Mono',monospace">{v}</span>
             </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("### Ticker Universe")
-    st.caption("What each symbol represents and why it is useful for signal learning.")
+    section_title("Ticker Universe", level=3)
 
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
     if ticker_list:
@@ -77,7 +77,7 @@ def render():
                 "Type": ticker_profile.get("type", "Unknown"),
                 "Agent context": ticker_profile.get("agent_role", "No summary configured"),
             })
-        st.dataframe(rows, width="stretch", hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True, column_config=column_config(rows[0].keys()))
 
         with st.expander("Ticker summaries", expanded=False):
             for ticker in ticker_list:
@@ -90,8 +90,7 @@ def render():
         st.warning("No tickers configured.")
 
     st.markdown("---")
-    st.markdown("### Signal Weights (current priors)")
-    st.caption("7 weighted signal scores plus Earnings Proximity as an 8th multiplier signal.")
+    section_title("Signal Weights (current priors)", level=3)
 
     sw = profile.get("signal_weights", {})
     if not sw:
@@ -100,7 +99,7 @@ def render():
     for sig, w in sw.items():
         st.markdown(f"""
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px">
-          <span style="font-size:12px;color:#888;min-width:200px">{sig.replace('_',' ').title()}</span>
+          <span style="font-size:12px;color:#888;min-width:200px">{info_label(sig.replace('_',' ').title())}</span>
           <div style="flex:1;background:#1a1a1a;border-radius:3px;height:8px">
             <div style="width:{w*100:.0f}%;height:100%;background:#00d4a0;border-radius:3px"></div>
           </div>
@@ -109,7 +108,7 @@ def render():
         </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("### All Profiles Comparison")
+    section_title("All Profiles Comparison", level=3)
 
     cols = st.columns(len(RISK_PROFILES))
     for i, (name, p) in enumerate(RISK_PROFILES.items()):
@@ -129,8 +128,7 @@ def render():
         </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown("### How to change configuration")
-    st.caption("Current values shown below. Edit them in `.env`, GitHub Secrets, or Streamlit Cloud Secrets.")
+    section_title("How to change configuration", level=3)
     st.code(f"""# Active configuration
 RISK_PROFILE={profile_name}        # conservative|cautious|moderate|growth|aggressive
 INVESTMENT_HORIZON={horizon}       # short|mid|both

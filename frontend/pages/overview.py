@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 from datetime import datetime
+from frontend.ui_help import metric, section_title
 
 
 def render():
@@ -41,17 +42,17 @@ def render():
 
     # ── KPI row ────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Portfolio Value", f"€{equity_eur:,.2f}",
-              delta=f"{cum_pnl_pct:+.2f}% all-time")
-    c2.metric("Cash Available", f"€{cash_eur:,.2f}",
-              delta=f"{cash_usd/equity_usd*100:.0f}% of portfolio" if equity_usd else None)
-    c3.metric("Total Trades", trade_stats.get("total", 0))
-    c4.metric("Win Rate",
-              f"{trade_stats.get('win_rate', 0):.1f}%",
-              delta=f"W:{trade_stats.get('wins',0)} L:{trade_stats.get('losses',0)}")
-    c5.metric("Total P&L",
-              f"€{trade_stats.get('total_pnl_eur', 0):+.2f}",
-              delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade")
+    metric(c1, "Portfolio Value", f"€{equity_eur:,.2f}",
+           delta=f"{cum_pnl_pct:+.2f}% all-time")
+    metric(c2, "Cash Available", f"€{cash_eur:,.2f}",
+           delta=f"{cash_usd/equity_usd*100:.0f}% of portfolio" if equity_usd else None)
+    metric(c3, "Total Trades", trade_stats.get("total", 0))
+    metric(c4, "Win Rate",
+           f"{trade_stats.get('win_rate', 0):.1f}%",
+           delta=f"W:{trade_stats.get('wins',0)} L:{trade_stats.get('losses',0)}")
+    metric(c5, "Total P&L",
+           f"€{trade_stats.get('total_pnl_eur', 0):+.2f}",
+           delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade")
 
     if ceiling and alpaca_actual:
         st.info(
@@ -94,7 +95,7 @@ def render():
 
     # ── Open swing position cards ──────────────────────────────────────────
     if open_swings:
-        st.markdown("##### Open Momentum Swings")
+        section_title("Open Momentum Swings")
         cols = st.columns(min(len(open_swings), 3))
         for i, rec in enumerate(open_swings):
             ticker     = rec.get("ticker", "?")
@@ -133,7 +134,7 @@ def render():
     col_chart, col_pos = st.columns([2, 1])
 
     with col_chart:
-        st.markdown("##### Equity Curve")
+        section_title("Equity Curve")
         if snapshots:
             df = pd.DataFrame(snapshots)
             df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
@@ -169,7 +170,7 @@ def render():
             st.info("No portfolio history yet. Start the agent to begin trading.")
 
     with col_pos:
-        st.markdown("##### Open Positions")
+        section_title("Open Positions")
         if positions:
             for p in positions:
                 pnl_color = "positive" if p["unrealized_pl"] >= 0 else "negative"
@@ -188,7 +189,7 @@ def render():
 
     # ── Daily P&L bar chart ────────────────────────────────────────────────
     if snapshots and len(snapshots) > 1:
-        st.markdown("##### Daily P&L")
+        section_title("Daily P&L")
         df = pd.DataFrame(snapshots)
         df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
         df = df.sort_values("snapshot_at")
@@ -213,7 +214,7 @@ def render():
     trades = get_recent_trades(days=30)
     if trades:
         st.markdown("---")
-        st.markdown("##### Performance by Market Regime")
+        section_title("Performance by Market Regime")
         df_t = pd.DataFrame(trades)
         if "regime" in df_t.columns and "net_pnl_pct" in df_t.columns:
             regime_stats = (df_t.groupby("regime")["net_pnl_pct"]
@@ -237,8 +238,8 @@ def _render_demo():
     """Show a demo/placeholder when DB not connected."""
     st.warning("Running in demo mode — connect your .env to see live data")
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Portfolio Value", "€100.00", delta="paper mode")
-    c2.metric("Cash Available", "€100.00", delta="100%")
-    c3.metric("Total Trades", "0")
-    c4.metric("Win Rate", "—")
-    c5.metric("Total P&L", "€0.00")
+    metric(c1, "Portfolio Value", "€100.00", delta="paper mode")
+    metric(c2, "Cash Available", "€100.00", delta="100%")
+    metric(c3, "Total Trades", "0")
+    metric(c4, "Win Rate", "—")
+    metric(c5, "Total P&L", "€0.00")

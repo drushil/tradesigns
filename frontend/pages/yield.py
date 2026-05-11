@@ -4,6 +4,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
+from frontend.ui_help import column_config, metric, section_title
 
 
 def render():
@@ -20,7 +21,7 @@ def render():
 
     # ── Section 1: Current sweep status ───────────────────────────────────────
     st.markdown("---")
-    st.subheader("💵 Current Sweep Status")
+    section_title("Current Sweep Status", level=3)
 
     try:
         from database.client import get_client
@@ -37,10 +38,10 @@ def render():
 
     if last_sweep:
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Sweepable", f"€{last_sweep.get('sweepable_eur', 0):,.2f}")
-        c2.metric("Reserved", f"€{last_sweep.get('reserve_eur', 0):,.2f}")
-        c3.metric("Est. daily yield", f"€{last_sweep.get('est_daily_yield', 0):.4f}")
-        c4.metric("Est. annual yield", f"€{last_sweep.get('est_annual_yield', 0):,.2f}")
+        metric(c1, "Sweepable", f"€{last_sweep.get('sweepable_eur', 0):,.2f}")
+        metric(c2, "Reserved", f"€{last_sweep.get('reserve_eur', 0):,.2f}")
+        metric(c3, "Est. daily yield", f"€{last_sweep.get('est_daily_yield', 0):.4f}")
+        metric(c4, "Est. annual yield", f"€{last_sweep.get('est_annual_yield', 0):,.2f}")
 
         sweep_ticker = last_sweep.get("sweep_ticker", "SGOV")
         skip_reason  = last_sweep.get("skip_reason") or last_sweep.get("mode", "—")
@@ -56,7 +57,7 @@ def render():
 
     # ── Section 2: Simulated yield accumulator ────────────────────────────────
     st.markdown("---")
-    st.subheader("📈 Simulated Yield Accumulator")
+    section_title("Simulated Yield Accumulator", level=3)
 
     try:
         from database.client import get_client
@@ -87,9 +88,9 @@ def render():
         )
 
         m1, m2, m3 = st.columns(3)
-        m1.metric("Total simulated yield", f"€{total_sim_yield:.4f}")
-        m2.metric("First sweep", str(first_date)[:10] if pd.notna(first_date) else "—")
-        m3.metric("Equiv. annual rate", f"{avg_yield_pct:.2f}%")
+        metric(m1, "Total simulated yield", f"€{total_sim_yield:.4f}")
+        metric(m2, "First sweep", str(first_date)[:10] if pd.notna(first_date) else "—")
+        metric(m3, "Equiv. annual rate", f"{avg_yield_pct:.2f}%")
 
         # Cumulative yield chart
         df_sorted = df.sort_values("executed_at").copy()
@@ -119,7 +120,7 @@ def render():
 
     # ── Section 3: Dividend calendar ──────────────────────────────────────────
     st.markdown("---")
-    st.subheader("📅 Dividend Calendar")
+    section_title("Dividend Calendar", level=3)
 
     try:
         from database.client import get_client
@@ -159,7 +160,13 @@ def render():
                 "Score":     f"{score:.3f}",
                 "Action":    row.get("action_taken", "logged_only"),
             })
-        st.dataframe(pd.DataFrame(rows_display), use_container_width=True, hide_index=True)
+        div_display = pd.DataFrame(rows_display)
+        st.dataframe(
+            div_display,
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config(div_display.columns),
+        )
     else:
         st.info("No upcoming dividends found in the ticker universe (yield > threshold, ex-date 1–5 days away).")
         st.caption(
@@ -170,7 +177,7 @@ def render():
 
     # ── Section 4: Live mode readiness checklist ──────────────────────────────
     st.markdown("---")
-    st.subheader("🔧 Live Mode Readiness")
+    section_title("Live Mode Readiness", level=3)
 
     import importlib.util
     ibkr_built = importlib.util.find_spec("backend.broker.ibkr") is not None

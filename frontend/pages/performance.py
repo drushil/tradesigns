@@ -3,6 +3,7 @@ import os
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
+from frontend.ui_help import column_config, metric, section_title
 
 MIN_TRADES = 20
 
@@ -96,46 +97,46 @@ def render():
         return f"{val:{fmt}}" if val is not None else fallback
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric(
+    metric(
+        c1,
         "Expectancy",
         f"{expectancy:+.4f}%" if expectancy is not None else "—",
         delta="▲ above 0.15% target" if (expectancy or 0) > 0.15 else "▼ below 0.15% target",
         delta_color="normal" if (expectancy or 0) > 0.15 else "inverse",
-        help="Expected return per trade",
     )
-    c2.metric(
+    metric(
+        c2,
         "Profit Factor",
         f"{profit_factor:.2f}×" if profit_factor is not None else "—",
         delta="▲ > 1.3" if (profit_factor or 0) > 1.3 else "▼ < 1.3",
         delta_color="normal" if (profit_factor or 0) > 1.3 else "inverse",
-        help="Gross wins / gross losses",
     )
-    c3.metric(
+    metric(
+        c3,
         "Sharpe Ratio",
         _fmt(sharpe),
         delta="▲ > 0.8" if (sharpe or 0) > 0.8 else "▼ < 0.8",
         delta_color="normal" if (sharpe or 0) > 0.8 else "inverse",
-        help="Annualised Sharpe (×√252)",
     )
-    c4.metric(
+    metric(
+        c4,
         "Calmar Ratio",
         _fmt(calmar),
         delta="▲ > 1.0" if (calmar or 0) > 1.0 else "▼ < 1.0",
         delta_color="normal" if (calmar or 0) > 1.0 else "inverse",
-        help="Annualised return / max drawdown",
     )
-    c5.metric(
+    metric(
+        c5,
         "Avg R-Multiple",
         f"{avg_r:+.3f}R" if avg_r is not None else "—",
         delta="▲ > 1.0R" if (avg_r or 0) > 1.0 else "▼ < 1.0R",
         delta_color="normal" if (avg_r or 0) > 1.0 else "inverse",
-        help="Average R earned per trade (1R = initial stop distance)",
     )
 
     st.markdown("---")
 
     # ── Section 3: Rolling Sharpe Chart ───────────────────────────────────────
-    st.markdown("##### Rolling Sharpe (20-trade window)")
+    section_title("Rolling Sharpe (20-trade window)", help_key="Rolling risk-adjusted return over the last 20 closed trades.")
     rolling = compute_rolling_sharpe(trades, window=20)
     if rolling:
         x_vals    = [p["trade_index"] + 1 for p in rolling]
@@ -187,8 +188,7 @@ def render():
     col_attr, col_r = st.columns(2)
 
     with col_attr:
-        st.markdown("##### Signal Attribution")
-        st.caption("Signals with score > 0.3 · net_attribution = wins – losses influenced")
+        section_title("Signal Attribution", help_key="Signals with score > 0.3; net attribution equals influenced wins minus influenced losses.")
         attribution = compute_signal_attribution(trades)
         if attribution:
             labels     = [r["signal"] for r in attribution]
@@ -222,15 +222,15 @@ def render():
             st.info("No attribution data — trades need signals_json populated.")
 
     with col_r:
-        st.markdown("##### R-Multiple Distribution")
+        section_title("R-Multiple Distribution", help_key="Distribution of realised returns measured in units of initial risk.")
         r_vals = r_data.get("r_values", [])
         if r_vals:
             pos = r_data["positive_r"]
             neg = r_data["negative_r"]
             m1, m2, m3 = st.columns(3)
-            m1.metric("Positive R", f"{pos} ({pos/len(r_vals):.0%})")
-            m2.metric("Negative R", f"{neg} ({neg/len(r_vals):.0%})")
-            m3.metric("Avg R", f"{avg_r:+.2f}R" if avg_r is not None else "—")
+            metric(m1, "Positive R", f"{pos} ({pos/len(r_vals):.0%})")
+            metric(m2, "Negative R", f"{neg} ({neg/len(r_vals):.0%})")
+            metric(m3, "Avg R", f"{avg_r:+.2f}R" if avg_r is not None else "—")
 
             fig3 = go.Figure(go.Histogram(
                 x=r_vals,
@@ -262,7 +262,7 @@ def render():
     st.markdown("---")
 
     # ── Section 5: Per-Regime Performance Table ───────────────────────────────
-    st.markdown("##### Performance by Regime")
+    section_title("Performance by Regime", help_key="Performance by Market Regime")
     df_t = pd.DataFrame(trades)
     if "regime" in df_t.columns and "net_pnl_pct" in df_t.columns and not df_t.empty:
         regime_groups = df_t.groupby("regime")
@@ -290,6 +290,7 @@ def render():
                     axis=1,
                 ),
                 use_container_width=True, hide_index=True,
+                column_config=column_config(df_regime.columns),
             )
     else:
         st.info("Not enough regime data yet.")
@@ -297,7 +298,7 @@ def render():
     st.markdown("---")
 
     # ── Section 6: Cost Analysis ──────────────────────────────────────────────
-    st.markdown("##### Cost Analysis")
+    section_title("Cost Analysis", help_key="Estimated execution, model, and slippage costs compared with gross winning P&L.")
     total_trades   = len(trades)
     est_commission = total_trades * 1.25
     total_llm_cost = sum(t.get("llm_cost_eur", 0) or 0 for t in trades)
@@ -309,12 +310,12 @@ def render():
     cost_pct_gross = total_costs / gross_pnl_eur * 100 if gross_pnl_eur > 0 else None
 
     cc1, cc2, cc3, cc4 = st.columns(4)
-    cc1.metric("Est. Commission",  f"€{est_commission:.2f}",
-               help=f"€1.25 × {total_trades} trades (estimate)")
-    cc2.metric("LLM Costs",        f"€{total_llm_cost:.4f}")
-    cc3.metric("Est. Slippage",    f"€{total_slippage:.2f}")
-    cc4.metric("Costs / Gross P&L",
-               f"{cost_pct_gross:.1f}%" if cost_pct_gross is not None else "—")
+    metric(cc1, "Est. Commission",  f"€{est_commission:.2f}",
+           help=f"€1.25 × {total_trades} trades (estimate)")
+    metric(cc2, "LLM Costs",        f"€{total_llm_cost:.4f}")
+    metric(cc3, "Est. Slippage",    f"€{total_slippage:.2f}")
+    metric(cc4, "Costs / Gross P&L",
+           f"{cost_pct_gross:.1f}%" if cost_pct_gross is not None else "—")
 
     start_eur       = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
     monthly_alpha   = total_costs / max(1, total_trades / 22) if total_trades else 0
@@ -326,8 +327,7 @@ def render():
     # ── Validation checks (optional) ─────────────────────────────────────────
     if has_validation:
         st.markdown("---")
-        st.markdown("##### Validation Checks")
-        st.caption("Retrospective checks — use before promoting thresholds or weights.")
+        section_title("Validation Checks", help_key="Retrospective checks to review before promoting thresholds or weights.")
         splits     = walk_forward_splits(trades, train_size=40, test_size=20)
         thresholds = evaluate_score_thresholds(trades)
         ics        = signal_information_coefficients(trades)
@@ -336,8 +336,8 @@ def render():
         with v1:
             if splits:
                 last = splits[-1]
-                st.metric("Latest test expectancy",
-                          f"{last['test']['expectancy_pct']:+.4f}%")
+                metric(st, "Latest test expectancy",
+                       f"{last['test']['expectancy_pct']:+.4f}%")
                 st.caption(
                     f"{last['test']['trade_count']} out-of-sample trades · "
                     f"train expectancy {last['train']['expectancy_pct']:+.4f}%"
@@ -348,9 +348,9 @@ def render():
             viable = [r for r in thresholds if r["trade_count"] >= 8 and r["expectancy_pct"] is not None]
             if viable:
                 best = max(viable, key=lambda r: r["expectancy_pct"])
-                st.metric("Best observed threshold",
-                          f"|score| ≥ {best['threshold']:.2f}",
-                          f"{best['expectancy_pct']:+.4f}% exp.")
+                metric(st, "Best observed threshold",
+                       f"|score| ≥ {best['threshold']:.2f}",
+                       f"{best['expectancy_pct']:+.4f}% exp.")
             else:
                 st.info("Need more trades to compare score thresholds.")
         if ics:

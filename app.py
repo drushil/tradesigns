@@ -7,6 +7,7 @@ import os
 import importlib.util
 from pathlib import Path
 import streamlit as st
+from frontend.ui_help import help_text
 
 # ── Streamlit Cloud secrets → env vars ───────────────────────────────────────
 # Streamlit Cloud stores secrets in st.secrets, not os.environ.
@@ -61,7 +62,12 @@ PAGES = {
 with st.sidebar:
     st.markdown("### 🤖 AI Trading Agent")
     st.markdown("---")
-    selection = st.radio("Navigation", list(PAGES.keys()), label_visibility="collapsed")
+    selection = st.radio(
+        "Navigation",
+        list(PAGES.keys()),
+        label_visibility="collapsed",
+        help=help_text("Navigation"),
+    )
     st.markdown("---")
     st.markdown(
         "<div style='font-size:11px;color:#555;'>Paper trading · Alpaca + Claude</div>",

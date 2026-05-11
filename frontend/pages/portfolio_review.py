@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from database.client import get_portfolio_reviews
+from frontend.ui_help import metric, section_title, selectbox
 
 # ── Colour map for recommendations ───────────────────────────────────────────
 _REC_COLOR = {
@@ -43,7 +44,7 @@ def render():
 
     # ── Review selector ───────────────────────────────────────────────────────
     dates = [r["reviewed_at"][:10] for r in reviews]
-    selected_date = st.selectbox("Select review week", dates)
+    selected_date = selectbox("Select review week", dates)
     review = next(r for r in reviews if r["reviewed_at"][:10] == selected_date)
 
     # Parse JSON columns (Supabase may return strings or dicts)
@@ -57,11 +58,11 @@ def render():
 
     # ── Top KPIs ──────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Equity (€)", f"{review.get('equity_eur', 0):,.2f}")
-    c2.metric("Positions", review.get("position_count", 0))
-    c3.metric("Hold", summary.get("hold", 0))
-    c4.metric("Trim / Exit", summary.get("trim", 0) + summary.get("exit", 0))
-    c5.metric("Add", summary.get("add", 0))
+    metric(c1, "Equity (€)", f"{review.get('equity_eur', 0):,.2f}")
+    metric(c2, "Positions", review.get("position_count", 0))
+    metric(c3, "Hold", summary.get("hold", 0))
+    metric(c4, "Trim / Exit", summary.get("trim", 0) + summary.get("exit", 0))
+    metric(c5, "Add", summary.get("add", 0))
 
     # ── Alerts ───────────────────────────────────────────────────────────────
     if alerts:
@@ -77,7 +78,7 @@ def render():
     col_chart, col_table = st.columns([1, 2])
 
     with col_chart:
-        st.subheader("Recommendation Mix")
+        section_title("Recommendation Mix", level=3)
         labels = list(summary.keys())
         values = list(summary.values())
         colors = [_REC_COLOR.get(l, "#888") for l in labels]
@@ -97,7 +98,7 @@ def render():
 
     # ── Position detail table ─────────────────────────────────────────────────
     with col_table:
-        st.subheader("Position Recommendations")
+        section_title("Position Recommendations", level=3)
         if not positions:
             st.info("No open positions were reviewed.")
         else:
@@ -131,7 +132,7 @@ def render():
 
     # ── Sector exposure bar ───────────────────────────────────────────────────
     st.divider()
-    st.subheader("Sector Exposure")
+    section_title("Sector Exposure", level=3)
     sector_pct = exposure.get("sector_pct", {})
     if sector_pct:
         sec_fig = px.bar(
@@ -157,16 +158,16 @@ def render():
     # ── Cash / deployed metrics ───────────────────────────────────────────────
     st.divider()
     m1, m2, m3 = st.columns(3)
-    m1.metric("Cash (€)",     f"{exposure.get('cash_eur', 0):,.2f}",
-              f"{exposure.get('cash_pct', 0):.1f}% of equity")
-    m2.metric("Deployed (€)", f"{exposure.get('total_deployed', 0):,.2f}",
-              f"{exposure.get('deployed_pct', 0):.1f}% of equity")
-    m3.metric("Positions",    exposure.get("position_count", 0))
+    metric(m1, "Cash (€)",     f"{exposure.get('cash_eur', 0):,.2f}",
+           f"{exposure.get('cash_pct', 0):.1f}% of equity")
+    metric(m2, "Deployed (€)", f"{exposure.get('total_deployed', 0):,.2f}",
+           f"{exposure.get('deployed_pct', 0):.1f}% of equity")
+    metric(m3, "Positions",    exposure.get("position_count", 0))
 
     # ── Historical review trend ───────────────────────────────────────────────
     if len(reviews) > 1:
         st.divider()
-        st.subheader("Review History")
+        section_title("Review History", level=3)
         hist_dates = [r["reviewed_at"][:10] for r in reversed(reviews)]
         hist_exit  = [_j(r.get("summary", {})).get("exit", 0) for r in reversed(reviews)]
         hist_trim  = [_j(r.get("summary", {})).get("trim", 0) for r in reversed(reviews)]

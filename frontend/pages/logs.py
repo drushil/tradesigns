@@ -1,6 +1,7 @@
 """frontend/pages/logs.py — Live agent log viewer."""
 import streamlit as st
 import pandas as pd
+from frontend.ui_help import button, section_title, selectbox
 
 
 LEVEL_COLORS = {
@@ -26,12 +27,12 @@ def render():
     col_f1, col_f2, col_ref = st.columns([2, 2, 1])
     with col_f1:
         levels = ["All", "TRADE", "SIGNAL", "LEARNING", "INFO", "WARN", "ERROR"]
-        sel_level = st.selectbox("Filter by level", levels)
+        sel_level = selectbox("Filter by level", levels)
     with col_f2:
-        limit = st.selectbox("Show", [50, 100, 200, 500], index=1)
+        limit = selectbox("Show", [50, 100, 200, 500], index=1)
     with col_ref:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh = st.button("🔄 Refresh", width="stretch")
+        refresh = button("🔄 Refresh", width="stretch")
 
     level_filter = None if sel_level == "All" else sel_level
     logs = get_logs(level=level_filter, limit=limit)
@@ -65,7 +66,7 @@ def render():
         if "event" in df_all.columns:
             blocker_df = df_all[df_all["event"].isin(blocker_events)]
             if not blocker_df.empty:
-                st.markdown("##### Recent Trade Blockers")
+                section_title("Recent Trade Blockers")
                 counts = (
                     blocker_df["event"]
                     .map(blocker_events)

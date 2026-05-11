@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from frontend.ticker_profiles import ticker_profile_html
+from frontend.ui_help import column_config, metric, section_title, selectbox
 
 
 def render():
@@ -58,21 +59,21 @@ def render():
     col_f1, col_f2, col_f3, col_f4, col_f5, col_f6 = st.columns(6)
     with col_f1:
         tickers = ["All"] + sorted(df["ticker"].unique().tolist())
-        sel_ticker = st.selectbox("Ticker", tickers)
+        sel_ticker = selectbox("Ticker", tickers)
     with col_f2:
         regimes = ["All"] + sorted(df["regime"].dropna().unique().tolist()) if "regime" in df.columns else ["All"]
-        sel_regime = st.selectbox("Regime", regimes)
+        sel_regime = selectbox("Regime", regimes)
     with col_f3:
         sides = ["All"] + sorted(df["side"].dropna().unique().tolist()) if "side" in df.columns else ["All"]
-        sel_side = st.selectbox("Side", sides)
+        sel_side = selectbox("Side", sides)
     with col_f4:
         outcomes = ["All", "Wins only", "Losses only"]
-        sel_outcome = st.selectbox("Outcome", outcomes)
+        sel_outcome = selectbox("Outcome", outcomes)
     with col_f5:
         exposures = ["All"] + sorted(df["exposure_direction"].dropna().unique().tolist()) if "exposure_direction" in df.columns else ["All"]
-        sel_exposure = st.selectbox("Exposure", exposures)
+        sel_exposure = selectbox("Exposure", exposures)
     with col_f6:
-        sel_hold_type = st.selectbox("Hold type", ["All", "Intraday", "Swing"])
+        sel_hold_type = selectbox("Hold type", ["All", "Intraday", "Swing"])
 
     fdf = df.copy()
     if sel_ticker != "All":
@@ -102,18 +103,18 @@ def render():
     losses= fdf[fdf["net_pnl_pct"] <= 0]
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Trades shown", len(fdf))
-    c2.metric("Win rate", f"{len(wins)/len(fdf)*100:.1f}%" if len(fdf) else "—")
-    c3.metric("Avg P&L", f"{fdf['net_pnl_pct'].mean():+.3f}%" if len(fdf) else "—")
-    c4.metric("Total P&L", f"€{fdf['pnl_eur'].sum():+.2f}" if len(fdf) else "—")
-    c5.metric("Avg hold", f"{fdf['hold_minutes'].mean():.0f} min" if "hold_minutes" in fdf.columns and len(fdf) else "—")
+    metric(c1, "Trades shown", len(fdf))
+    metric(c2, "Win rate", f"{len(wins)/len(fdf)*100:.1f}%" if len(fdf) else "—")
+    metric(c3, "Avg P&L", f"{fdf['net_pnl_pct'].mean():+.3f}%" if len(fdf) else "—")
+    metric(c4, "Total P&L", f"€{fdf['pnl_eur'].sum():+.2f}" if len(fdf) else "—")
+    metric(c5, "Avg hold", f"{fdf['hold_minutes'].mean():.0f} min" if "hold_minutes" in fdf.columns and len(fdf) else "—")
     bearish_count = int((fdf["exposure_direction"] == "short_market").sum()) if "exposure_direction" in fdf.columns else 0
-    c6.metric("Bearish exposure", f"{bearish_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
+    metric(c6, "Bearish exposure", f"{bearish_count / len(fdf) * 100:.0f}%" if len(fdf) else "—")
 
     st.markdown("---")
 
     # ── Swing stats ─────────────────────────────────────────────────────────
-    st.markdown("##### Swing vs Intraday")
+    section_title("Swing vs Intraday")
     swing_df = fdf[fdf["is_swing"]]
     intraday_df = fdf[~fdf["is_swing"]]
 
@@ -129,12 +130,13 @@ def render():
         return f"{avg_minutes:.0f} min"
 
     sc1, sc2, sc3, sc4, sc5, sc6 = st.columns(6)
-    sc1.metric("Swing trades", len(swing_df))
-    sc2.metric("Swing win rate", f"{_win_rate(swing_df):.1f}%" if len(swing_df) else "—")
-    sc3.metric("Swing avg P&L", f"{swing_df['net_pnl_pct'].mean():+.3f}%" if len(swing_df) else "—")
-    sc4.metric("Swing total P&L", f"€{swing_df['pnl_eur'].sum():+.2f}" if len(swing_df) else "—")
-    sc5.metric("Swing avg hold", _avg_hold_label(swing_df))
-    sc6.metric(
+    metric(sc1, "Swing trades", len(swing_df))
+    metric(sc2, "Swing win rate", f"{_win_rate(swing_df):.1f}%" if len(swing_df) else "—")
+    metric(sc3, "Swing avg P&L", f"{swing_df['net_pnl_pct'].mean():+.3f}%" if len(swing_df) else "—")
+    metric(sc4, "Swing total P&L", f"€{swing_df['pnl_eur'].sum():+.2f}" if len(swing_df) else "—")
+    metric(sc5, "Swing avg hold", _avg_hold_label(swing_df))
+    metric(
+        sc6,
         "Avg conviction",
         f"{swing_df['swing_conviction'].dropna().mean():.0%}"
         if "swing_conviction" in swing_df.columns and swing_df["swing_conviction"].notna().any()
@@ -167,15 +169,17 @@ def render():
                                   showlegend=False)
             st.plotly_chart(fig_cmp, width="stretch")
         with col_cmp2:
+            comparison_display = compare_df.assign(
+                **{
+                    "Avg Net P&L (%)": compare_df["Avg Net P&L (%)"].map(lambda v: f"{v:+.3f}%"),
+                    "Win Rate (%)": compare_df["Win Rate (%)"].map(lambda v: f"{v:.1f}%"),
+                }
+            )
             st.dataframe(
-                compare_df.assign(
-                    **{
-                        "Avg Net P&L (%)": compare_df["Avg Net P&L (%)"].map(lambda v: f"{v:+.3f}%"),
-                        "Win Rate (%)": compare_df["Win Rate (%)"].map(lambda v: f"{v:.1f}%"),
-                    }
-                ),
+                comparison_display,
                 width="stretch",
                 hide_index=True,
+                column_config=column_config(comparison_display.columns),
             )
     else:
         st.info("No closed trades match the current filters yet.")
@@ -185,7 +189,7 @@ def render():
     # ── P&L scatter ────────────────────────────────────────────────────────
     col_scatter, col_exit = st.columns(2)
     with col_scatter:
-        st.markdown("##### P&L by Signal Score")
+        section_title("P&L by Signal Score")
         if "composite_score" in fdf.columns:
             fig = px.scatter(
                 fdf, x="composite_score", y="net_pnl_pct",
@@ -202,7 +206,7 @@ def render():
             st.plotly_chart(fig, width="stretch")
 
     with col_exit:
-        st.markdown("##### Exit Reason Breakdown")
+        section_title("Exit Reason Breakdown")
         if "exit_reason" in fdf.columns:
             exit_counts = fdf["exit_reason"].value_counts().reset_index()
             exit_counts.columns = ["reason", "count"]
@@ -216,7 +220,7 @@ def render():
     if "strategy_family" in fdf.columns and "exposure_direction" in fdf.columns:
         col_strategy, col_exposure = st.columns(2)
         with col_strategy:
-            st.markdown("##### P&L by Strategy")
+            section_title("P&L by Strategy")
             strategy_perf = (fdf.groupby("strategy_family", dropna=False)
                                .agg(trades=("ticker", "count"), avg_pnl=("net_pnl_pct", "mean"))
                                .reset_index())
@@ -231,7 +235,7 @@ def render():
                                margin=dict(l=0,r=0,t=10,b=0))
             st.plotly_chart(fig3, width="stretch")
         with col_exposure:
-            st.markdown("##### P&L by Exposure")
+            section_title("P&L by Exposure")
             exposure_perf = (fdf.groupby("exposure_direction", dropna=False)
                                .agg(trades=("ticker", "count"), avg_pnl=("net_pnl_pct", "mean"))
                                .reset_index())
@@ -247,7 +251,7 @@ def render():
             st.plotly_chart(fig4, width="stretch")
 
     # ── Trade table ────────────────────────────────────────────────────────
-    st.markdown("##### All Trades")
+    section_title("All Trades")
 
     # Build hold-type badge column
     fdf = fdf.copy()
@@ -276,22 +280,23 @@ def render():
         show_df.style.map(highlight_pnl, subset=["net_pnl_pct"] if "net_pnl_pct" in show_df.columns else []),
         width="stretch",
         height=400,
+        column_config=column_config(show_df.columns),
     )
 
     # ── Swing trade detail expanders ───────────────────────────────────────
     if "is_swing" in fdf.columns:
         swing_rows = fdf[fdf["is_swing"]]
         if not swing_rows.empty:
-            st.markdown("##### Swing Trade Details")
+            section_title("Swing Trade Details")
             for _, row in swing_rows.sort_values("created_at", ascending=False).head(20).iterrows():
                 label = (f"🚀 {row.get('ticker','?')} · "
                          f"{row.get('hold_days_actual','?')}d · "
                          f"{row.get('net_pnl_pct', 0):+.2f}%")
                 with st.expander(label):
                     c1, c2, c3 = st.columns(3)
-                    c1.metric("Conviction", f"{float(row.get('swing_conviction') or 0):.0%}")
-                    c2.metric("Hold days", row.get("hold_days_actual", "—"))
-                    c3.metric("Daily re-evals", row.get("daily_reeval_count", 0))
+                    metric(c1, "Conviction", f"{float(row.get('swing_conviction') or 0):.0%}")
+                    metric(c2, "Hold days", row.get("hold_days_actual", "—"))
+                    metric(c3, "Daily re-evals", row.get("daily_reeval_count", 0))
                     reasons = row.get("swing_reasons") or []
                     if reasons:
                         st.markdown(f"**Reasons:** {', '.join(reasons)}")
