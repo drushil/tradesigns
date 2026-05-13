@@ -32,13 +32,24 @@ def _make_bars(prices: list, volumes: list = None) -> pd.DataFrame:
 
 
 def _import_orb():
-    from backend.signals.engine import opening_range_breakout_score
-    return opening_range_breakout_score
+    return _import_engine().opening_range_breakout_score
 
 
 def _clear_orb_cache():
-    import backend.signals.engine as eng
+    eng = _import_engine()
     eng._orb_cache.clear()
+
+
+def _import_engine():
+    """Load the real signal engine if the broader agent tests installed a stub."""
+    import importlib
+    import sys
+
+    eng = sys.modules.get("backend.signals.engine")
+    if eng is not None and not hasattr(eng, "_orb_cache"):
+        sys.modules.pop("backend.signals.engine", None)
+        sys.modules.pop("backend.signals", None)
+    return importlib.import_module("backend.signals.engine")
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
