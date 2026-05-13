@@ -3,6 +3,7 @@ backend/agent.py
 Main agent loop. Runs on a schedule, ties together:
 signals → risk gate → EV check → LLM decision → execution → learning → logging
 """
+from __future__ import annotations
 import os
 import time
 import asyncio
@@ -2335,6 +2336,9 @@ def _check_partial_exit(ticker: str, trade: dict, current_price: float):
     Updates _open_trades with runner stop after the partial.
     No-op if partial target is not set or already done.
     """
+    if trade.get("partial_exit_done"):
+        return
+
     partial_target = trade.get("partial_target_price")
     if not partial_target:
         return
