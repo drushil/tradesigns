@@ -240,6 +240,19 @@ def _minutes_to_regular_close(now: datetime = None) -> Optional[int]:
     return max(0, close - current)
 
 
+def _minutes_since_regular_open(now: datetime = None) -> Optional[int]:
+    """Minutes since regular US market open, or None outside regular market hours."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if not is_regular_us_market_hours(now):
+        return None
+    ny_now = _to_new_york_time(now)
+    open_minutes = 9 * 60 + 30
+    current = ny_now.hour * 60 + ny_now.minute
+    return max(0, current - open_minutes)
+
+
 def _is_eod_final_force_exit_window(now: datetime = None) -> bool:
     """Return True in the final EOD window where intraday positions must close."""
     minutes_to_close = _minutes_to_regular_close(now)
@@ -272,6 +285,13 @@ def _is_leveraged_etf(ticker: str, profile: dict) -> bool:
     return ticker.upper() in [t.upper() for t in profile.get("leveraged_etf_tickers", [])]
 
 
+def _leveraged_etf_stop_scalar(ticker: str, profile: dict) -> float:
+    """Extra stop room for leveraged ETFs, where normal ATR stops are often too tight."""
+    if not _is_leveraged_etf(ticker, profile):
+        return 1.0
+    return max(1.0, float(profile.get("leveraged_etf_stop_scalar", 1.35)))
+
+
 def _leveraged_etf_max_hold_window(now: datetime = None) -> bool:
     """Return True if we are past the leveraged ETF max-hold cutoff (default 3:45 PM ET)."""
     now = now or datetime.now(timezone.utc)
@@ -298,6 +318,10 @@ def _get_portfolio_state() -> dict:
     positions = get_positions()
     equity    = account.get("portfolio_value", 100.0)
     cash      = account.get("cash", 100.0)
+    fx_rate   = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
+    unrealized_pl_usd = sum(float(p.get("unrealized_pl") or 0) for p in positions)
+    net_market_value_usd = sum(float(p.get("market_value") or 0) for p in positions)
+    gross_market_value_usd = sum(abs(float(p.get("market_value") or 0)) for p in positions)
 
     # VIX
     try:
@@ -312,13 +336,23 @@ def _get_portfolio_state() -> dict:
     # This ensures the circuit breaker fires at the correct EUR loss amount
     # regardless of the Alpaca paper account's $100k default.
     start_eur = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
-    fx_rate   = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
     start_usd = start_eur * fx_rate
     drawdown  = max(0.0, (start_usd - equity) / start_usd * 100)
 
     return {
         "equity":       round(equity, 2),
         "cash":         round(cash, 2),
+        "equity_eur":   round(equity / fx_rate, 2),
+        "cash_eur":     round(cash / fx_rate, 2),
+        "fx_rate":      fx_rate,
+        "broker_equity_usd": account.get("alpaca_actual_usd"),
+        "broker_cash_usd": account.get("alpaca_cash_usd"),
+        "capital_ceiling_eur": account.get("capital_ceiling_eur"),
+        "capital_ceiling_usd": account.get("capital_ceiling_usd"),
+        "unrealized_pnl_usd": round(unrealized_pl_usd, 2),
+        "unrealized_pnl_eur": round(unrealized_pl_usd / fx_rate, 2),
+        "net_market_value_usd": round(net_market_value_usd, 2),
+        "gross_market_value_usd": round(gross_market_value_usd, 2),
         "cash_pct":     round(cash / equity * 100, 1) if equity > 0 else 100.0,
         "positions":    positions,
         "vix":          round(vix, 1),
@@ -428,6 +462,9 @@ def _missing_runtime_config() -> list[str]:
 
 def _apply_execution_overrides(profile: dict) -> dict:
     p = profile.copy()
+    p.setdefault("min_grade_required", "A")
+    p.setdefault("allow_b_grade_exploration", True)
+    p.setdefault("b_grade_size_multiplier", 0.20)
     p.setdefault("ev_reduced_size_floor_pct", -0.02)
     p.setdefault("ev_probe_floor_pct", -0.10)
     p.setdefault("ev_breakout_probe_min_quality", 0.65)
@@ -444,9 +481,18 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("event_risk_min_stop_pct", 0.25)
     p.setdefault("event_risk_latest_entry_utc_hour", 19)
     p.setdefault("max_new_intraday_trades_per_cycle", 2)
+    p.setdefault("leveraged_etf_stop_scalar", 1.35)
+    p.setdefault("a_plus_full_size_max_atr_pct", 2.5)
+    p.setdefault("a_plus_full_size_max_stop_pct", 5.0)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
+    if os.getenv("MIN_GRADE_REQUIRED"):
+        p["min_grade_required"] = os.getenv("MIN_GRADE_REQUIRED", "").strip().upper()
+    if os.getenv("ALLOW_B_GRADE_EXPLORATION") is not None:
+        p["allow_b_grade_exploration"] = _env_bool("ALLOW_B_GRADE_EXPLORATION", True)
+    if os.getenv("B_GRADE_SIZE_MULTIPLIER"):
+        p["b_grade_size_multiplier"] = _env_float("B_GRADE_SIZE_MULTIPLIER", p["b_grade_size_multiplier"])
     short_override = os.getenv("ALLOW_SHORT_SELLING")
     if short_override is not None and short_override.strip():
         p["allow_short_selling"] = short_override.strip().lower() == "true"
@@ -675,6 +721,11 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
     breakout_quality = _breakout_quality(
         action, composite, signals, getattr(regime_state, "market_regime", None)
     )
+    atr_data = signal_result.get("atr_data") or {}
+    minutes_since_open = _minutes_since_regular_open()
+    is_leveraged = str(ticker or "").upper() in [
+        t.upper() for t in PROFILE.get("leveraged_etf_tickers", [])
+    ]
     return {
         "ticker": ticker,
         "action": action,
@@ -688,6 +739,10 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
         "event_risk_active": bool(event_info),
         "event_risk_intraday_probe": event_probe,
         "event_risk_info": event_info,
+        "minutes_since_open": minutes_since_open,
+        "atr_pct": atr_data.get("atr_pct"),
+        "volatility_regime": atr_data.get("volatility_regime"),
+        "is_leveraged_etf": is_leveraged,
     }
 
 
@@ -716,6 +771,12 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             "reference_price": reference_price,
             "setup_grade": (setup_context or {}).get("setup_grade"),
             "a_plus_blocked": (setup_context or {}).get("setup_grade") == "A+",
+            "minutes_since_open": (setup_context or {}).get("minutes_since_open"),
+            "atr_pct": (setup_context or {}).get("atr_pct"),
+            "volatility_bucket": (setup_context or {}).get("volatility_regime"),
+            "is_leveraged_etf": (setup_context or {}).get("is_leveraged_etf"),
+            "probe_eligible": False,
+            "reason_not_probed": "probe_not_implemented",
         }
         result = insert_blocked_opportunity(payload)
         if result.get("error"):
@@ -942,10 +1003,12 @@ def _replay_closed_trade_exits():
     min_age = _env_int("CLOSED_TRADE_REPLAY_MIN_AGE_MINUTES", 20)
     horizon = _env_int("CLOSED_TRADE_REPLAY_HORIZON_MINUTES", 120)
     limit = _env_int("CLOSED_TRADE_REPLAY_LIMIT", 25)
+    max_age_days = _env_int("CLOSED_TRADE_REPLAY_MAX_AGE_DAYS", 5)
     trades = get_unchecked_closed_trades_for_replay(
         min_age_minutes=min_age,
         limit=limit,
         exit_reasons=_closed_trade_replay_exit_reasons(),
+        max_age_days=max_age_days,
     )
     if not trades:
         return
@@ -959,11 +1022,17 @@ def _replay_closed_trade_exits():
             replay = _replay_one_closed_trade_exit(trade, horizon)
             if not replay:
                 # No bars returned — mark as checked so this row is never retried.
-                update_trade_post_exit_replay(trade.get("id"), {
+                result = update_trade_post_exit_replay(trade.get("id"), {
                     "post_exit_horizon_minutes": horizon,
-                    "post_exit_result_json": {"skipped": "no_bars", "horizon_minutes": horizon},
+                    "post_exit_result_json": {
+                        "status": "skipped_no_bars",
+                        "horizon_minutes": horizon,
+                        "exit_reason": trade.get("exit_reason"),
+                        "ticker": trade.get("ticker"),
+                    },
                 })
-                skipped += 1
+                if not result.get("error"):
+                    skipped += 1
                 continue
             result = update_trade_post_exit_replay(trade.get("id"), replay)
             if not result.get("error"):
@@ -1097,71 +1166,124 @@ def _ticker_loss_cooldown_active(ticker: str, side: str, recent_trades: list,
     return None
 
 
-def _hydrate_open_trades():
-    for record in get_open_trade_records():
+def _rehydrated_open_trade(record: dict) -> dict:
+    sizing = record.get("sizing_json") or {}
+    entry_price = float(record.get("entry_price") or 0)
+    return {
+        "entry_time": _parse_dt(record.get("entry_time") or record.get("created_at")),
+        "entry_price": entry_price,
+        "quantity": float(record.get("quantity") or record.get("submitted_qty") or 0),
+        "stop_price": float(record.get("stop_price") or 0),
+        "take_profit_price": float(record.get("take_profit_price") or 0),
+        "hold_minutes": int(record.get("hold_minutes") or 30),
+        "hold_days": int(record.get("hold_days") or 0),
+        "horizon": record.get("horizon") or "short",
+        "size_eur": float(record.get("size_eur") or 0),
+        "size_usd": float(record.get("size_usd") or 0),
+        "intended_size_eur": float(record.get("intended_size_eur") or record.get("size_eur") or 0),
+        "executed_size_eur": float(record.get("executed_size_eur") or record.get("size_eur") or 0),
+        "executed_size_usd": float(record.get("executed_size_usd") or record.get("size_usd") or 0),
+        "submitted_qty": float(record.get("submitted_qty") or record.get("quantity") or 0),
+        "implied_qty": float(record.get("implied_qty") or record.get("quantity") or 0),
+        "bracket_floor_qty_loss_pct": float(record.get("bracket_floor_qty_loss_pct") or 0),
+        "side": record.get("side", "BUY"),
+        "composite_score": float(record.get("composite_score") or 0),
+        "signals_json": record.get("signals_json") or {},
+        "regime": record.get("regime") or "ranging",
+        "exposure_direction": record.get("exposure_direction"),
+        "strategy_family": record.get("strategy_family"),
+        "regime_debug_json": record.get("regime_debug_json") or {},
+        "macro_regime": record.get("macro_regime"),
+        "macro_multiplier": float(record.get("macro_multiplier") or 1.0),
+        "dip_type": record.get("dip_type"),
+        "sizing_json": sizing,
+        "mean_reversion_trade": bool(record.get("mean_reversion_trade") or False),
+        "swing_trade": bool(record.get("swing_trade") or False),
+        "promoted_to_swing": bool(record.get("promoted_to_swing") or False),
+        "promoted_at": record.get("promoted_at"),
+        "initial_horizon": record.get("initial_horizon") or record.get("horizon") or "short",
+        "swing_conviction": float(record.get("swing_conviction") or 0),
+        "swing_reasons": record.get("swing_reasons") or [],
+        "highest_price_since_entry": float(
+            record.get("highest_price_since_entry") or entry_price or 0
+        ),
+        "trailing_stop_price": float(record.get("trailing_stop_price") or 0),
+        "stop_multiplier": float(record.get("stop_multiplier") or sizing.get("stop_multiplier") or 1.5),
+        "stop_pct": float(record.get("stop_pct") or sizing.get("stop_pct") or 0),
+        "atr_pct": float(record.get("atr_pct") or sizing.get("atr_pct") or 0),
+        "atr_raw": float(record.get("atr_raw") or sizing.get("atr_raw") or 0),
+        "max_hold_minutes": int(record.get("max_hold_minutes") or record.get("hold_minutes") or 30),
+        "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
+        "hold_extension_count": int(record.get("hold_extension_count") or 0),
+        "hold_decision_json": record.get("hold_decision_json") or {},
+        "peak_directional_score": float(record.get("peak_directional_score") or 0),
+        "protective_stop_order_id": record.get("protective_stop_order_id"),
+        "llm_conviction": float(record.get("llm_conviction") or 0),
+        "llm_rationale": record.get("llm_rationale") or "",
+        "order_id": record.get("order_id"),
+        # Grading / partial-exit fields (added in migration v3)
+        "setup_grade":              record.get("setup_grade"),
+        "sector_confirmation":      record.get("sector_confirmation"),
+        "partial_target_price":     float(record["partial_target_price"]) if record.get("partial_target_price") is not None else None,
+        "partial_exit_pct":         float(record.get("partial_exit_pct") or 0.5),
+        "partial_exit_done":        bool(record.get("partial_exit_done") or False),
+        "partial_exit_qty":         float(record.get("partial_exit_qty") or 0),
+        "runner_atr_mult":          float(record.get("runner_atr_mult") or 0.8),
+        "runner_stop_price":        float(record["runner_stop_price"]) if record.get("runner_stop_price") is not None else None,
+        "vwap_thesis_strike_count": int(record.get("vwap_thesis_strike_count") or 0),
+    }
+
+
+def _hydrate_open_trades(broker_positions: list[dict] = None):
+    """
+    Rebuild runtime trade memory from persistent DB rows, then reconcile it to broker state.
+    GitHub Actions runners are stateless, so the DB row is runtime memory between cycles.
+    """
+    records = get_open_trade_records()
+    position_tickers = None
+    if broker_positions is not None:
+        position_tickers = _open_position_tickers({"positions": broker_positions})
+
+    rebuilt = {}
+    stale = []
+    for record in records:
         ticker = record.get("ticker")
-        if not ticker or ticker in _open_trades:
+        if not ticker:
             continue
-        _open_trades[ticker] = {
-            "entry_time": _parse_dt(record.get("entry_time") or record.get("created_at")),
-            "entry_price": float(record.get("entry_price") or 0),
-            "stop_price": float(record.get("stop_price") or 0),
-            "take_profit_price": float(record.get("take_profit_price") or 0),
-            "hold_minutes": int(record.get("hold_minutes") or 30),
-            "hold_days": int(record.get("hold_days") or 0),
-            "horizon": record.get("horizon") or "short",
-            "size_eur": float(record.get("size_eur") or 0),
-            "size_usd": float(record.get("size_usd") or 0),
-            "intended_size_eur": float(record.get("intended_size_eur") or record.get("size_eur") or 0),
-            "executed_size_eur": float(record.get("executed_size_eur") or record.get("size_eur") or 0),
-            "executed_size_usd": float(record.get("executed_size_usd") or record.get("size_usd") or 0),
-            "submitted_qty": float(record.get("submitted_qty") or record.get("quantity") or 0),
-            "implied_qty": float(record.get("implied_qty") or record.get("quantity") or 0),
-            "bracket_floor_qty_loss_pct": float(record.get("bracket_floor_qty_loss_pct") or 0),
-            "side": record.get("side", "BUY"),
-            "composite_score": float(record.get("composite_score") or 0),
-            "signals_json": record.get("signals_json") or {},
-            "regime": record.get("regime") or "ranging",
-            "exposure_direction": record.get("exposure_direction"),
-            "strategy_family": record.get("strategy_family"),
-            "regime_debug_json": record.get("regime_debug_json") or {},
-            "macro_regime": record.get("macro_regime"),
-            "macro_multiplier": float(record.get("macro_multiplier") or 1.0),
-            "dip_type": record.get("dip_type"),
-            "sizing_json": record.get("sizing_json") or {},
-            "mean_reversion_trade": bool(record.get("mean_reversion_trade") or False),
-            "swing_trade": bool(record.get("swing_trade") or False),
-            "promoted_to_swing": bool(record.get("promoted_to_swing") or False),
-            "promoted_at": record.get("promoted_at"),
-            "initial_horizon": record.get("initial_horizon") or record.get("horizon") or "short",
-            "swing_conviction": float(record.get("swing_conviction") or 0),
-            "swing_reasons": record.get("swing_reasons") or [],
-            "highest_price_since_entry": float(
-                record.get("highest_price_since_entry") or record.get("entry_price") or 0
-            ),
-            "trailing_stop_price": float(record.get("trailing_stop_price") or 0),
-            "stop_multiplier": float(record.get("stop_multiplier") or 1.5),
-            "stop_pct": float(record.get("stop_pct") or 0),
-            "max_hold_minutes": int(record.get("max_hold_minutes") or record.get("hold_minutes") or 30),
-            "daily_reeval_count": int(record.get("daily_reeval_count") or 0),
-            "hold_extension_count": int(record.get("hold_extension_count") or 0),
-            "hold_decision_json": record.get("hold_decision_json") or {},
-            "peak_directional_score": float(record.get("peak_directional_score") or 0),
-            "protective_stop_order_id": record.get("protective_stop_order_id"),
-            "llm_conviction": float(record.get("llm_conviction") or 0),
-            "llm_rationale": record.get("llm_rationale") or "",
-            "order_id": record.get("order_id"),
-            # Grading / partial-exit fields (added in migration v3)
-            "setup_grade":              record.get("setup_grade"),
-            "sector_confirmation":      record.get("sector_confirmation"),
-            "partial_target_price":     float(record["partial_target_price"]) if record.get("partial_target_price") is not None else None,
-            "partial_exit_pct":         float(record.get("partial_exit_pct") or 0.5),
-            "partial_exit_done":        bool(record.get("partial_exit_done") or False),
-            "partial_exit_qty":         float(record.get("partial_exit_qty") or 0),
-            "runner_atr_mult":          float(record.get("runner_atr_mult") or 0.8),
-            "runner_stop_price":        float(record["runner_stop_price"]) if record.get("runner_stop_price") is not None else None,
-            "vwap_thesis_strike_count": int(record.get("vwap_thesis_strike_count") or 0),
-        }
+        ticker = str(ticker).upper()
+        if record.get("closed_at"):
+            stale.append((ticker, "closed_at_present"))
+            continue
+        if position_tickers is not None and ticker not in position_tickers:
+            stale.append((ticker, "not_in_broker_positions"))
+            continue
+        trade = _rehydrated_open_trade(record)
+        missing = [
+            key for key in ("entry_time", "entry_price", "side", "order_id")
+            if not trade.get(key)
+        ]
+        if missing:
+            log_event("WARN", "open_trade_rehydrate_missing_fields", {
+                "ticker": ticker,
+                "missing": missing,
+            })
+        rebuilt[ticker] = trade
+
+    for ticker, reason in stale:
+        close_open_trade_record(ticker, reason)
+        log_event("WARN", "stale_open_trade_reconciled", {
+            "ticker": ticker,
+            "reason": reason,
+        })
+
+    memory_stale = set(_open_trades) - set(rebuilt)
+    if memory_stale:
+        log_event("INFO", "open_trade_memory_rebuilt", {
+            "removed": sorted(memory_stale),
+            "loaded": sorted(rebuilt),
+        })
+    _open_trades.clear()
+    _open_trades.update(rebuilt)
 
 
 # ── PDT (Pattern Day Trader) tracking ────────────────────────────────────────
@@ -1432,7 +1554,7 @@ def run_signal_cycle():
     )
     weights          = _learning_engine.get_weights(regime)
     recent_trades    = get_recent_trades(days=30)
-    _hydrate_open_trades()
+    _hydrate_open_trades(portfolio_state.get("positions", []))
 
     # Staleness guard: if this cycle started too late (queued behind a cancelled
     # run), skip signal computation and only run exit checks. Bracket orders
@@ -1587,8 +1709,26 @@ def run_signal_cycle():
                     )
                     continue
 
-                # Enforce minimum grade from dynamic risk budget
+                # Enforce minimum grade from dynamic risk budget. B setups may be kept only as tiny
+                # exploration trades so learning can continue without letting them drive P&L.
                 if grade_sort_key(setup_grade.grade) < grade_sort_key(min_grade):
+                    if setup_grade.grade == "B" and effective_profile.get("allow_b_grade_exploration", False):
+                        ev_override = (candidate.get("ev_result") or {}).copy()
+                        original_multiplier = float(ev_override.get("size_multiplier") or 1.0)
+                        ev_override["size_multiplier"] = min(
+                            original_multiplier,
+                            float(effective_profile.get("b_grade_size_multiplier", 0.20)),
+                        )
+                        ev_override["ev_decision"] = "b_grade_exploration_size"
+                        candidate["ev_result"] = ev_override
+                        log_event("INFO", "b_grade_exploration_sized", {
+                            "ticker": t,
+                            "grade": setup_grade.grade,
+                            "min_grade": min_grade,
+                            "size_multiplier": ev_override["size_multiplier"],
+                        })
+                        graded_candidates.append(candidate)
+                        continue
                     log_event("INFO", "grade_below_minimum", {
                         "ticker": t, "grade": setup_grade.grade,
                         "min_grade": min_grade, "composite": candidate["composite"],
@@ -1605,8 +1745,12 @@ def run_signal_cycle():
                 graded_candidates.append(candidate)
             except Exception as e:
                 log_event("WARN", f"grade_error_{candidate['ticker']}", {"error": str(e)[:120]})
-                candidate["setup_grade"] = None
-                graded_candidates.append(candidate)
+                _record_blocked_opportunity(
+                    candidate["ticker"], candidate.get("action_hint"), candidate.get("composite", 0),
+                    candidate.get("signals_snap"), candidate.get("setup_context"),
+                    candidate.get("ticker_regime"), "ranking", "setup_grade_unavailable",
+                    ev_result=candidate.get("ev_result"),
+                )
 
         candidates = graded_candidates
         candidates.sort(
@@ -2013,6 +2157,25 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
 
     # 6. Size and submit order
     sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, ticker_regime_state)
+    base_stop_pct = float(sizing.get("stop_pct") or profile.get("stop_loss_pct", 2.0))
+    stop_scalar = _leveraged_etf_stop_scalar(ticker, profile)
+    if stop_scalar > 1.0:
+        adjusted_stop_pct = min(12.0, max(base_stop_pct, base_stop_pct * stop_scalar))
+        if adjusted_stop_pct > base_stop_pct:
+            risk_scale = base_stop_pct / adjusted_stop_pct
+            sizing["size_eur"] = round(float(sizing["size_eur"]) * risk_scale, 2)
+            sizing["stop_pct"] = round(adjusted_stop_pct, 3)
+            sizing["volatility_stop_adjustment"] = {
+                "reason": "leveraged_etf_stop_scalar",
+                "base_stop_pct": round(base_stop_pct, 3),
+                "adjusted_stop_pct": round(adjusted_stop_pct, 3),
+                "risk_scale": round(risk_scale, 4),
+                "stop_scalar": round(stop_scalar, 3),
+            }
+            log_event("INFO", "volatility_stop_adjusted", {
+                "ticker": ticker,
+                **sizing["volatility_stop_adjustment"],
+            })
     final_size = sizing["size_eur"]
     ev_size_multiplier = float(ev_result.get("size_multiplier") or 1.0)
     # Apply grade multiplier on top of EV multiplier (capped at 2.0× to prevent runaway sizing)
@@ -2020,6 +2183,24 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         combined_mult = effective_size_multiplier(setup_grade, ev_size_multiplier)
     else:
         combined_mult = ev_size_multiplier
+    if setup_grade is not None and setup_grade.grade == "A+":
+        atr_pct_for_quality = float(sizing.get("atr_pct") or 0)
+        stop_pct_for_quality = float(sizing.get("stop_pct") or 0)
+        max_atr = float(profile.get("a_plus_full_size_max_atr_pct", 2.5))
+        max_stop = float(profile.get("a_plus_full_size_max_stop_pct", 5.0))
+        if atr_pct_for_quality > max_atr or stop_pct_for_quality > max_stop:
+            combined_mult = min(combined_mult, ev_size_multiplier)
+            sizing["a_plus_size_capped"] = True
+            sizing["a_plus_size_cap_reason"] = {
+                "atr_pct": round(atr_pct_for_quality, 3),
+                "max_atr_pct": max_atr,
+                "stop_pct": round(stop_pct_for_quality, 3),
+                "max_stop_pct": max_stop,
+            }
+            log_event("INFO", "a_plus_size_capped_by_volatility", {
+                "ticker": ticker,
+                **sizing["a_plus_size_cap_reason"],
+            })
     final_size *= combined_mult
     if action == "SELL":
         final_size = _cap_short_notional(final_size, capital_base, profile)
@@ -2221,6 +2402,10 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "executed_size_eur": executed_size_eur,
         "executed_size_usd": executed_size_usd,
         "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
+        "atr_pct":       sizing.get("atr_pct") or atr_data.get("atr_pct"),
+        "atr_raw":       atr_data.get("atr_raw"),
+        "stop_pct":      stop_loss_pct,
+        "stop_multiplier": sizing.get("stop_multiplier"),
         "side":          action,
         "composite_score": composite,
         "signals_json":  {k: {"score": v["score"]} for k, v in signals_snap.items()},
@@ -2858,14 +3043,13 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
             "result": protective_cancel,
         })
 
-    if exit_reason in {"time_exit", "eod_cleanup"}:
-        cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
-        if cancel_results:
-            log_event("INFO", "bracket_orders_cancelled_for_manual_exit", {
-                "ticker": ticker,
-                "exit_reason": exit_reason,
-                "results": cancel_results[:4],
-            })
+    cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
+    if cancel_results:
+        log_event("INFO", "open_orders_cancelled_for_exit", {
+            "ticker": ticker,
+            "exit_reason": exit_reason,
+            "results": cancel_results[:4],
+        })
 
     result = close_position(ticker)
     close_error = result.get("error")
@@ -3180,6 +3364,10 @@ def _submit_horizon_order(
         "executed_size_eur": executed_size_eur,
         "executed_size_usd": executed_size_usd,
         "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
+        "atr_pct": sizing.get("atr_pct") or (atr_data or {}).get("atr_pct"),
+        "atr_raw": (atr_data or {}).get("atr_raw"),
+        "stop_pct": stop_loss_pct,
+        "stop_multiplier": sizing.get("stop_multiplier"),
         "side": side.upper(),
         "composite_score": composite_score,
         "signals_json": signals_json or {},
@@ -3276,7 +3464,8 @@ def re_evaluate_swing_positions():
     Re-scores each promoted momentum swing position and decides:
     HOLD (extend), EXIT (close now), or TIGHTEN (trail stop on profit).
     """
-    _hydrate_open_trades()
+    portfolio_state = _get_portfolio_state()
+    _hydrate_open_trades(portfolio_state.get("positions", []))
     open_swings = [
         t for t, data in _open_trades.items()
         if data.get("promoted_to_swing") is True
@@ -3289,7 +3478,7 @@ def re_evaluate_swing_positions():
     log_event("INFO", "swing_reeval_start", {"positions": open_swings})
 
     profile = _apply_execution_overrides(
-        get_effective_profile(PROFILE, _get_portfolio_state())
+        get_effective_profile(PROFILE, portfolio_state)
     )
     weights = (_learning_engine.get_weights("trending")
                if _learning_engine else profile["signal_weights"])
@@ -3403,7 +3592,7 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
     if macro_regime is None:
         macro_regime = detect_macro_regime()
 
-    _hydrate_open_trades()
+    _hydrate_open_trades(portfolio_state.get("positions", []))
     open_tickers = _open_position_tickers(portfolio_state) | set(_open_trades.keys())
     log_event("INFO", "swing_cycle_start", {
         "tickers": SWING_TICKERS,
@@ -3497,13 +3686,16 @@ def _save_snapshot(portfolio_state, regime):
     raw_capital = os.getenv("STARTING_CAPITAL_EUR", "3000")
     fx_rate     = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
     start_equity_usd = float(raw_capital) * fx_rate if raw_capital and raw_capital.strip() else equity
+    unrealized_pnl_usd = float(portfolio_state.get("unrealized_pnl_usd") or 0)
+    effective_total_eur = (equity + unrealized_pnl_usd) / fx_rate
+    effective_cash_eur = float(portfolio_state.get("cash") or 0) / fx_rate
 
     cum_pnl = (equity - start_equity_usd) / start_equity_usd * 100 if start_equity_usd else 0.0
     cum_pnl = max(-9999.0, min(9999.0, cum_pnl))
 
     save_snapshot({
-        "total_value_eur":    equity,
-        "cash_eur":           portfolio_state["cash"],
+        "total_value_eur":    round(effective_total_eur, 2),
+        "cash_eur":           round(effective_cash_eur, 2),
         "daily_pnl_pct":      -portfolio_state["drawdown_today"],
         "cumulative_pnl_pct": round(cum_pnl, 3),
         "drawdown_pct":       portfolio_state["drawdown_today"],
@@ -3511,6 +3703,17 @@ def _save_snapshot(portfolio_state, regime):
         "trades_today":       portfolio_state["trades_today"],
         "llm_calls_today":    _llm_calls_this_hour,
         "llm_cost_today":     round(_llm_calls_this_hour * 0.001, 4),
+        "broker_equity_usd":  portfolio_state.get("broker_equity_usd"),
+        "broker_cash_usd":    portfolio_state.get("broker_cash_usd"),
+        "effective_equity_usd": portfolio_state.get("equity"),
+        "effective_cash_usd": portfolio_state.get("cash"),
+        "open_market_value_usd": portfolio_state.get("net_market_value_usd"),
+        "gross_market_value_usd": portfolio_state.get("gross_market_value_usd"),
+        "unrealized_pnl_usd": unrealized_pnl_usd,
+        "unrealized_pnl_eur": round(unrealized_pnl_usd / fx_rate, 2),
+        "fx_rate": fx_rate,
+        "capital_ceiling_eur": portfolio_state.get("capital_ceiling_eur"),
+        "capital_ceiling_usd": portfolio_state.get("capital_ceiling_usd"),
     })
 
 

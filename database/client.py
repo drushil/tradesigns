@@ -90,6 +90,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "executed_size_eur": trade.get("executed_size_eur"),
             "executed_size_usd": trade.get("executed_size_usd"),
             "bracket_floor_qty_loss_pct": trade.get("bracket_floor_qty_loss_pct"),
+            "atr_pct": trade.get("atr_pct"),
+            "atr_raw": trade.get("atr_raw"),
             "order_id": trade.get("order_id"),
             "regime": trade.get("regime"),
             "macro_regime": trade.get("macro_regime"),
@@ -145,7 +147,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                 if k not in {"implied_qty", "bracket_floor_qty_loss_pct",
                              "intended_size_eur", "executed_size_eur", "executed_size_usd",
                              "sizing_json", "regime_debug_json", "percentile_rank",
-                             "grade_reasons", "runner_atr_mult", "vwap_thesis_strike_count"}
+                             "grade_reasons", "runner_atr_mult", "vwap_thesis_strike_count",
+                             "atr_pct", "atr_raw"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}
@@ -343,6 +346,14 @@ def insert_blocked_opportunity(opportunity: dict) -> dict:
             "reference_price": opportunity.get("reference_price"),
             "setup_grade": opportunity.get("setup_grade"),
             "a_plus_blocked": opportunity.get("a_plus_blocked"),
+            "minutes_since_open": opportunity.get("minutes_since_open"),
+            "atr_pct": opportunity.get("atr_pct"),
+            "volatility_bucket": opportunity.get("volatility_bucket"),
+            "is_leveraged_etf": opportunity.get("is_leveraged_etf"),
+            "spread_pct": opportunity.get("spread_pct"),
+            "opening_range_position": opportunity.get("opening_range_position"),
+            "probe_eligible": opportunity.get("probe_eligible"),
+            "reason_not_probed": opportunity.get("reason_not_probed"),
         }
         result = db.table("blocked_opportunities").insert(record).execute()
         return result.data[0] if result.data else {}
@@ -618,7 +629,16 @@ def get_learnings(limit: int = 10) -> list:
 def save_snapshot(snapshot: dict):
     try:
         db = get_client(write=True)
-        db.table("portfolio_snapshots").insert(snapshot).execute()
+        try:
+            db.table("portfolio_snapshots").insert(snapshot).execute()
+        except Exception:
+            base_columns = {
+                "total_value_eur", "cash_eur", "daily_pnl_pct",
+                "cumulative_pnl_pct", "drawdown_pct", "open_positions",
+                "trades_today", "llm_calls_today", "llm_cost_today",
+            }
+            fallback = {k: v for k, v in snapshot.items() if k in base_columns}
+            db.table("portfolio_snapshots").insert(fallback).execute()
     except Exception as e:
         print(f"[SNAPSHOT_WRITE_FAILED] {str(e)[:200]}")
 

@@ -61,6 +61,7 @@ def get_account() -> dict:
             "currency":            account.currency,
             "status":              str(account.status),
             "alpaca_actual_usd":   round(alpaca_actual_usd, 2),
+            "alpaca_cash_usd":     round(real_cash, 2),
             "capital_ceiling_eur": max_capital_eur,
             "capital_ceiling_usd": round(max_capital_usd, 2),
             "fx_rate_used":        fx_rate,
