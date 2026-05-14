@@ -12,6 +12,9 @@ on:
     - cron: '5 21 * * 1-5'
     # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
     - cron: '35 13,14 * * 1-5'
+    # Manual advisory scan windows — EU open and US high-probability windows
+    - cron: '*/15 7-9 * * 1-5'
+    - cron: '*/10 13-15,18-19 * * 1-5'
   # Market-hours cycles triggered by cron-job.org via workflow_dispatch
   # (more reliable than GitHub's schedule — honours triggers within seconds)
   workflow_dispatch:
@@ -100,6 +103,25 @@ jobs:
           DIVIDEND_SCAN_ENABLED: "${{ vars.DIVIDEND_SCAN_ENABLED }}"
           DIVIDEND_MIN_YIELD_PCT: "${{ vars.DIVIDEND_MIN_YIELD_PCT }}"
           ALLOW_SHORT_SELLING:  "${{ vars.ALLOW_SHORT_SELLING }}"
+          ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
+          ADVISORY_MARKETS:     "${{ vars.ADVISORY_MARKETS }}"
+          ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
+          ADVISORY_SHADOW_MARKETS: "${{ vars.ADVISORY_SHADOW_MARKETS }}"
+          ADVISORY_CAPITAL_EUR: "${{ vars.ADVISORY_CAPITAL_EUR }}"
+          ADVISORY_MAX_LIVE_ALERTS_PER_DAY: "${{ vars.ADVISORY_MAX_LIVE_ALERTS_PER_DAY }}"
+          ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY: "${{ vars.ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY }}"
+          ADVISORY_MAX_OPEN_LIVE_TRADES: "${{ vars.ADVISORY_MAX_OPEN_LIVE_TRADES }}"
+          ADVISORY_MAX_LIVE_TRADES_PER_SESSION: "${{ vars.ADVISORY_MAX_LIVE_TRADES_PER_SESSION }}"
+          ADVISORY_RISK_PER_TRADE_EUR: "${{ vars.ADVISORY_RISK_PER_TRADE_EUR }}"
+          ADVISORY_MAX_DAILY_LOSS_EUR: "${{ vars.ADVISORY_MAX_DAILY_LOSS_EUR }}"
+          ADVISORY_DEFAULT_SIZE_EUR: "${{ vars.ADVISORY_DEFAULT_SIZE_EUR }}"
+          ADVISORY_A_PLUS_MAX_SIZE_EUR: "${{ vars.ADVISORY_A_PLUS_MAX_SIZE_EUR }}"
+          ADVISORY_MIN_COMPOSITE: "${{ vars.ADVISORY_MIN_COMPOSITE }}"
+          ADVISORY_MIN_EV_PCT: "${{ vars.ADVISORY_MIN_EV_PCT }}"
+          ADVISORY_MIN_BREAKOUT_QUALITY: "${{ vars.ADVISORY_MIN_BREAKOUT_QUALITY }}"
+          ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
+          ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"
+          EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
           DISPATCH_MODE:        "${{ github.event.inputs.mode }}"
         run: |
@@ -116,6 +138,7 @@ jobs:
               re_evaluate_swing_positions,
               _should_run_swing_recheck,
           )
+          from backend.advisory import run_advisory_cycle
 
           # Manual override via workflow_dispatch input takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
@@ -134,6 +157,9 @@ jobs:
           elif dispatch_mode == "signal":
               print("Running signal cycle (manual trigger)...")
               run_signal_cycle()
+          elif dispatch_mode == "advisory":
+              print("Running advisory cycle (manual trigger)...")
+              run_advisory_cycle()
           else:
               now = datetime.now(timezone.utc)
               if now.weekday() == 6 and now.hour == 17:
@@ -150,11 +176,19 @@ jobs:
               elif _should_run_swing_recheck(now):
                   print("Running daily swing re-evaluation...")
                   re_evaluate_swing_positions()
-              elif is_regular_us_market_hours(now):
-                  print("Running signal cycle...")
-                  run_signal_cycle()
               else:
-                  print("Outside trading window — no action.")
+                  advisory_result = None
+                  advisory_enabled = os.getenv("ADVISORY_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+                  advisory_auto = os.getenv("ADVISORY_AUTO_RUN", "true").strip().lower() in {"1", "true", "yes", "on"}
+                  if advisory_enabled and advisory_auto:
+                      print("Running advisory scan...")
+                      advisory_result = run_advisory_cycle()
+                      print(f"Advisory result: {advisory_result}")
+                  if is_regular_us_market_hours(now):
+                      print("Running signal cycle...")
+                      run_signal_cycle()
+                  elif advisory_result is None:
+                      print("Outside trading window — no action.")
           PY
 
       - name: Send Discord summary

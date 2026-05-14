@@ -134,6 +134,8 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "runner_stop_price": trade.get("runner_stop_price"),
             "vwap_thesis_strike_count": trade.get("vwap_thesis_strike_count"),
             "status": "open",
+            "closed_at": None,
+            "close_reason": None,
         }
         try:
             result = db.table("open_trades").upsert(record, on_conflict="ticker").execute()
@@ -433,6 +435,73 @@ def get_blocked_opportunities(days: int = 7, limit: int = 500) -> list:
         return result.data or []
     except Exception as e:
         print(f"[BLOCKED_OPPORTUNITY_STATS_FAILED] {str(e)[:200]}")
+        return []
+
+
+# ── Advisory signals ─────────────────────────────────────────────────────────
+
+def insert_advisory_signal(signal: dict) -> dict:
+    """Persist a manual-trading advisory signal, separate from broker trades."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "market": signal.get("market"),
+            "mode": signal.get("mode"),
+            "status": signal.get("status"),
+            "data_symbol": signal.get("data_symbol"),
+            "broker_display_name": signal.get("broker_display_name"),
+            "exchange": signal.get("exchange"),
+            "currency": signal.get("currency"),
+            "side": signal.get("side"),
+            "grade": signal.get("grade"),
+            "composite_score": signal.get("composite_score"),
+            "ev_net_pct": signal.get("ev_net_pct"),
+            "breakout_quality": signal.get("breakout_quality"),
+            "confidence": signal.get("confidence"),
+            "entry_min": signal.get("entry_min"),
+            "entry_max": signal.get("entry_max"),
+            "do_not_chase_price": signal.get("do_not_chase_price"),
+            "stop_price": signal.get("stop_price"),
+            "target_1": signal.get("target_1"),
+            "target_2": signal.get("target_2"),
+            "suggested_size_eur": signal.get("suggested_size_eur"),
+            "risk_eur": signal.get("risk_eur"),
+            "risk_pct": signal.get("risk_pct"),
+            "reward_risk": signal.get("reward_risk"),
+            "valid_until": signal.get("valid_until"),
+            "time_exit_at": signal.get("time_exit_at"),
+            "rationale": signal.get("rationale"),
+            "signal_json": signal.get("signal_json") or {},
+            "market_context_json": signal.get("market_context_json") or {},
+            "data_quality_json": signal.get("data_quality_json") or {},
+            "message_text": signal.get("message_text"),
+            "fx_rate": signal.get("fx_rate"),
+        }
+        result = db.table("advisory_signals").insert(record).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_SIGNAL_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_recent_advisory_signals(days: int = 1, mode: str = None,
+                                market: str = None, limit: int = 200) -> list:
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        db = get_client()
+        q = (db.table("advisory_signals")
+             .select("*")
+             .gte("created_at", cutoff)
+             .order("created_at", desc=True)
+             .limit(limit))
+        if mode:
+            q = q.eq("mode", mode)
+        if market:
+            q = q.eq("market", market)
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_SIGNAL_READ_FAILED] {str(e)[:200]}")
         return []
 
 
