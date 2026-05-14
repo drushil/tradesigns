@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from config.risk_profiles import get_profile
-from backend.signals.engine import compute_all_signals, detect_regime
+from backend.signals.engine import compute_all_signals, detect_regime, news_sentiment_score
 from backend.learning.engine import compute_expected_value
 from database.client import (
     get_recent_trades,
@@ -58,6 +58,9 @@ EU_WEIGHTS = {
     "bollinger_squeeze": 0.07,
     "put_call_ratio": 0.00,
 }
+
+LIVE_SIGNAL_STATUSES = {"sent", "entered", "hit_stop", "hit_target"}
+OPEN_LIVE_STATUSES = {"sent", "entered"}
 
 
 @dataclass
@@ -162,6 +165,76 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
             return "us_afternoon"
         return None
     return None
+
+
+def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
+    starts = {
+        "EU": {"eu_open": (9, 15), "eu_catalyst_only": (14, 0)},
+        "US": {"us_open": (15, 30), "us_afternoon": (20, 0)},
+    }
+    hour, minute = starts.get(market, {}).get(window, (now_cet.hour, now_cet.minute))
+    return now_cet.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _parse_dt(value) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _is_expired_signal(signal: dict, now_utc: datetime) -> bool:
+    valid_until = _parse_dt(signal.get("valid_until"))
+    return bool(valid_until and valid_until < now_utc)
+
+
+def _is_open_live_signal(signal: dict, now_utc: datetime) -> bool:
+    status = str(signal.get("status"))
+    if status == "entered":
+        return True
+    if status == "sent":
+        return not _is_expired_signal(signal, now_utc)
+    return False
+
+
+def _alerted_symbol_in_session(recent_live: list, symbol: str, market: str,
+                               now_cet: datetime) -> bool:
+    window = _window_name(market, now_cet)
+    if not window:
+        return False
+    session_start_utc = _session_start_cet(market, window, now_cet).astimezone(timezone.utc)
+    symbol = symbol.upper()
+    for signal in recent_live:
+        if str(signal.get("market", "")).upper() != market:
+            continue
+        if str(signal.get("data_symbol", "")).upper() != symbol:
+            continue
+        if str(signal.get("status")) not in LIVE_SIGNAL_STATUSES:
+            continue
+        created_at = _parse_dt(signal.get("created_at"))
+        if created_at and created_at >= session_start_utc:
+            return True
+    return False
+
+
+def _is_signal_in_current_session(signal: dict, now_cet: datetime) -> bool:
+    market = str(signal.get("market", "")).upper()
+    window = _window_name(market, now_cet)
+    if not window:
+        return False
+    created_at = _parse_dt(signal.get("created_at"))
+    if not created_at:
+        return False
+    session_start_utc = _session_start_cet(market, window, now_cet).astimezone(timezone.utc)
+    return created_at >= session_start_utc
 
 
 def _currency_symbol(currency: str) -> str:
@@ -382,6 +455,24 @@ def _weights_for_market(market: str) -> dict:
     return get_profile(_env_value("RISK_PROFILE", "moderate")).get("signal_weights", {})
 
 
+def _eu_catalyst_score(item: dict, signals: dict) -> float:
+    scores = [abs(_signal_score(signals, "news_sentiment"))]
+    aliases = [
+        item.get("data_symbol", "").split(".")[0],
+        item.get("broker_display_name", ""),
+    ]
+    for alias in aliases:
+        alias = str(alias).strip()
+        if not alias:
+            continue
+        try:
+            score, _meta = news_sentiment_score(alias)
+            scores.append(abs(float(score or 0)))
+        except Exception:
+            continue
+    return max(scores) if scores else 0.0
+
+
 def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
                     recent_trades: list, now_cet: datetime) -> Optional[dict]:
     symbol = item["data_symbol"]
@@ -437,11 +528,11 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     if market in cfg.live_markets and ev_net is not None and float(ev_net) < cfg.min_ev_pct:
         return None
     if market == "EU" and window == "eu_catalyst_only":
-        news_score = abs(_signal_score(signals, "news_sentiment"))
-        if news_score < 0.35:
+        catalyst_score = _eu_catalyst_score(item, signals)
+        if catalyst_score < 0.35:
             return None
 
-    valid_until = datetime.now(timezone.utc) + timedelta(minutes=8 if market == "US" else 12)
+    valid_until = now_cet.astimezone(timezone.utc) + timedelta(minutes=15 if market == "US" else 12)
     time_exit = now_cet.replace(hour=20, minute=55, second=0, microsecond=0) if market == "US" else now_cet.replace(hour=16, minute=45, second=0, microsecond=0)
     rationale_bits = [
         f"{grade} setup",
@@ -484,20 +575,22 @@ def run_advisory_cycle() -> dict:
     cfg = load_config()
     now_cet = _now_cet()
     recent_live = get_recent_advisory_signals(days=1, mode="live")
+    now_utc = now_cet.astimezone(timezone.utc)
     live_sent_today = len([
         s for s in recent_live
-        if str(s.get("status")) in {"sent", "entered", "hit_stop", "hit_target"}
+        if str(s.get("status")) in LIVE_SIGNAL_STATUSES
     ])
     daily_live_pnl = sum(float(s.get("manual_pnl_eur") or 0) for s in recent_live)
     open_live_count = len([
         s for s in recent_live
-        if str(s.get("status")) in {"sent", "entered"}
+        if _is_open_live_signal(s, now_utc)
     ])
     active_window = {market: _window_name(market, now_cet) for market in cfg.markets}
     live_sent_this_window = len([
         s for s in recent_live
-        if str(s.get("status")) in {"sent", "entered", "hit_stop", "hit_target"}
+        if str(s.get("status")) in LIVE_SIGNAL_STATUSES
         and active_window.get(str(s.get("market", "")).upper())
+        and _is_signal_in_current_session(s, now_cet)
     ])
     recent_trades = get_recent_trades(days=90)
     emitted = []
@@ -523,6 +616,10 @@ def run_advisory_cycle() -> dict:
             continue
         market_candidates = []
         for item in ADVISORY_UNIVERSE[market]:
+            if mode == "live" and _alerted_symbol_in_session(
+                recent_live, item["data_symbol"], market, now_cet
+            ):
+                continue
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
             if not candidate:
                 continue

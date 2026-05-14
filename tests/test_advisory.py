@@ -92,6 +92,57 @@ def test_ordered_markets_prioritizes_live_alerts_before_shadow_learning():
     assert advisory._ordered_markets(cfg) == ["US", "EU"]
 
 
+def test_expired_sent_signal_does_not_count_as_open_live_signal():
+    now = datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
+    expired = {
+        "status": "sent",
+        "valid_until": "2026-05-15T13:59:00+00:00",
+    }
+    entered = {
+        "status": "entered",
+        "valid_until": "2026-05-15T13:59:00+00:00",
+    }
+
+    assert advisory._is_open_live_signal(expired, now) is False
+    assert advisory._is_open_live_signal(entered, now) is True
+
+
+def test_duplicate_suppression_is_current_session_and_ticker_specific():
+    berlin = timezone(timedelta(hours=2))
+    now = datetime(2026, 5, 15, 15, 45, tzinfo=berlin)
+    recent = [
+        {
+            "market": "US",
+            "data_symbol": "NVDA",
+            "status": "sent",
+            "created_at": "2026-05-15T13:35:00+00:00",
+            "valid_until": "2026-05-15T13:50:00+00:00",
+        },
+        {
+            "market": "US",
+            "data_symbol": "AMD",
+            "status": "sent",
+            "created_at": "2026-05-15T13:35:00+00:00",
+            "valid_until": "2026-05-15T13:50:00+00:00",
+        },
+    ]
+
+    assert advisory._alerted_symbol_in_session(recent, "NVDA", "US", now) is True
+    assert advisory._alerted_symbol_in_session(recent, "AAPL", "US", now) is False
+
+
+def test_morning_alert_does_not_count_in_us_afternoon_session():
+    berlin = timezone(timedelta(hours=2))
+    afternoon = datetime(2026, 5, 15, 20, 15, tzinfo=berlin)
+    signal = {
+        "market": "US",
+        "status": "sent",
+        "created_at": "2026-05-15T13:40:00+00:00",
+    }
+
+    assert advisory._is_signal_in_current_session(signal, afternoon) is False
+
+
 def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
@@ -135,8 +186,69 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert result["live_sent_today"] == 1
     assert len(saved) == 1
     assert saved[0]["status"] == "sent"
+    assert advisory._parse_dt(saved[0]["valid_until"]) == datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
     assert len(sent) == 1
     assert "NVDA" in sent[0]
+
+
+def test_run_advisory_cycle_suppresses_duplicate_ticker_but_expiry_frees_open_cap(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    saved = []
+    sent = []
+    recent_live = [
+        {
+            "market": "US",
+            "data_symbol": "NVDA",
+            "status": "sent",
+            "created_at": "2026-05-15T13:35:00+00:00",
+            "valid_until": "2026-05-15T13:50:00+00:00",
+        }
+    ]
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 16, 5, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [
+            {"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"},
+            {"data_symbol": "AMD", "broker_display_name": "AMD", "exchange": "NASDAQ", "currency": "USD"},
+        ]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: recent_live)
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market: {
+        "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+
+    def fake_signals(symbol, weights, regime_state=None):
+        return {
+            "composite_score": 0.62,
+            "signals": {
+                "vwap_deviation": {"score": 0.55},
+                "macd_crossover": {"score": 0.55},
+                "relative_strength": {"score": 0.50},
+                "orb": {"score": 0.65, "meta": {"active": True}},
+                "news_sentiment": {"score": 0.10},
+            },
+            "atr_data": {"atr_pct": 1.0},
+        }
+
+    monkeypatch.setattr(advisory, "compute_all_signals", fake_signals)
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": 0.82, "confidence": 0.74,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 1
+    assert saved[0]["data_symbol"] == "AMD"
+    assert sent and "AMD" in sent[0]
 
 
 def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatch):
@@ -182,3 +294,21 @@ def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatc
     assert saved[0]["mode"] == "shadow"
     assert saved[0]["status"] == "shadow_logged"
     assert sent == []
+
+
+def test_eu_catalyst_score_uses_clean_symbol_and_broker_name(monkeypatch):
+    calls = []
+
+    def fake_news_score(alias):
+        calls.append(alias)
+        return (0.42 if alias == "ASML" else 0.0), {}
+
+    monkeypatch.setattr(advisory, "news_sentiment_score", fake_news_score)
+
+    score = advisory._eu_catalyst_score(
+        {"data_symbol": "ASML.AS", "broker_display_name": "ASML"},
+        {"news_sentiment": {"score": 0.05}},
+    )
+
+    assert score == pytest.approx(0.42)
+    assert "ASML" in calls
