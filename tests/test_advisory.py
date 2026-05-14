@@ -11,6 +11,7 @@ def _cfg(**overrides):
         "markets": {"US"},
         "live_markets": {"US"},
         "shadow_markets": {"EU"},
+        "shadow_discord_markets": {"EU"},
         "capital_eur": 5000.0,
         "max_live_alerts_per_day": 3,
         "max_shadow_signals_per_day": 10,
@@ -84,6 +85,35 @@ def test_trade_card_is_actionable_for_manual_execution():
     assert "Target 1:" in card
     assert "Valid until" in card
     assert "FX: 1.0800" in card
+
+
+def test_shadow_trade_card_is_clearly_observation_only():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=180.0, side="BUY", atr_pct=0.9, currency="EUR", cfg=cfg, grade="A")
+    signal = {
+        "mode": "shadow",
+        "market": "EU",
+        "data_symbol": "SAP.DE",
+        "broker_display_name": "SAP",
+        "exchange": "Xetra",
+        "currency": "EUR",
+        "side": "BUY",
+        "valid_until_cet": "09:57 Berlin",
+        "time_exit_cet": "16:45 Berlin",
+        "rationale": "A setup, VWAP +0.30, ORB +0.50",
+        "grade": "A",
+        "composite_score": 0.51,
+        "ev_net_pct": 0.20,
+        "fx_rate": 1.08,
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "SHADOW OBSERVATION" in card
+    assert "DO NOT TRADE YET" in card
+    assert "Observation plan:" in card
+    assert "Mode: SHADOW OBSERVATION" in card
 
 
 def test_ordered_markets_prioritizes_live_alerts_before_shadow_learning():
@@ -293,6 +323,57 @@ def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatc
     assert result["emitted"] == 1
     assert saved[0]["mode"] == "shadow"
     assert saved[0]["status"] == "shadow_logged"
+    assert len(sent) == 1
+    assert "SHADOW OBSERVATION" in sent[0]
+    assert "DO NOT TRADE YET" in sent[0]
+
+
+def test_shadow_discord_can_be_disabled_by_market(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    saved = []
+    sent = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(
+        markets={"EU"},
+        live_markets={"US"},
+        shadow_markets={"EU"},
+        shadow_discord_markets=set(),
+    ))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 9, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "EU": [{"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market: {
+        "ok": True, "last_price": 180.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
+        "composite_score": 0.38,
+        "signals": {
+            "vwap_deviation": {"score": 0.45},
+            "macd_crossover": {"score": 0.40},
+            "relative_strength": {"score": 0.35},
+            "orb": {"score": 0.10, "meta": {"active": False}},
+            "news_sentiment": {"score": 0.05},
+        },
+        "atr_data": {"atr_pct": 0.9},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": 0.12, "confidence": 0.50,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 1
+    assert saved[0]["mode"] == "shadow"
     assert sent == []
 
 
