@@ -3,6 +3,7 @@ backend/signals/engine.py
 Computes all micro-signals per ticker using free data sources.
 Returns a normalised composite score -1.0 to +1.0.
 """
+from __future__ import annotations
 import os
 import time
 import logging
