@@ -68,6 +68,7 @@ class AdvisoryConfig:
     markets: set[str]
     live_markets: set[str]
     shadow_markets: set[str]
+    shadow_discord_markets: set[str]
     capital_eur: float
     max_live_alerts_per_day: int
     max_shadow_signals_per_day: int
@@ -115,10 +116,12 @@ def load_config() -> AdvisoryConfig:
     markets = _csv_set("ADVISORY_MARKETS", "US,EU")
     live = _csv_set("ADVISORY_LIVE_MARKETS", "US")
     shadow = _csv_set("ADVISORY_SHADOW_MARKETS", "EU")
+    shadow_discord = _csv_set("ADVISORY_SHADOW_DISCORD_MARKETS", "EU")
     return AdvisoryConfig(
         markets=markets,
         live_markets=live,
         shadow_markets=shadow,
+        shadow_discord_markets=shadow_discord,
         capital_eur=_env_float("ADVISORY_CAPITAL_EUR", 5000.0),
         max_live_alerts_per_day=_env_int("ADVISORY_MAX_LIVE_ALERTS_PER_DAY", 3),
         max_shadow_signals_per_day=_env_int("ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY", 10),
@@ -388,7 +391,8 @@ def _format_trade_card(signal: dict) -> str:
     sym = signal["data_symbol"]
     name = signal.get("broker_display_name") or sym
     cur = _currency_symbol(signal["currency"])
-    mode = "LIVE" if signal["mode"] == "live" else "SHADOW"
+    is_shadow = signal["mode"] != "live"
+    mode = "LIVE" if not is_shadow else "SHADOW OBSERVATION"
     valid = signal["valid_until_cet"]
     time_exit = signal["time_exit_cet"]
     approx_usd = signal["suggested_size_eur"] * signal["fx_rate"] if signal["currency"] == "USD" else None
@@ -402,15 +406,27 @@ def _format_trade_card(signal: dict) -> str:
         f"{opportunity} {signal['side']} OPPORTUNITY: {sym} / {name} "
         f"because {quick_why}."
     )
+    first_line = (
+        f"**LIVE TRADE ALERT - {signal['market']} {signal['side']} NOW**"
+        if not is_shadow
+        else f"**SHADOW OBSERVATION - {signal['market']} {signal['side']} SETUP - DO NOT TRADE YET**"
+    )
+    quick_label = "Quick action" if not is_shadow else "Observation plan"
+    shadow_note = (
+        "This is shadow mode: log/watch only until EU advisory is promoted live.\n"
+        if is_shadow else ""
+    )
     return (
-        f"**{mode} TRADE ALERT - {signal['market']} {signal['side']} NOW**\n"
+        f"{first_line}\n"
         f"**{headline}**\n"
-        f"Quick action: LIMIT {signal['side']} {sym} only at "
+        f"{shadow_note}"
+        f"{quick_label}: LIMIT {signal['side']} {sym} only at "
         f"{cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}; "
         f"size {notional}; stop {cur}{signal['stop_price']:.2f}; "
         f"valid until {valid}.\n"
         f"DO NOT CHASE beyond {cur}{signal['do_not_chase_price']:.2f}.\n\n"
         f"**Execution detail**\n"
+        f"Mode: {mode}\n"
         f"Broker name: {name}  |  Exchange: {signal.get('exchange') or 'n/a'}\n"
         f"Order type: LIMIT {signal['side']}\n"
         f"Entry zone: {cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}\n"
@@ -453,6 +469,12 @@ def _weights_for_market(market: str) -> dict:
     if market == "EU":
         return EU_WEIGHTS
     return get_profile(_env_value("RISK_PROFILE", "moderate")).get("signal_weights", {})
+
+
+def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
+    if candidate.get("mode") == "live":
+        return True
+    return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
 
 
 def _eu_catalyst_score(item: dict, signals: dict) -> float:
@@ -657,8 +679,9 @@ def run_advisory_cycle() -> dict:
             limit = cfg.max_shadow_signals_per_day
         for candidate in market_candidates[:max(0, limit)]:
             saved = insert_advisory_signal(candidate)
-            if mode == "live" and "error" not in saved:
+            if _should_send_discord(candidate, cfg) and "error" not in saved:
                 _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+            if mode == "live" and "error" not in saved:
                 live_sent_today += 1
                 live_sent_this_window += 1
                 open_live_count += 1
