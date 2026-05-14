@@ -1445,11 +1445,15 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         stop_price = entry_price * (1 - stop_pct / 100)
         chandelier_stop = current_price - (atr_raw * stop_multiplier)
         protective_stop_price = max(stop_price, chandelier_stop)
+        # Never tighter than 1 ATR below entry — prevents intraday-tight stops
+        # surviving into a multi-day swing hold
+        protective_stop_price = min(protective_stop_price, entry_price - atr_raw)
         protective_side = "sell"
     else:
         stop_price = entry_price * (1 + stop_pct / 100)
         chandelier_stop = current_price + (atr_raw * stop_multiplier)
         protective_stop_price = min(stop_price, chandelier_stop)
+        protective_stop_price = max(protective_stop_price, entry_price + atr_raw)
         protective_side = "buy"
 
     cancel_results = _cancel_bracket_orders_for_manual_exit(ticker, trade)
@@ -3705,26 +3709,38 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
 
 def _save_snapshot(portfolio_state, regime):
     from database.client import get_snapshots
-    snaps = get_snapshots(days=1)
+    # Fetch up to 365 snapshots (ordered DESC) to derive both daily and
+    # cumulative P&L from actual history rather than an arbitrary EUR→USD
+    # conversion that produces nonsense numbers when paper equity >> start capital.
+    snaps = get_snapshots(days=365)
     equity = portfolio_state["equity"]
 
-    # Baseline is STARTING_CAPITAL_EUR converted to USD so the comparison is
-    # apples-to-apples: equity (USD-capped) vs start_usd.
-    raw_capital = os.getenv("STARTING_CAPITAL_EUR", "3000")
-    fx_rate     = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
-    start_equity_usd = float(raw_capital) * fx_rate if raw_capital and raw_capital.strip() else equity
+    fx_rate = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
     unrealized_pnl_usd = float(portfolio_state.get("unrealized_pnl_usd") or 0)
     effective_total_eur = (equity + unrealized_pnl_usd) / fx_rate
     effective_cash_eur = float(portfolio_state.get("cash") or 0) / fx_rate
 
-    cum_pnl = (equity - start_equity_usd) / start_equity_usd * 100 if start_equity_usd else 0.0
-    cum_pnl = max(-9999.0, min(9999.0, cum_pnl))
+    # daily_pnl_pct: change since the previous snapshot
+    prev_equity = snaps[0]["total_value_eur"] if snaps else None
+    if prev_equity and prev_equity > 0:
+        daily_pnl_pct = round((effective_total_eur - prev_equity) / prev_equity * 100, 3)
+        daily_pnl_pct = max(-9999.0, min(9999.0, daily_pnl_pct))
+    else:
+        daily_pnl_pct = 0.0
+
+    # cumulative_pnl_pct: change since the oldest available snapshot
+    oldest_equity = snaps[-1]["total_value_eur"] if snaps else None
+    if oldest_equity and oldest_equity > 0:
+        cum_pnl = round((effective_total_eur - oldest_equity) / oldest_equity * 100, 3)
+        cum_pnl = max(-9999.0, min(9999.0, cum_pnl))
+    else:
+        cum_pnl = 0.0
 
     save_snapshot({
         "total_value_eur":    round(effective_total_eur, 2),
         "cash_eur":           round(effective_cash_eur, 2),
-        "daily_pnl_pct":      -portfolio_state["drawdown_today"],
-        "cumulative_pnl_pct": round(cum_pnl, 3),
+        "daily_pnl_pct":      daily_pnl_pct,
+        "cumulative_pnl_pct": cum_pnl,
         "drawdown_pct":       portfolio_state["drawdown_today"],
         "open_positions":     portfolio_state["positions"],
         "trades_today":       portfolio_state["trades_today"],
