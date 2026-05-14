@@ -29,7 +29,8 @@ from backend.signals.engine      import (compute_all_signals, compute_swing_scor
                                           detect_regime, detect_macro_regime,
                                           compute_atr, latest_macro_headlines,
                                           scan_for_macro_shock,
-                                          detect_momentum_swing)
+                                          detect_momentum_swing,
+                                          prefetch_newsapi_batch)
 from backend.broker.alpaca       import (get_account, get_positions, submit_market_order,
                                           close_position, close_partial_position,
                                           pre_trade_gate, compute_position_size,
@@ -1648,6 +1649,13 @@ def run_signal_cycle():
         # Reset cycle-level state
         global _cycle_composites, _cycle_db_percentiles
         _cycle_composites = {}
+
+        # Pre-populate DB news cache for all tickers in one batch (2-3 NewsAPI calls
+        # instead of up to 22). Per-ticker news_sentiment_score calls below hit the cache.
+        try:
+            prefetch_newsapi_batch(TICKERS)
+        except Exception:
+            pass
 
         candidates = []
         for ticker in TICKERS:

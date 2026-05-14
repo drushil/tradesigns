@@ -556,6 +556,20 @@ def upsert_news_cache(ticker: str, score: float, meta: dict, headlines: list) ->
         return {"error": str(e)}
 
 
+def get_newsapi_daily_usage() -> int:
+    """Return total NewsAPI calls made today across all tickers."""
+    try:
+        today = datetime.utcnow().date().isoformat()
+        db = get_client()
+        result = (db.table("newsapi_usage")
+                   .select("calls")
+                   .eq("usage_date", today)
+                   .execute())
+        return sum(int(r.get("calls") or 0) for r in (result.data or []))
+    except Exception:
+        return 0
+
+
 def record_newsapi_usage(ticker: str, calls: int = 1):
     """Best-effort daily usage ledger for NewsAPI quota visibility."""
     if calls <= 0:

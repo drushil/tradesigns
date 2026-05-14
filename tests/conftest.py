@@ -151,6 +151,7 @@ if "backend.signals.engine" not in sys.modules:
         "opening_range_breakout_score", "compute_vwap_score", "compute_rsi",
         "news_sentiment_score", "is_regular_us_market_hours",
         "latest_macro_headlines", "scan_for_macro_shock",
+        "prefetch_newsapi_batch",
     ]:
         setattr(_sig, _fn, MagicMock(return_value={}))
     _sig.is_regular_us_market_hours = MagicMock(return_value=True)

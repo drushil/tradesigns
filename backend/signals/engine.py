@@ -263,6 +263,41 @@ _NEWS_STALE_MAX_AGE = 12 * 60  # minutes
 _NEWS_FORCE_REFRESH_COMPOSITE = float(os.getenv("NEWS_FORCE_REFRESH_COMPOSITE", "0.18"))
 _NEWS_FORCE_REFRESH_SIGNAL = float(os.getenv("NEWS_FORCE_REFRESH_SIGNAL", "0.55"))
 
+# Budget-aware TTL: cache daily usage count for 5 min to avoid per-ticker DB queries
+_NEWSAPI_BUDGET_SOFT_LIMIT = int(os.getenv("NEWSAPI_BUDGET_SOFT_LIMIT", "70"))
+_NEWSAPI_BUDGET_HARD_LIMIT = int(os.getenv("NEWSAPI_BUDGET_HARD_LIMIT", "90"))
+_newsapi_budget_cache: list = [0.0, 0]  # [checked_at, daily_total]
+_NEWSAPI_BUDGET_CHECK_TTL = 300  # re-read from DB every 5 minutes
+
+
+def _get_newsapi_daily_usage() -> int:
+    """Return today's NewsAPI call count, refreshed at most every 5 minutes."""
+    now = time.time()
+    if now - _newsapi_budget_cache[0] < _NEWSAPI_BUDGET_CHECK_TTL:
+        return _newsapi_budget_cache[1]
+    try:
+        from database.client import get_newsapi_daily_usage
+        total = get_newsapi_daily_usage()
+    except Exception:
+        total = _newsapi_budget_cache[1]
+    _newsapi_budget_cache[0] = now
+    _newsapi_budget_cache[1] = total
+    return total
+
+
+def _newsapi_effective_ttl() -> int:
+    """
+    Extend cache TTL when daily budget is running low.
+    Soft limit (70): 60-min cache — refreshes ~4×/day instead of every 15 min.
+    Hard limit (90): 4-hour cache — effectively freezes fresh fetches for the day.
+    """
+    usage = _get_newsapi_daily_usage()
+    if usage >= _NEWSAPI_BUDGET_HARD_LIMIT:
+        return 4 * 3600
+    if usage >= _NEWSAPI_BUDGET_SOFT_LIMIT:
+        return 3600
+    return _NEWS_CACHE_TTL
+
 _FINVIZ_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
@@ -291,6 +326,110 @@ def _fetch_newsapi_headlines(ticker: str) -> list:
         pass
     articles = resp.json().get("articles", [])
     return [(a.get("title") or "").strip() for a in articles[:10] if a.get("title")]
+
+
+def _fetch_newsapi_batch(tickers: list) -> dict:
+    """
+    Single NewsAPI call for a group of tickers using an OR query.
+    Returns {ticker: [headline, ...]} attributed by mention in title/description.
+    One call here replaces N per-ticker calls — the key quota optimization.
+    """
+    if not NEWSAPI_KEY or not tickers:
+        return {t: [] for t in tickers}
+    q = " OR ".join(tickers)
+    try:
+        resp = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={"q": q, "language": "en", "sortBy": "publishedAt",
+                    "pageSize": 100, "apiKey": NEWSAPI_KEY},
+            timeout=8,
+        )
+        resp.raise_for_status()
+    except Exception:
+        return {t: [] for t in tickers}
+
+    try:
+        from database.client import record_newsapi_usage
+        record_newsapi_usage(f"__batch_{len(tickers)}", calls=1)
+        # Invalidate the cached budget total so the next check reflects this call
+        _newsapi_budget_cache[0] = 0.0
+    except Exception:
+        pass
+
+    articles = resp.json().get("articles", [])
+    result: dict = {t: [] for t in tickers}
+    tickers_upper = [t.upper() for t in tickers]
+    for article in articles:
+        text = ((article.get("title") or "") + " " + (article.get("description") or "")).upper()
+        title = (article.get("title") or "").strip()
+        if not title:
+            continue
+        for i, t_upper in enumerate(tickers_upper):
+            if t_upper in text:
+                result[tickers[i]].append(title)
+    return result
+
+
+def prefetch_newsapi_batch(tickers: list) -> int:
+    """
+    Pre-populate the DB news cache for a list of tickers using batch OR queries
+    (one NewsAPI call per ~12 tickers). Call this once per cycle before iterating
+    tickers — subsequent per-ticker news_sentiment_score calls will hit the cache.
+
+    Returns the number of tickers whose cache was refreshed.
+    """
+    if not NEWSAPI_KEY or not tickers:
+        return 0
+
+    # Only prefetch tickers whose cache is missing or stale
+    effective_ttl_min = max(1, _newsapi_effective_ttl() // 60)
+    needs_refresh = []
+    for ticker in tickers:
+        try:
+            from database.client import get_news_cache
+            row = get_news_cache(ticker.upper(), max_age_minutes=effective_ttl_min)
+            if not row:
+                needs_refresh.append(ticker)
+        except Exception:
+            needs_refresh.append(ticker)
+
+    if not needs_refresh:
+        return 0
+
+    # Split into batches of 12 to keep the OR query within NewsAPI limits
+    batch_size = 12
+    refreshed = 0
+    for i in range(0, len(needs_refresh), batch_size):
+        batch = needs_refresh[i:i + batch_size]
+        headlines_by_ticker = _fetch_newsapi_batch(batch)
+        for ticker, headlines in headlines_by_ticker.items():
+            if not headlines:
+                continue
+            score, meta = _score_headlines_list(headlines)
+            meta["source"] = "newsapi_batch"
+            meta["batch_size"] = len(batch)
+            _save_news_result(ticker.upper(), score, meta, headlines[:25])
+            _news_cache[ticker.upper()] = (time.time(), (score, meta))
+            refreshed += 1
+    return refreshed
+
+
+def _score_headlines_list(headlines: list) -> tuple:
+    """Score a list of headline strings using the standard keyword approach."""
+    positive_kw = ["surge", "soar", "rally", "beat", "record", "upgrade",
+                   "bullish", "growth", "profit", "revenue", "strong",
+                   "gains", "outperform", "buy", "positive"]
+    negative_kw = ["plunge", "crash", "fall", "miss", "downgrade", "bearish",
+                   "loss", "decline", "sell", "weak", "concern", "risk",
+                   "drop", "underperform", "negative", "warning"]
+    pos = neg = 0
+    for h in headlines:
+        low = h.lower()
+        pos += sum(1 for kw in positive_kw if kw in low)
+        neg += sum(1 for kw in negative_kw if kw in low)
+    total = pos + neg
+    score = _clamp((pos - neg) / total) if total else 0.0
+    return score, {"articles_found": len(headlines), "positive_hits": pos, "negative_hits": neg}
 
 
 def _fetch_finviz_headlines(ticker: str) -> list:
@@ -389,23 +528,33 @@ def news_sentiment_score(
     ticker: str,
     force_refresh: bool = False,
     cache_ttl_seconds: int = _NEWS_CACHE_TTL,
+    pre_news_composite: float = 0.0,
 ) -> tuple[float, dict]:
     """
     Combines yfinance + Finviz headlines + StockTwits messages (all free, no key).
     StockTwits explicit Bullish/Bearish tags are counted as direct signal;
     all text sources are also keyword-scored.
     Returns score -1 to +1.
+
+    Budget-aware: cache TTL automatically extends when daily NewsAPI quota is
+    running low (soft limit 70 calls → 60 min TTL; hard limit 90 → 4 h TTL).
+    NewsAPI HTTP fallback is suppressed when the pre_news composite is too weak
+    for news to change the trade decision (pre-gate).
     """
     cache_key = ticker.upper()
     now = time.time()
+
+    # Use budget-aware TTL unless caller specified an explicit non-default value
+    effective_ttl = _newsapi_effective_ttl() if cache_ttl_seconds == _NEWS_CACHE_TTL else cache_ttl_seconds
+
     if not force_refresh and cache_key in _news_cache:
         cached_time, cached_result = _news_cache[cache_key]
-        if now - cached_time < cache_ttl_seconds:
+        if now - cached_time < effective_ttl:
             return cached_result
 
     cached = _cached_news_result(
         cache_key,
-        max_age_minutes=max(1, int(cache_ttl_seconds / 60)),
+        max_age_minutes=max(1, int(effective_ttl / 60)),
         force_refresh=force_refresh,
     )
     if cached:
@@ -434,13 +583,21 @@ def news_sentiment_score(
     except Exception:
         pass
     if not texts:
-        try:
-            newsapi_texts = _fetch_newsapi_headlines(ticker)
-            texts.extend(newsapi_texts)
-            if newsapi_texts:
-                sources.append("newsapi")
-        except Exception:
-            pass
+        # Pre-gate: skip live NewsAPI call when the signal can't shift the decision.
+        # News weight is ~0.15-0.20; a perfect score adds at most ~0.20 to composite.
+        # If pre_news_composite is so weak that even +0.20 won't reach min_signal_score
+        # (0.05 paper default), there's no point spending quota. Fall through to stale.
+        news_weight_ceiling = 0.25  # conservative upper bound on news weight contribution
+        budget_ok = _get_newsapi_daily_usage() < _NEWSAPI_BUDGET_HARD_LIMIT
+        signal_meaningful = abs(pre_news_composite) + news_weight_ceiling >= 0.05
+        if budget_ok and signal_meaningful:
+            try:
+                newsapi_texts = _fetch_newsapi_headlines(ticker)
+                texts.extend(newsapi_texts)
+                if newsapi_texts:
+                    sources.append("newsapi")
+            except Exception:
+                pass
 
     # Source 2: Finviz
     try:
@@ -1971,7 +2128,11 @@ def compute_all_signals(ticker: str, weights: dict,
     )
 
     try:
-        s3, m3 = news_sentiment_score(ticker, force_refresh=force_news_refresh)
+        s3, m3 = news_sentiment_score(
+            ticker,
+            force_refresh=force_news_refresh,
+            pre_news_composite=pre_news_composite,
+        )
         m3["pre_news_composite"] = round(pre_news_composite, 4)
     except Exception:
         s3, m3 = 0.0, {"error": "signal_crashed"}

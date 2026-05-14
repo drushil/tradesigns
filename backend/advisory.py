@@ -596,6 +596,17 @@ def run_advisory_cycle() -> dict:
     emitted = []
     blocked = []
 
+    try:
+        from backend.signals.engine import prefetch_newsapi_batch
+        all_advisory_tickers = [
+            item["data_symbol"]
+            for market in cfg.markets
+            for item in ADVISORY_UNIVERSE.get(market, [])
+        ]
+        prefetch_newsapi_batch(all_advisory_tickers)
+    except Exception:
+        pass
+
     for market in _ordered_markets(cfg):
         if market not in ADVISORY_UNIVERSE:
             continue
