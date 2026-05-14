@@ -149,7 +149,8 @@ if "backend.signals.engine" not in sys.modules:
         "compute_all_signals", "compute_swing_score", "compute_atr",
         "detect_momentum_swing", "detect_regime", "detect_macro_regime",
         "opening_range_breakout_score", "compute_vwap_score", "compute_rsi",
-        "is_regular_us_market_hours", "latest_macro_headlines", "scan_for_macro_shock",
+        "news_sentiment_score", "is_regular_us_market_hours",
+        "latest_macro_headlines", "scan_for_macro_shock",
     ]:
         setattr(_sig, _fn, MagicMock(return_value={}))
     _sig.is_regular_us_market_hours = MagicMock(return_value=True)
