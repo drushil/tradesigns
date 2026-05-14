@@ -64,6 +64,56 @@ def test_hydrate_open_trades_closes_stale_db_rows(monkeypatch):
     assert any(event == "stale_open_trade_reconciled" for _, event, _ in logs)
 
 
+def test_hydrate_open_trades_records_recovered_broker_side_close(monkeypatch):
+    record = {
+        "ticker": "SOXL",
+        "status": "open",
+        "entry_time": "2026-05-14T13:52:00+00:00",
+        "entry_price": 188.05,
+        "quantity": 5,
+        "side": "BUY",
+        "order_id": "parent-order",
+        "size_eur": 870.97,
+        "size_usd": 940.65,
+        "composite_score": 0.248,
+        "llm_conviction": 0.8,
+        "signals_json": {},
+        "regime": "ranging",
+        "strategy_family": "trend_following",
+        "exposure_direction": "long_market",
+        "setup_grade": "A+",
+    }
+    inserted = []
+    closed = []
+    logs = []
+
+    monkeypatch.setattr(agent, "get_open_trade_records", lambda: [record])
+    monkeypatch.setattr(agent, "close_position", lambda ticker: {"error": "position not found"})
+    monkeypatch.setattr(agent, "_cancel_bracket_orders_for_manual_exit", lambda ticker, trade: [])
+    monkeypatch.setattr(agent, "_recover_protective_stop_fill", lambda trade: None)
+    monkeypatch.setattr(agent, "_recover_bracket_fill", lambda trade: {
+        "exit_price": 182.36,
+        "exit_reason": "stop_loss",
+        "close_order_id": "stop-leg",
+    })
+    monkeypatch.setattr(agent, "insert_trade", lambda trade: inserted.append(trade) or {})
+    monkeypatch.setattr(agent, "close_open_trade_record", lambda ticker, reason=None: closed.append((ticker, reason)))
+    monkeypatch.setattr(agent, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
+    monkeypatch.setattr(agent, "_learning_engine", None)
+
+    agent._open_trades.clear()
+    agent._hydrate_open_trades([])
+
+    assert len(inserted) == 1
+    assert inserted[0]["ticker"] == "SOXL"
+    assert inserted[0]["exit_price"] == 182.36
+    assert inserted[0]["exit_reason"] == "stop_loss"
+    assert inserted[0]["close_order_id"] == "stop-leg"
+    assert ("SOXL", "stop_loss") in closed
+    assert any(event == "bracket_fill_recovered" for _, event, _ in logs)
+    assert "SOXL" not in agent._open_trades
+
+
 def test_execution_overrides_default_to_a_grade_with_b_exploration(monkeypatch):
     monkeypatch.delenv("MIN_GRADE_REQUIRED", raising=False)
     monkeypatch.delenv("ALLOW_B_GRADE_EXPLORATION", raising=False)
@@ -77,4 +127,3 @@ def test_execution_overrides_default_to_a_grade_with_b_exploration(monkeypatch):
     assert profile["min_grade_required"] == "A"
     assert profile["allow_b_grade_exploration"] is True
     assert profile["b_grade_size_multiplier"] == 0.20
-

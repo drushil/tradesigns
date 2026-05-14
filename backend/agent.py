@@ -1246,6 +1246,7 @@ def _hydrate_open_trades(broker_positions: list[dict] = None):
 
     rebuilt = {}
     stale = []
+    broker_closed = []
     for record in records:
         ticker = record.get("ticker")
         if not ticker:
@@ -1255,7 +1256,7 @@ def _hydrate_open_trades(broker_positions: list[dict] = None):
             stale.append((ticker, "closed_at_present"))
             continue
         if position_tickers is not None and ticker not in position_tickers:
-            stale.append((ticker, "not_in_broker_positions"))
+            broker_closed.append((ticker, record))
             continue
         trade = _rehydrated_open_trade(record)
         missing = [
@@ -1275,6 +1276,32 @@ def _hydrate_open_trades(broker_positions: list[dict] = None):
             "ticker": ticker,
             "reason": reason,
         })
+
+    for ticker, record in broker_closed:
+        trade = _rehydrated_open_trade(record)
+        missing = [
+            key for key in ("entry_time", "entry_price", "side", "order_id")
+            if not trade.get(key)
+        ]
+        if missing:
+            close_open_trade_record(ticker, "not_in_broker_positions")
+            log_event("WARN", "stale_open_trade_reconciled", {
+                "ticker": ticker,
+                "reason": "not_in_broker_positions",
+                "missing": missing,
+            })
+            continue
+
+        # The broker no longer has the position, but Alpaca may have closed it
+        # through a bracket/protective stop while this stateless runner slept.
+        # Route through _close_trade so fill recovery writes the trades row.
+        _open_trades[ticker] = trade
+        _close_trade(
+            ticker,
+            trade,
+            exit_price=float(trade.get("entry_price") or 0),
+            exit_reason="not_in_broker_positions",
+        )
 
     memory_stale = set(_open_trades) - set(rebuilt)
     if memory_stale:
