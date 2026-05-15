@@ -11,7 +11,7 @@ Unit tests for the critical behavioral paths added in recent sessions:
 """
 import math
 import pytest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch, call
 
 
@@ -78,6 +78,160 @@ def _patch_swing_deps(swing_detected=True, conviction=0.8):
         "reasons": ["momentum_aligned"],
     }
     return swing_check
+
+
+def test_alignment_veto_blocks_long_against_strong_bearish_orb():
+    import backend.agent as agent
+
+    veto = agent._alignment_veto(
+        "ARM",
+        "BUY",
+        {
+            "orb": {"score": -0.772},
+            "tape_aggression": {"score": 0.2},
+            "put_call_ratio": {"score": 0.0},
+            "rsi_divergence": {"score": 0.0},
+            "macd_crossover": {"score": 0.3},
+        },
+        {"alignment_orb_veto_threshold": 0.50},
+    )
+
+    assert veto["reason"] == "signal_alignment_veto_orb"
+
+
+def test_alignment_veto_blocks_index_long_with_bearish_put_call():
+    import backend.agent as agent
+
+    veto = agent._alignment_veto(
+        "QQQ",
+        "BUY",
+        {
+            "orb": {"score": 0.1},
+            "tape_aggression": {"score": 0.1},
+            "put_call_ratio": {"score": -0.62},
+            "rsi_divergence": {"score": 0.0},
+            "macd_crossover": {"score": 0.3},
+        },
+        {"alignment_put_call_veto_threshold": 0.50},
+    )
+
+    assert veto["reason"] == "signal_alignment_veto_put_call_ratio"
+
+
+def test_ranging_regime_blocks_leveraged_etf_without_strong_positive_ev():
+    import backend.agent as agent
+    grade = agent.SetupGrade("A+", 1.0, 0.5, 0.8, False, [], 4, 1.0, 97.0, True)
+
+    block = agent._ranging_regime_block(
+        "SOXL",
+        {"intraday_regime": "ranging", "breakout_quality": 0.9},
+        {"net_ev_pct": -0.05},
+        grade,
+        {
+            "allow_leveraged_etfs": True,
+            "leveraged_etf_tickers": ["SOXL"],
+            "ranging_min_grade_required": "A+",
+            "ranging_leveraged_min_ev_pct": 0.25,
+        },
+    )
+
+    assert block["reason"] == "ranging_regime_leveraged_ev_veto"
+
+
+def test_ranging_regime_blocks_non_a_plus_chop_setups():
+    import backend.agent as agent
+    grade = agent.SetupGrade("A", 1.0, 0.5, 0.8, False, [], 4, 1.0, 97.0, True)
+
+    block = agent._ranging_regime_block(
+        "SPY",
+        {"intraday_regime": "ranging", "breakout_quality": 0.6},
+        {"net_ev_pct": 0.1},
+        grade,
+        {
+            "allow_leveraged_etfs": False,
+            "ranging_min_grade_required": "A+",
+        },
+    )
+
+    assert block["reason"] == "ranging_regime_grade_veto"
+
+
+def test_probe_ev_decision_identifies_grade_override_probe():
+    import backend.agent as agent
+
+    assert agent._is_probe_ev_decision("grade_ev_override_probe") is True
+    assert agent._is_probe_ev_decision("full_size") is False
+
+
+def test_known_negative_grade_override_blocks_after_ten_samples():
+    import backend.agent as agent
+
+    block = agent._known_negative_grade_override_block(
+        {"net_ev_pct": -0.093, "sample_size": 17},
+        {"grade_ev_override_negative_min_samples": 10},
+    )
+    cold_start = agent._known_negative_grade_override_block(
+        {"net_ev_pct": -0.093, "sample_size": 9},
+        {"grade_ev_override_negative_min_samples": 10},
+    )
+
+    assert block["sample_size"] == 17
+    assert cold_start is None
+
+
+def test_probe_floor_inflation_blocks_when_floor_defeats_probe_size():
+    import backend.agent as agent
+
+    block = agent._probe_floor_inflation_block(
+        "a_plus_probe",
+        True,
+        intended_size_eur=472.0,
+        final_size_eur=1374.0,
+        profile={"probe_floor_inflation_max_multiple": 1.25},
+    )
+
+    assert block["inflation_multiple"] > 2.0
+
+
+def test_probe_floor_inflation_allows_small_floor_adjustment():
+    import backend.agent as agent
+
+    block = agent._probe_floor_inflation_block(
+        "probe_size",
+        True,
+        intended_size_eur=472.0,
+        final_size_eur=520.0,
+        profile={"probe_floor_inflation_max_multiple": 1.25},
+    )
+
+    assert block is None
+
+
+def test_llm_conflict_rationale_detected():
+    import backend.agent as agent
+
+    assert agent._llm_rationale_mentions_conflict({"rationale": "signals conflict due to ORB"}) is True
+    assert agent._llm_rationale_mentions_conflict({"rationale": "clean trend continuation"}) is False
+
+
+def test_thesis_invalidated_cooldown_is_db_backed():
+    import backend.agent as agent
+    now = datetime.utcnow()
+
+    cooldown = agent._thesis_invalidated_cooldown_active(
+        "NVDA",
+        "BUY",
+        [{
+            "ticker": "NVDA",
+            "side": "BUY",
+            "exit_reason": "thesis_invalidated",
+            "exit_time": (now - timedelta(minutes=20)).isoformat(),
+        }],
+        {"thesis_invalidated_cooldown_minutes": 75},
+    )
+
+    assert cooldown["ticker"] == "NVDA"
+    assert cooldown["cooldown_minutes"] == 75
 
 
 # ── _try_promote_to_swing ─────────────────────────────────────────────────────
