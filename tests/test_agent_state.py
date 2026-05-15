@@ -234,6 +234,89 @@ def test_thesis_invalidated_cooldown_is_db_backed():
     assert cooldown["cooldown_minutes"] == 75
 
 
+def test_sector_momentum_applies_rank_bonus_inside_existing_universe():
+    import backend.agent as agent
+    candidate = {
+        "ticker": "NVDA",
+        "setup_context": {"candidate_rank_score": 0.50},
+    }
+    momentum = {
+        "themes": {
+            "semis": {"leader": True, "relative_pct": 3.0, "multiplier": 1.15},
+        },
+        "ticker_multipliers": {"NVDA": 1.15},
+    }
+
+    agent._apply_sector_momentum_to_candidate(candidate, momentum)
+
+    assert candidate["setup_context"]["theme"] == "semis"
+    assert candidate["setup_context"]["candidate_rank_score"] == pytest.approx(0.575)
+    assert candidate["setup_context"]["sector_momentum_multiplier"] == pytest.approx(1.15)
+
+
+def test_theme_cap_limits_correlated_candidates_per_cycle():
+    import backend.agent as agent
+    candidates = [
+        {"ticker": "NVDA", "setup_context": {"theme": "semis"}},
+        {"ticker": "AMD", "setup_context": {"theme": "semis"}},
+        {"ticker": "SMH", "setup_context": {"theme": "semis"}},
+        {"ticker": "META", "setup_context": {"theme": "broad_tech"}},
+    ]
+
+    kept, skipped = agent._theme_cap_candidates(
+        candidates,
+        {"theme_max_candidates_per_cycle": 2, "theme_max_leveraged_candidates_per_cycle": 1},
+    )
+
+    assert [c["ticker"] for c in kept] == ["NVDA", "AMD", "META"]
+    assert skipped[0]["ticker"] == "SMH"
+    assert skipped[0]["theme_cap_reason"] == "theme_candidate_cap"
+
+
+def test_theme_cap_limits_leveraged_copycat_candidates():
+    import backend.agent as agent
+    candidates = [
+        {"ticker": "NVDA", "setup_context": {"theme": "semis"}},
+        {"ticker": "SOXL", "setup_context": {"theme": "semis"}},
+        {"ticker": "NVDL", "setup_context": {"theme": "semis"}},
+    ]
+
+    kept, skipped = agent._theme_cap_candidates(
+        candidates,
+        {
+            "allow_leveraged_etfs": True,
+            "leveraged_etf_tickers": ["SOXL", "NVDL"],
+            "theme_max_candidates_per_cycle": 3,
+            "theme_max_leveraged_candidates_per_cycle": 1,
+        },
+    )
+
+    assert [c["ticker"] for c in kept] == ["NVDA", "SOXL"]
+    assert skipped[0]["ticker"] == "NVDL"
+    assert skipped[0]["theme_cap_reason"] == "theme_leveraged_cap"
+
+
+def test_dynamic_universe_shadow_recommends_unowned_theme_leaders_only():
+    import backend.agent as agent
+    momentum = {
+        "lookback": "5d",
+        "themes": {
+            "semis": {"leader": True, "relative_pct": 3.1, "proxy": "SMH"},
+            "energy": {"leader": False, "relative_pct": -0.4, "proxy": "XOP"},
+        },
+    }
+
+    payload = agent._dynamic_universe_shadow_recommendations(
+        ["SPY", "QQQ", "NVDA"],
+        momentum,
+        max_per_theme=2,
+    )
+
+    assert payload["execution_allowed"] is False
+    assert [r["ticker"] for r in payload["shadow_candidates"]] == ["AMD", "ARM"]
+    assert all(r["mode"] == "shadow_only" for r in payload["shadow_candidates"])
+
+
 # ── _try_promote_to_swing ─────────────────────────────────────────────────────
 
 class TestTryPromoteToSwing:

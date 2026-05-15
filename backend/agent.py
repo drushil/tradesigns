@@ -499,6 +499,14 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("alignment_tape_veto_threshold", 0.40)
     p.setdefault("alignment_put_call_veto_threshold", 0.50)
     p.setdefault("alignment_rsi_veto_threshold", 0.50)
+    p.setdefault("sector_momentum_bonus_enabled", True)
+    p.setdefault("sector_momentum_lookback_period", "5d")
+    p.setdefault("sector_momentum_leadership_threshold_pct", 2.0)
+    p.setdefault("sector_momentum_max_bonus", 0.15)
+    p.setdefault("theme_max_candidates_per_cycle", 2)
+    p.setdefault("theme_max_leveraged_candidates_per_cycle", 1)
+    p.setdefault("dynamic_universe_shadow_enabled", True)
+    p.setdefault("dynamic_universe_max_shadow_per_theme", 2)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -527,6 +535,27 @@ def _apply_execution_overrides(profile: dict) -> dict:
             "THESIS_INVALIDATED_COOLDOWN_MINUTES",
             int(p["thesis_invalidated_cooldown_minutes"]),
         )
+    if os.getenv("SECTOR_MOMENTUM_BONUS_ENABLED") is not None:
+        p["sector_momentum_bonus_enabled"] = _env_bool("SECTOR_MOMENTUM_BONUS_ENABLED", True)
+    if os.getenv("SECTOR_MOMENTUM_LEADERSHIP_THRESHOLD_PCT"):
+        p["sector_momentum_leadership_threshold_pct"] = _env_float(
+            "SECTOR_MOMENTUM_LEADERSHIP_THRESHOLD_PCT",
+            p["sector_momentum_leadership_threshold_pct"],
+        )
+    if os.getenv("SECTOR_MOMENTUM_MAX_BONUS"):
+        p["sector_momentum_max_bonus"] = _env_float("SECTOR_MOMENTUM_MAX_BONUS", p["sector_momentum_max_bonus"])
+    if os.getenv("THEME_MAX_CANDIDATES_PER_CYCLE"):
+        p["theme_max_candidates_per_cycle"] = _env_int(
+            "THEME_MAX_CANDIDATES_PER_CYCLE",
+            int(p["theme_max_candidates_per_cycle"]),
+        )
+    if os.getenv("THEME_MAX_LEVERAGED_CANDIDATES_PER_CYCLE"):
+        p["theme_max_leveraged_candidates_per_cycle"] = _env_int(
+            "THEME_MAX_LEVERAGED_CANDIDATES_PER_CYCLE",
+            int(p["theme_max_leveraged_candidates_per_cycle"]),
+        )
+    if os.getenv("DYNAMIC_UNIVERSE_SHADOW_ENABLED") is not None:
+        p["dynamic_universe_shadow_enabled"] = _env_bool("DYNAMIC_UNIVERSE_SHADOW_ENABLED", True)
     short_override = os.getenv("ALLOW_SHORT_SELLING")
     if short_override is not None and short_override.strip():
         p["allow_short_selling"] = short_override.strip().lower() == "true"
@@ -621,6 +650,33 @@ _INDEX_OR_ETF_TICKERS = {
     "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "IEF", "SHY", "SGOV", "BIL",
     "SMH", "XOP", "XLF", "XLV", "VGT", "IBIT", "TQQQ", "SOXL", "NVDL",
 } | _INVERSE_ETFS | _DEFENSIVE_TICKERS
+_THEME_MAP = {
+    "semis": {"NVDA", "AMD", "ARM", "AVGO", "SMH", "SOXL", "NVDL", "MU"},
+    "broad_tech": {"QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "TSLA", "PLTR"},
+    "crypto": {"IBIT", "COIN", "MSTR"},
+    "energy": {"XOP", "XLE", "USO"},
+    "financials": {"XLF"},
+    "defensive": {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"},
+    "broad_market": {"SPY", "IWM", "DIA"},
+}
+_THEME_PROXIES = {
+    "semis": "SMH",
+    "broad_tech": "QQQ",
+    "crypto": "IBIT",
+    "energy": "XOP",
+    "financials": "XLF",
+    "defensive": "TLT",
+    "broad_market": "SPY",
+}
+_DYNAMIC_CANDIDATE_POOL = {
+    "semis": ["NVDA", "AMD", "ARM", "AVGO", "SMH", "SOXL", "NVDL", "MU", "TSM", "ASML"],
+    "broad_tech": ["QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "TSLA", "PLTR", "CRM", "NOW"],
+    "crypto": ["IBIT", "COIN", "MSTR", "MARA", "RIOT"],
+    "energy": ["XOP", "XLE", "CVX", "XOM", "OXY"],
+    "financials": ["XLF", "JPM", "BAC", "GS", "MS"],
+    "defensive": ["GLD", "TLT", "IEF", "SGOV"],
+}
+_DEFAULT_CORE_TICKERS = {"SPY", "QQQ", "GLD", "TLT", "SMH", "NVDA", "AMD", "META"}
 _PROBE_EV_DECISIONS = {
     "probe_size", "event_probe_size", "grade_ev_override_probe", "a_plus_probe",
     "b_grade_exploration_size",
@@ -637,6 +693,168 @@ def _exposure_direction(ticker: str, side: str) -> str:
     if ticker in _DEFENSIVE_TICKERS:
         return "defensive_long"
     return "long_market"
+
+
+def _ticker_theme(ticker: str) -> str:
+    ticker = str(ticker or "").upper()
+    for theme, members in _THEME_MAP.items():
+        if ticker in members:
+            return theme
+    return "other"
+
+
+def _return_pct_from_bars(ticker: str, period: str = "5d", interval: str = "1d") -> Optional[float]:
+    try:
+        import yfinance as yf
+        bars = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        if bars is None or bars.empty or len(bars) < 2:
+            return None
+        close = bars["Close"].squeeze()
+        first = float(close.iloc[0])
+        last = float(close.iloc[-1])
+        if first <= 0:
+            return None
+        return (last - first) / first * 100
+    except Exception:
+        return None
+
+
+def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
+    if not _env_bool("SECTOR_MOMENTUM_BONUS_ENABLED", bool(profile.get("sector_momentum_bonus_enabled", True))):
+        return {"enabled": False, "themes": {}, "ticker_multipliers": {}}
+    lookback = _env_value("SECTOR_MOMENTUM_LOOKBACK_PERIOD", str(profile.get("sector_momentum_lookback_period", "5d")))
+    leadership_threshold = _env_float(
+        "SECTOR_MOMENTUM_LEADERSHIP_THRESHOLD_PCT",
+        float(profile.get("sector_momentum_leadership_threshold_pct", 2.0)),
+    )
+    max_bonus = _env_float("SECTOR_MOMENTUM_MAX_BONUS", float(profile.get("sector_momentum_max_bonus", 0.15)))
+    spy_return = _return_pct_from_bars("SPY", period=lookback, interval="1d")
+    themes = {}
+    ticker_multipliers = {}
+    if spy_return is None:
+        return {"enabled": True, "spy_return_pct": None, "themes": {}, "ticker_multipliers": {}}
+    for theme, proxy in _THEME_PROXIES.items():
+        theme_return = _return_pct_from_bars(proxy, period=lookback, interval="1d")
+        if theme_return is None:
+            continue
+        relative = theme_return - spy_return
+        leader = relative >= leadership_threshold
+        bonus = min(max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
+        multiplier = round(1.0 + bonus, 4)
+        themes[theme] = {
+            "proxy": proxy,
+            "return_pct": round(theme_return, 3),
+            "spy_return_pct": round(spy_return, 3),
+            "relative_pct": round(relative, 3),
+            "leader": leader,
+            "multiplier": multiplier,
+        }
+        if leader:
+            for ticker in _THEME_MAP.get(theme, set()):
+                if ticker in tickers:
+                    ticker_multipliers[ticker] = multiplier
+    return {
+        "enabled": True,
+        "lookback": lookback,
+        "spy_return_pct": round(spy_return, 3),
+        "themes": themes,
+        "ticker_multipliers": ticker_multipliers,
+    }
+
+
+def _apply_sector_momentum_to_candidate(candidate: dict, momentum: dict) -> dict:
+    ticker = str(candidate.get("ticker") or "").upper()
+    theme = _ticker_theme(ticker)
+    multiplier = float((momentum or {}).get("ticker_multipliers", {}).get(ticker, 1.0))
+    setup_context = candidate.setdefault("setup_context", {})
+    base_rank = float(setup_context.get("candidate_rank_score") or 0)
+    setup_context["theme"] = theme
+    setup_context["sector_momentum_multiplier"] = round(multiplier, 4)
+    setup_context["base_candidate_rank_score"] = round(base_rank, 4)
+    if multiplier > 1.0:
+        setup_context["candidate_rank_score"] = round(base_rank * multiplier, 4)
+        setup_context["sector_momentum"] = (momentum or {}).get("themes", {}).get(theme, {})
+    return candidate
+
+
+def _dynamic_universe_shadow_recommendations(tickers: list[str], momentum: dict,
+                                             max_per_theme: int = 2) -> dict:
+    existing = {str(t or "").upper() for t in tickers}
+    recs = []
+    for theme, data in (momentum or {}).get("themes", {}).items():
+        if not data.get("leader"):
+            continue
+        added = 0
+        for ticker in _DYNAMIC_CANDIDATE_POOL.get(theme, []):
+            ticker = ticker.upper()
+            if ticker in existing:
+                continue
+            recs.append({
+                "ticker": ticker,
+                "theme": theme,
+                "reason": (
+                    f"{theme} leading SPY by {data.get('relative_pct')}% "
+                    f"over {momentum.get('lookback', '5d')}"
+                ),
+                "proxy": data.get("proxy"),
+                "theme_relative_pct": data.get("relative_pct"),
+                "mode": "shadow_only",
+                "execution_allowed": False,
+            })
+            added += 1
+            if added >= max_per_theme:
+                break
+    return {
+        "core_tickers": sorted(existing & _DEFAULT_CORE_TICKERS),
+        "daily_intraday_tickers": [],
+        "weekly_swing_tickers": [],
+        "advisory_tickers": [],
+        "shadow_candidates": recs,
+        "execution_allowed": False,
+    }
+
+
+def _log_dynamic_universe_shadow(tickers: list[str], momentum: dict, profile: dict):
+    if not _env_bool(
+        "DYNAMIC_UNIVERSE_SHADOW_ENABLED",
+        bool(profile.get("dynamic_universe_shadow_enabled", True)),
+    ):
+        return
+    max_per_theme = _env_int(
+        "DYNAMIC_UNIVERSE_MAX_SHADOW_PER_THEME",
+        int(profile.get("dynamic_universe_max_shadow_per_theme", 2)),
+    )
+    payload = _dynamic_universe_shadow_recommendations(tickers, momentum, max_per_theme=max_per_theme)
+    if payload.get("shadow_candidates"):
+        log_event("INFO", "dynamic_universe_shadow_recommendations", payload)
+
+
+def _theme_cap_candidates(candidates: list[dict], profile: dict) -> tuple[list[dict], list[dict]]:
+    max_per_theme = _env_int("THEME_MAX_CANDIDATES_PER_CYCLE", int(profile.get("theme_max_candidates_per_cycle", 2)))
+    max_leveraged = _env_int(
+        "THEME_MAX_LEVERAGED_CANDIDATES_PER_CYCLE",
+        int(profile.get("theme_max_leveraged_candidates_per_cycle", 1)),
+    )
+    if max_per_theme <= 0:
+        return list(candidates), []
+    kept, skipped = [], []
+    theme_counts: dict[str, int] = {}
+    leveraged_counts: dict[str, int] = {}
+    for candidate in candidates:
+        ticker = candidate["ticker"]
+        theme = candidate.get("setup_context", {}).get("theme") or _ticker_theme(ticker)
+        is_leveraged = _is_leveraged_etf(ticker, profile)
+        if theme_counts.get(theme, 0) >= max_per_theme:
+            skipped.append({**candidate, "theme_cap_reason": "theme_candidate_cap", "theme": theme})
+            continue
+        if is_leveraged and leveraged_counts.get(theme, 0) >= max_leveraged:
+            skipped.append({**candidate, "theme_cap_reason": "theme_leveraged_cap", "theme": theme})
+            continue
+        theme_counts[theme] = theme_counts.get(theme, 0) + 1
+        if is_leveraged:
+            leveraged_counts[theme] = leveraged_counts.get(theme, 0) + 1
+        kept.append(candidate)
+    return kept, skipped
 
 
 def _regime_debug_payload(regime_state, signal_result: dict = None) -> dict:
@@ -1892,6 +2110,8 @@ def run_signal_cycle():
 
         # Update percentile windows for all tickers computed this cycle
         _update_signal_percentiles(_cycle_composites, _cycle_db_percentiles)
+        sector_momentum = _sector_momentum_snapshot(TICKERS, effective_profile)
+        _log_dynamic_universe_shadow(TICKERS, sector_momentum, effective_profile)
 
         min_grade = effective_profile.get("min_grade_required", "B")
         graded_candidates = []
@@ -1916,6 +2136,7 @@ def run_signal_cycle():
                 candidate["setup_context"]["setup_grade"] = setup_grade.grade
                 candidate["setup_context"]["sector_confirmation"] = setup_grade.sector_confirmation
                 candidate["setup_context"]["percentile_rank"] = setup_grade.percentile_rank
+                _apply_sector_momentum_to_candidate(candidate, sector_momentum)
                 if candidate.get("signal_id"):
                     update_signal(candidate["signal_id"], {
                         "setup_grade": setup_grade.grade,
@@ -2041,6 +2262,25 @@ def run_signal_cycle():
                 )
 
         candidates = graded_candidates
+        candidates, theme_skipped = _theme_cap_candidates(candidates, effective_profile)
+        for skipped in theme_skipped:
+            log_event("INFO", "candidate_theme_cap_skipped", {
+                "ticker": skipped["ticker"],
+                "theme": skipped.get("theme"),
+                "reason": skipped.get("theme_cap_reason"),
+                "rank_score": skipped.get("setup_context", {}).get("candidate_rank_score"),
+            })
+            _record_blocked_opportunity(
+                skipped["ticker"],
+                skipped.get("action_hint"),
+                skipped.get("composite"),
+                skipped.get("signals_snap"),
+                skipped.get("setup_context"),
+                skipped.get("ticker_regime"),
+                "ranking",
+                skipped.get("theme_cap_reason", "theme_cap"),
+                ev_result=skipped.get("ev_result"),
+            )
         if candidates:
             high_uniform = [
                 c for c in candidates
@@ -2083,6 +2323,8 @@ def run_signal_cycle():
                         "ticker": c["ticker"],
                         "score": round(float(c.get("composite") or 0), 4),
                         "rank_score": c.get("setup_context", {}).get("candidate_rank_score"),
+                        "theme": c.get("setup_context", {}).get("theme"),
+                        "sector_momentum_multiplier": c.get("setup_context", {}).get("sector_momentum_multiplier"),
                         "breakout_quality": c.get("setup_context", {}).get("breakout_quality"),
                         "ev_decision": c.get("ev_result", {}).get("ev_decision"),
                         "strategy_family": c.get("setup_context", {}).get("strategy_family"),

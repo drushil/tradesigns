@@ -396,6 +396,10 @@ TRADE LOG (most recent 50):
 Analyse these trades and identify 4-6 CONCRETE, ACTIONABLE patterns.
 Look for: time-of-day effects, signal combinations that work/fail,
 regime-specific patterns, holding duration effects, ticker preferences.
+Also include one universe-management recommendation for the coming week:
+which tickers/themes to keep, remove, add only to shadow watch, or consider
+for manual review. Do not recommend automatic execution of brand-new tickers
+without warm-up evidence.
 
 Output ONLY a valid JSON array, no other text:
 [
@@ -403,7 +407,7 @@ Output ONLY a valid JSON array, no other text:
     "insight": "One clear factual observation from the data",
     "action": "Specific parameter or behaviour to change",
     "confidence": 0.0-1.0,
-    "category": "signals|timing|risk|costs|regime"
+    "category": "signals|timing|risk|costs|regime|universe"
   }}
 ]"""
 
