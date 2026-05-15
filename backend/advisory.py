@@ -72,6 +72,7 @@ class AdvisoryConfig:
     capital_eur: float
     max_live_alerts_per_day: int
     max_shadow_signals_per_day: int
+    max_shadow_discord_alerts_per_day: int
     max_open_live_trades: int
     max_live_trades_per_session: int
     risk_per_trade_eur: float
@@ -81,6 +82,7 @@ class AdvisoryConfig:
     min_composite: float
     min_ev_pct: float
     min_breakout_quality: float
+    min_discord_grade: str
     allow_short: bool
     discord_webhook_url: str
     fx_rate: float
@@ -116,7 +118,7 @@ def load_config() -> AdvisoryConfig:
     markets = _csv_set("ADVISORY_MARKETS", "US,EU")
     live = _csv_set("ADVISORY_LIVE_MARKETS", "US")
     shadow = _csv_set("ADVISORY_SHADOW_MARKETS", "EU")
-    shadow_discord = _csv_set("ADVISORY_SHADOW_DISCORD_MARKETS", "EU")
+    shadow_discord = _csv_set("ADVISORY_SHADOW_DISCORD_MARKETS", "OFF")
     return AdvisoryConfig(
         markets=markets,
         live_markets=live,
@@ -125,6 +127,7 @@ def load_config() -> AdvisoryConfig:
         capital_eur=_env_float("ADVISORY_CAPITAL_EUR", 5000.0),
         max_live_alerts_per_day=_env_int("ADVISORY_MAX_LIVE_ALERTS_PER_DAY", 3),
         max_shadow_signals_per_day=_env_int("ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY", 10),
+        max_shadow_discord_alerts_per_day=_env_int("ADVISORY_MAX_SHADOW_DISCORD_ALERTS_PER_DAY", 1),
         max_open_live_trades=_env_int("ADVISORY_MAX_OPEN_LIVE_TRADES", 1),
         max_live_trades_per_session=_env_int("ADVISORY_MAX_LIVE_TRADES_PER_SESSION", 2),
         risk_per_trade_eur=_env_float("ADVISORY_RISK_PER_TRADE_EUR", 50.0),
@@ -134,6 +137,7 @@ def load_config() -> AdvisoryConfig:
         min_composite=_env_float("ADVISORY_MIN_COMPOSITE", 0.45),
         min_ev_pct=_env_float("ADVISORY_MIN_EV_PCT", 0.50),
         min_breakout_quality=_env_float("ADVISORY_MIN_BREAKOUT_QUALITY", 0.45),
+        min_discord_grade=_env_value("ADVISORY_DISCORD_MIN_GRADE", "A").upper(),
         allow_short=_env_bool("ADVISORY_ALLOW_SHORT", False),
         discord_webhook_url=_env_value("DISCORD_WEBHOOK_URL", ""),
         fx_rate=_env_float("EURUSD_RATE", 1.08),
@@ -273,6 +277,14 @@ def _grade(composite: float, breakout_quality: float, orb_active: bool) -> str:
     if composite >= 0.35:
         return "B"
     return "C"
+
+
+def _grade_rank(grade: str) -> int:
+    return {"C": 0, "B": 1, "A": 2, "A+": 3}.get(str(grade).upper(), -1)
+
+
+def _meets_min_grade(grade: str, min_grade: str) -> bool:
+    return _grade_rank(grade) >= _grade_rank(min_grade)
 
 
 def _data_quality(symbol: str, market: str) -> dict:
@@ -420,29 +432,13 @@ def _format_trade_card(signal: dict) -> str:
         f"{first_line}\n"
         f"**{headline}**\n"
         f"{shadow_note}"
-        f"{quick_label}: LIMIT {signal['side']} {sym} only at "
+        f"{quick_label}: LIMIT {signal['side']} {sym} "
         f"{cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}; "
-        f"size {notional}; stop {cur}{signal['stop_price']:.2f}; "
-        f"valid until {valid}.\n"
-        f"DO NOT CHASE beyond {cur}{signal['do_not_chase_price']:.2f}.\n\n"
-        f"**Execution detail**\n"
-        f"Mode: {mode}\n"
-        f"Broker name: {name}  |  Exchange: {signal.get('exchange') or 'n/a'}\n"
-        f"Order type: LIMIT {signal['side']}\n"
-        f"Entry zone: {cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}\n"
-        f"Do-not-chase: {cur}{signal['do_not_chase_price']:.2f}\n\n"
-        f"**Suggested size**\n"
-        f"{notional} max  |  Risk: ~€{signal['risk_eur']:.0f} ({signal['risk_pct']:.2f}%)"
-        f"{fx_text}\n\n"
-        f"**Exit plan**\n"
-        f"Stop: {cur}{signal['stop_price']:.2f}\n"
-        f"Target 1: {cur}{signal['target_1']:.2f} - sell 50%\n"
-        f"Target 2: {cur}{signal['target_2']:.2f} - sell rest or trail\n"
-        f"Time exit: close by {time_exit} if below target progress\n\n"
-        f"**Valid until**\n"
-        f"{valid}. Ignore after that.\n\n"
-        f"**Why**\n"
-        f"{signal['rationale']}\n\n"
+        f"do not chase > {cur}{signal['do_not_chase_price']:.2f}; valid until {valid}.\n"
+        f"Size/risk: {notional} max, ~€{signal['risk_eur']:.0f} risk{fx_text}.\n"
+        f"Exit: stop {cur}{signal['stop_price']:.2f}; T1 {cur}{signal['target_1']:.2f}; "
+        f"T2 {cur}{signal['target_2']:.2f}; time exit {time_exit}.\n"
+        f"Why: {signal['rationale']}.\n"
         f"Grade: **{signal['grade']}**  |  Composite: {signal['composite_score']:.2f}  "
         f"|  EV: {signal['ev_net_pct'] if signal['ev_net_pct'] is not None else 'n/a'}%"
     )
@@ -472,6 +468,8 @@ def _weights_for_market(market: str) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
+    if not _meets_min_grade(candidate.get("grade"), cfg.min_discord_grade):
+        return False
     if candidate.get("mode") == "live":
         return True
     return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
@@ -597,6 +595,7 @@ def run_advisory_cycle() -> dict:
     cfg = load_config()
     now_cet = _now_cet()
     recent_live = get_recent_advisory_signals(days=1, mode="live")
+    recent_shadow = get_recent_advisory_signals(days=1, mode="shadow")
     now_utc = now_cet.astimezone(timezone.utc)
     live_sent_today = len([
         s for s in recent_live
@@ -613,6 +612,11 @@ def run_advisory_cycle() -> dict:
         if str(s.get("status")) in LIVE_SIGNAL_STATUSES
         and active_window.get(str(s.get("market", "")).upper())
         and _is_signal_in_current_session(s, now_cet)
+    ])
+    shadow_discord_sent_today = len([
+        s for s in recent_shadow
+        if str(s.get("market", "")).upper() in cfg.shadow_discord_markets
+        and _meets_min_grade(s.get("grade"), cfg.min_discord_grade)
     ])
     recent_trades = get_recent_trades(days=90)
     emitted = []
@@ -679,8 +683,14 @@ def run_advisory_cycle() -> dict:
             limit = cfg.max_shadow_signals_per_day
         for candidate in market_candidates[:max(0, limit)]:
             saved = insert_advisory_signal(candidate)
-            if _should_send_discord(candidate, cfg) and "error" not in saved:
+            can_send_shadow = (
+                mode != "shadow"
+                or shadow_discord_sent_today < cfg.max_shadow_discord_alerts_per_day
+            )
+            if can_send_shadow and _should_send_discord(candidate, cfg) and "error" not in saved:
                 _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+                if mode == "shadow":
+                    shadow_discord_sent_today += 1
             if mode == "live" and "error" not in saved:
                 live_sent_today += 1
                 live_sent_this_window += 1
