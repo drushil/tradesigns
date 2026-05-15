@@ -485,6 +485,20 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("leveraged_etf_stop_scalar", 1.35)
     p.setdefault("a_plus_full_size_max_atr_pct", 2.5)
     p.setdefault("a_plus_full_size_max_stop_pct", 5.0)
+    p.setdefault("grade_ev_override_negative_min_samples", 10)
+    p.setdefault("probe_floor_inflation_max_multiple", 1.25)
+    p.setdefault("ranging_regime_size_multiplier", 0.35)
+    p.setdefault("ranging_max_trades_per_day", 6)
+    p.setdefault("ranging_min_grade_required", "A+")
+    p.setdefault("ranging_a_grade_min_breakout_quality", 0.80)
+    p.setdefault("ranging_a_grade_min_ev_pct", 0.25)
+    p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
+    p.setdefault("thesis_invalidated_cooldown_minutes", 75)
+    p.setdefault("allow_a_plus_llm_hold_override", False)
+    p.setdefault("alignment_orb_veto_threshold", 0.50)
+    p.setdefault("alignment_tape_veto_threshold", 0.40)
+    p.setdefault("alignment_put_call_veto_threshold", 0.50)
+    p.setdefault("alignment_rsi_veto_threshold", 0.50)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -494,6 +508,25 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["allow_b_grade_exploration"] = _env_bool("ALLOW_B_GRADE_EXPLORATION", True)
     if os.getenv("B_GRADE_SIZE_MULTIPLIER"):
         p["b_grade_size_multiplier"] = _env_float("B_GRADE_SIZE_MULTIPLIER", p["b_grade_size_multiplier"])
+    if os.getenv("GRADE_EV_OVERRIDE_NEGATIVE_MIN_SAMPLES"):
+        p["grade_ev_override_negative_min_samples"] = _env_int(
+            "GRADE_EV_OVERRIDE_NEGATIVE_MIN_SAMPLES",
+            int(p["grade_ev_override_negative_min_samples"]),
+        )
+    if os.getenv("PROBE_FLOOR_INFLATION_MAX_MULTIPLE"):
+        p["probe_floor_inflation_max_multiple"] = _env_float(
+            "PROBE_FLOOR_INFLATION_MAX_MULTIPLE",
+            p["probe_floor_inflation_max_multiple"],
+        )
+    if os.getenv("RANGING_MAX_TRADES_PER_DAY"):
+        p["ranging_max_trades_per_day"] = _env_int("RANGING_MAX_TRADES_PER_DAY", int(p["ranging_max_trades_per_day"]))
+    if os.getenv("RANGING_REGIME_SIZE_MULTIPLIER"):
+        p["ranging_regime_size_multiplier"] = _env_float("RANGING_REGIME_SIZE_MULTIPLIER", p["ranging_regime_size_multiplier"])
+    if os.getenv("THESIS_INVALIDATED_COOLDOWN_MINUTES"):
+        p["thesis_invalidated_cooldown_minutes"] = _env_int(
+            "THESIS_INVALIDATED_COOLDOWN_MINUTES",
+            int(p["thesis_invalidated_cooldown_minutes"]),
+        )
     short_override = os.getenv("ALLOW_SHORT_SELLING")
     if short_override is not None and short_override.strip():
         p["allow_short_selling"] = short_override.strip().lower() == "true"
@@ -584,6 +617,14 @@ def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> 
 
 _INVERSE_ETFS = {"SH", "PSQ", "SQQQ", "SPXU", "SDS", "QID", "DOG", "TZA"}
 _DEFENSIVE_TICKERS = {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"}
+_INDEX_OR_ETF_TICKERS = {
+    "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "IEF", "SHY", "SGOV", "BIL",
+    "SMH", "XOP", "XLF", "XLV", "VGT", "IBIT", "TQQQ", "SOXL", "NVDL",
+} | _INVERSE_ETFS | _DEFENSIVE_TICKERS
+_PROBE_EV_DECISIONS = {
+    "probe_size", "event_probe_size", "grade_ev_override_probe", "a_plus_probe",
+    "b_grade_exploration_size",
+}
 
 
 def _exposure_direction(ticker: str, side: str) -> str:
@@ -642,6 +683,144 @@ def _signal_score(signals: dict, name: str) -> float:
         return float((signals or {}).get(name, {}).get("score", 0) or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _is_probe_ev_decision(ev_decision: str) -> bool:
+    return str(ev_decision or "") in _PROBE_EV_DECISIONS
+
+
+def _alignment_veto(ticker: str, action: str, signals: dict, profile: dict) -> Optional[dict]:
+    """Block obvious signal conflicts before LLM/execution can paper over them."""
+    action = str(action or "").upper()
+    direction = 1 if action == "BUY" else -1
+    ticker = str(ticker or "").upper()
+    orb = _signal_score(signals, "orb")
+    tape = _signal_score(signals, "tape_aggression")
+    put_call = _signal_score(signals, "put_call_ratio")
+    rsi = _signal_score(signals, "rsi_divergence")
+    macd = _signal_score(signals, "macd_crossover")
+    rel = _signal_score(signals, "relative_strength")
+    vwap = _signal_score(signals, "vwap_deviation")
+    news = _signal_score(signals, "news_sentiment")
+
+    orb_veto = float(profile.get("alignment_orb_veto_threshold", 0.50))
+    tape_veto = float(profile.get("alignment_tape_veto_threshold", 0.40))
+    options_veto = float(profile.get("alignment_put_call_veto_threshold", 0.50))
+    rsi_veto = float(profile.get("alignment_rsi_veto_threshold", 0.50))
+
+    checks = [
+        ("orb", orb * direction, orb_veto),
+        ("tape_aggression", tape * direction, tape_veto),
+    ]
+    for name, directional_score, threshold in checks:
+        if directional_score < -abs(threshold):
+            return {
+                "reason": f"signal_alignment_veto_{name}",
+                "signal": name,
+                "score": round(directional_score, 4),
+                "threshold": -abs(threshold),
+            }
+
+    if ticker in _INDEX_OR_ETF_TICKERS and put_call * direction < -abs(options_veto):
+        return {
+            "reason": "signal_alignment_veto_put_call_ratio",
+            "signal": "put_call_ratio",
+            "score": round(put_call * direction, 4),
+            "threshold": -abs(options_veto),
+        }
+
+    bullish_confirmers = sum(
+        1 for score in (tape, rel, vwap, orb, news)
+        if score * direction > 0.15
+    )
+    if rsi * direction < -abs(rsi_veto) and macd * direction > 0.25 and bullish_confirmers <= 1:
+        return {
+            "reason": "signal_alignment_veto_rsi_macd_only",
+            "signal": "rsi_divergence",
+            "score": round(rsi * direction, 4),
+            "macd": round(macd * direction, 4),
+            "bullish_confirmers": bullish_confirmers,
+        }
+    return None
+
+
+def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
+                          setup_grade: Optional[SetupGrade], profile: dict) -> Optional[dict]:
+    if str((setup_context or {}).get("intraday_regime", "")).lower() != "ranging":
+        return None
+    grade = setup_grade.grade if setup_grade else (setup_context or {}).get("setup_grade")
+    breakout_quality = float((setup_context or {}).get("breakout_quality") or 0)
+    net_ev = (ev_result or {}).get("net_ev_pct")
+    net_ev = float(net_ev) if net_ev is not None else None
+    min_grade = str(profile.get("ranging_min_grade_required", "A+")).upper()
+    if grade_sort_key(grade or "C") < grade_sort_key(min_grade):
+        return {
+            "reason": "ranging_regime_grade_veto",
+            "grade": grade,
+            "min_grade": min_grade,
+            "breakout_quality": round(breakout_quality, 4),
+        }
+
+    if grade == "A":
+        min_breakout = float(profile.get("ranging_a_grade_min_breakout_quality", 0.80))
+        min_ev = float(profile.get("ranging_a_grade_min_ev_pct", 0.25))
+        if breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
+            return {
+                "reason": "ranging_regime_a_grade_quality_veto",
+                "grade": grade,
+                "breakout_quality": round(breakout_quality, 4),
+                "min_breakout_quality": min_breakout,
+                "net_ev_pct": net_ev,
+                "min_ev_pct": min_ev,
+            }
+
+    if _is_leveraged_etf(ticker, profile):
+        min_lev_ev = float(profile.get("ranging_leveraged_min_ev_pct", 0.25))
+        if net_ev is None or net_ev < min_lev_ev:
+            return {
+                "reason": "ranging_regime_leveraged_ev_veto",
+                "net_ev_pct": net_ev,
+                "min_ev_pct": min_lev_ev,
+            }
+    return None
+
+
+def _llm_rationale_mentions_conflict(llm_result: dict) -> bool:
+    rationale = str((llm_result or {}).get("rationale") or "").lower()
+    conflict_terms = ("conflict", "mixed", "disagree", "diverg", "near-zero", "near zero")
+    return any(term in rationale for term in conflict_terms)
+
+
+def _known_negative_grade_override_block(ev_result: dict, profile: dict) -> Optional[dict]:
+    ev_result = ev_result or {}
+    ev_net_pct = ev_result.get("net_ev_pct")
+    if ev_net_pct is None:
+        return None
+    ev_sample_size = int(ev_result.get("sample_size") or 0)
+    min_known_samples = int(profile.get("grade_ev_override_negative_min_samples", 10))
+    ev_net_pct = float(ev_net_pct)
+    if ev_net_pct < 0 and ev_sample_size >= min_known_samples:
+        return {
+            "net_ev_pct": ev_net_pct,
+            "sample_size": ev_sample_size,
+            "min_samples": min_known_samples,
+        }
+    return None
+
+
+def _probe_floor_inflation_block(ev_decision: str, grade_min_notional_applied: bool,
+                                 intended_size_eur: float, final_size_eur: float,
+                                 profile: dict) -> Optional[dict]:
+    if not (_is_probe_ev_decision(ev_decision) and grade_min_notional_applied and intended_size_eur > 0):
+        return None
+    inflation_multiple = float(final_size_eur or 0) / float(intended_size_eur)
+    max_inflation = float(profile.get("probe_floor_inflation_max_multiple", 1.25))
+    if inflation_multiple > max_inflation:
+        return {
+            "inflation_multiple": round(inflation_multiple, 3),
+            "max_inflation": max_inflation,
+        }
+    return None
 
 
 def _event_risk_active(ticker: str) -> dict:
@@ -1163,6 +1342,40 @@ def _ticker_loss_cooldown_active(ticker: str, side: str, recent_trades: list,
             "side": side,
             "losses_today": len(losses),
             "min_reentry_score": min_reentry_score,
+        }
+    return None
+
+
+def _thesis_invalidated_cooldown_active(ticker: str, side: str, recent_trades: list,
+                                        profile: dict) -> Optional[dict]:
+    """DB-backed cooldown after fast thesis invalidation churn."""
+    cooldown_minutes = _env_int(
+        "THESIS_INVALIDATED_COOLDOWN_MINUTES",
+        int(profile.get("thesis_invalidated_cooldown_minutes", 75)),
+    )
+    if cooldown_minutes <= 0:
+        return None
+    now = datetime.utcnow()
+    latest = None
+    for trade in recent_trades or []:
+        if str(trade.get("ticker", "")).upper() != ticker.upper():
+            continue
+        if str(trade.get("side", "")).upper() != str(side or "").upper():
+            continue
+        if trade.get("exit_reason") != "thesis_invalidated":
+            continue
+        closed_at = _parse_dt(trade.get("exit_time") or trade.get("closed_at") or trade.get("created_at"))
+        if latest is None or closed_at > latest:
+            latest = closed_at
+    if latest is None:
+        return None
+    elapsed = (now - latest).total_seconds() / 60
+    if elapsed < cooldown_minutes:
+        return {
+            "ticker": ticker,
+            "side": side,
+            "minutes_since_thesis_invalidated": round(elapsed, 1),
+            "cooldown_minutes": cooldown_minutes,
         }
     return None
 
@@ -1714,6 +1927,23 @@ def run_signal_cycle():
                 # EV-blocked candidates: A+/A override with probe size; B/C drop
                 if candidate.get("ev_blocked"):
                     if setup_grade.grade in {"A+", "A"}:
+                        known_negative = _known_negative_grade_override_block(
+                            candidate.get("ev_result"), effective_profile
+                        )
+                        if known_negative:
+                            log_event("INFO", "grade_ev_override_known_negative_block", {
+                                "ticker": t,
+                                "grade": setup_grade.grade,
+                                **known_negative,
+                            })
+                            _record_blocked_opportunity(
+                                t, candidate.get("action_hint"), candidate["composite"],
+                                candidate["signals_snap"], candidate["setup_context"],
+                                candidate["ticker_regime"], "ev",
+                                "known_negative_ev_grade_override_block",
+                                ev_result=candidate["ev_result"],
+                            )
+                            continue
                         ev_override = candidate["ev_result"].copy()
                         ev_override["size_multiplier"] = 0.35
                         ev_override["ev_decision"] = "grade_ev_override_probe"
@@ -1731,7 +1961,26 @@ def run_signal_cycle():
                             candidate["ev_result"].get("reason", "ev_blocked"),
                             ev_result=candidate["ev_result"],
                         )
-                        continue
+                    continue
+
+                ranging_block = _ranging_regime_block(
+                    t, candidate["setup_context"], candidate.get("ev_result"),
+                    setup_grade, effective_profile,
+                )
+                if ranging_block:
+                    log_event("INFO", "ranging_regime_candidate_block", {
+                        "ticker": t,
+                        "composite": round(float(candidate.get("composite") or 0), 4),
+                        **ranging_block,
+                    })
+                    _record_blocked_opportunity(
+                        t, candidate.get("action_hint"), candidate["composite"],
+                        candidate["signals_snap"], candidate["setup_context"],
+                        candidate["ticker_regime"], "regime",
+                        ranging_block["reason"],
+                        ev_result=candidate.get("ev_result"),
+                    )
+                    continue
 
                 # Leveraged ETFs require A+ grade — drop anything weaker
                 if _is_leveraged_etf(t, effective_profile) and setup_grade.grade != "A+":
@@ -1792,6 +2041,20 @@ def run_signal_cycle():
                 )
 
         candidates = graded_candidates
+        if candidates:
+            high_uniform = [
+                c for c in candidates
+                if (c.get("setup_grade") is not None
+                    and float(c["setup_grade"].sector_confirmation or 0) >= 0.99
+                    and float(c["setup_grade"].percentile_rank or 0) >= 95)
+            ]
+            if len(high_uniform) >= max(3, int(len(candidates) * 0.75)):
+                log_event("WARN", "grading_metrics_uniform_high", {
+                    "count": len(high_uniform),
+                    "candidate_count": len(candidates),
+                    "tickers": [c["ticker"] for c in high_uniform[:12]],
+                    "reason": "sector_confirmation_and_percentile_rank_not_differentiating",
+                })
         candidates.sort(
             key=lambda c: (
                 grade_sort_key((c.get("setup_grade") or SetupGrade("B", 0.6, 0.5, 0.8, False, [], 0, 0.5, 40, False)).grade),
@@ -1920,11 +2183,33 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
     if cooldown:
         log_event("INFO", "time_exit_cooldown", cooldown)
         return
+    thesis_cooldown = _thesis_invalidated_cooldown_active(ticker, action_hint, recent_trades, profile)
+    if thesis_cooldown:
+        log_event("INFO", "thesis_invalidated_cooldown", thesis_cooldown)
+        return
     loss_cooldown = _ticker_loss_cooldown_active(ticker, action_hint, recent_trades, profile)
     if loss_cooldown and abs(composite) < float(loss_cooldown["min_reentry_score"]):
         loss_cooldown["composite"] = round(composite, 4)
         log_event("INFO", "ticker_loss_cooldown", loss_cooldown)
         return
+    if str(ticker_regime or "").lower() == "ranging":
+        ranging_cap = int(profile.get("ranging_max_trades_per_day", 6))
+        if ranging_cap > 0 and int(portfolio_state.get("trades_today") or 0) >= ranging_cap:
+            reason = f"ranging_regime_daily_trade_cap ({portfolio_state.get('trades_today')}/{ranging_cap})"
+            log_event("INFO", "ranging_regime_trade_cap", {
+                "ticker": ticker,
+                "trades_today": portfolio_state.get("trades_today"),
+                "ranging_max_trades_per_day": ranging_cap,
+            })
+            setup_context = _trade_setup_context(
+                ticker, action_hint, composite, signals_snap, signal_result,
+                ticker_regime_state, gate_reason=reason,
+            )
+            _record_blocked_opportunity(
+                ticker, action_hint, composite, signals_snap, setup_context,
+                ticker_regime, "regime", reason,
+            )
+            return
     gate_ok, gate_reason = pre_trade_gate(
         ticker, action_hint.lower(), size_eur, composite, profile, portfolio_state,
         market_regime=getattr(ticker_regime_state, "market_regime", None),
@@ -1957,6 +2242,20 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         ticker_regime_state, gate_reason=gate_reason,
     )
     strategy_family_hint = setup_context["strategy_family"]
+    alignment_veto = _alignment_veto(ticker, action_hint, signals_snap, profile)
+    if alignment_veto:
+        reason = alignment_veto["reason"]
+        log_event("INFO", "signal_alignment_veto", {
+            "ticker": ticker,
+            "action": action_hint,
+            "composite": round(composite, 4),
+            **alignment_veto,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "signal_alignment", reason,
+        )
+        return
 
     # 3. Log signal to DB. Grade metadata is updated after the full cycle
     # because sector confirmation depends on all tickers' composites.
@@ -2130,7 +2429,8 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     })
 
     if suggested_action == "HOLD":
-        if is_a_plus:
+        allow_hold_override = bool(profile.get("allow_a_plus_llm_hold_override", False))
+        if is_a_plus and allow_hold_override and not _llm_rationale_mentions_conflict(llm_result):
             # A+ escalation: override LLM HOLD — deterministic action with probe size
             log_event("INFO", "a_plus_llm_hold_override", {
                 "ticker": ticker, "composite": composite,
@@ -2146,6 +2446,8 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 "ticker": ticker,
                 "composite": composite,
                 "rationale": llm_result.get("rationale", ""),
+                "grade": setup_grade.grade if setup_grade else None,
+                "a_plus_hold_override_enabled": allow_hold_override,
             })
             _record_blocked_opportunity(
                 ticker, action, composite, signals_snap, setup_context,
@@ -2181,6 +2483,20 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 profile, ticker_regime_state,
                 {"llm_action": suggested_action, "llm_conviction": llm_conviction},
             )
+        return
+    if suggested_action in {"BUY", "SELL"} and _llm_rationale_mentions_conflict(llm_result):
+        log_event("INFO", "llm_rationale_conflict_veto", {
+            "ticker": ticker,
+            "composite": composite,
+            "llm_action": suggested_action,
+            "rationale": llm_result.get("rationale", ""),
+        })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "llm",
+            llm_result.get("rationale", "llm_rationale_conflict_veto"),
+            ev_result=ev_result,
+        )
         return
 
     if conviction < profile["min_conviction"]:
@@ -2248,6 +2564,15 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 "ticker": ticker,
                 **sizing["a_plus_size_cap_reason"],
             })
+    if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging":
+        ranging_scalar = max(0.0, min(1.0, float(profile.get("ranging_regime_size_multiplier", 0.35))))
+        combined_mult *= ranging_scalar
+        sizing["ranging_regime_size_scalar"] = round(ranging_scalar, 3)
+        log_event("INFO", "ranging_regime_size_reduced", {
+            "ticker": ticker,
+            "scalar": round(ranging_scalar, 3),
+            "combined_size_multiplier": round(combined_mult, 3),
+        })
     final_size *= combined_mult
     if action == "SELL":
         final_size = _cap_short_notional(final_size, capital_base, profile)
@@ -2305,6 +2630,29 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 sizing["grade_min_notional_capped"] = True
                 sizing["grade_min_notional_eur"] = round(min_notional_eur, 2)
                 sizing["grade_min_notional_buffer_pct"] = round(min_buffer * 100, 3)
+
+    inflation_block = _probe_floor_inflation_block(
+        ev_result.get("ev_decision"),
+        bool(sizing.get("grade_min_notional_applied")),
+        intended_size_eur,
+        final_size,
+        profile,
+    )
+    if inflation_block:
+        reason = "probe_floor_inflation_block"
+        log_event("INFO", reason, {
+            "ticker": ticker,
+            "ev_decision": ev_result.get("ev_decision"),
+            "intended_size_eur": round(intended_size_eur, 2),
+            "floor_size_eur": round(final_size, 2),
+            **inflation_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "sizing", reason,
+            ev_result=ev_result, reference_price=current_price,
+        )
+        return
 
     final_size_usd = _eur_to_usd(final_size)
     sizing["size_eur"] = round(final_size, 2)
