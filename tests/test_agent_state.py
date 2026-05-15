@@ -291,8 +291,8 @@ def test_theme_cap_limits_leveraged_copycat_candidates():
         },
     )
 
-    assert [c["ticker"] for c in kept] == ["NVDA", "SOXL"]
-    assert skipped[0]["ticker"] == "NVDL"
+    assert [c["ticker"] for c in kept] == ["NVDA"]
+    assert [c["ticker"] for c in skipped] == ["SOXL", "NVDL"]
     assert skipped[0]["theme_cap_reason"] == "theme_leveraged_cap"
 
 
