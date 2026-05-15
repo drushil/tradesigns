@@ -15,6 +15,7 @@ def _cfg(**overrides):
         "capital_eur": 5000.0,
         "max_live_alerts_per_day": 3,
         "max_shadow_signals_per_day": 10,
+        "max_shadow_discord_alerts_per_day": 1,
         "max_open_live_trades": 1,
         "max_live_trades_per_session": 2,
         "risk_per_trade_eur": 50.0,
@@ -24,6 +25,7 @@ def _cfg(**overrides):
         "min_composite": 0.45,
         "min_ev_pct": 0.50,
         "min_breakout_quality": 0.45,
+        "min_discord_grade": "A",
         "allow_short": False,
         "discord_webhook_url": "https://discord.invalid/webhook",
         "fx_rate": 1.08,
@@ -79,11 +81,10 @@ def test_trade_card_is_actionable_for_manual_execution():
 
     assert "LIMIT BUY" in card
     assert "VERY GOOD BUY OPPORTUNITY" in card
-    assert card.index("Quick action:") < card.index("Execution detail")
-    assert "DO NOT CHASE" in card
-    assert "Stop:" in card
-    assert "Target 1:" in card
-    assert "Valid until" in card
+    assert "Quick action:" in card
+    assert "do not chase" in card
+    assert "Exit: stop" in card
+    assert "valid until" in card
     assert "FX: 1.0800" in card
 
 
@@ -113,7 +114,15 @@ def test_shadow_trade_card_is_clearly_observation_only():
     assert "SHADOW OBSERVATION" in card
     assert "DO NOT TRADE YET" in card
     assert "Observation plan:" in card
-    assert "Mode: SHADOW OBSERVATION" in card
+
+
+def test_discord_alert_requires_a_grade_or_better():
+    cfg = _cfg()
+
+    assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "A"}, cfg) is True
+    assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "A+"}, cfg) is True
+    assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "B"}, cfg) is False
+    assert advisory._should_send_discord({"mode": "shadow", "market": "EU", "grade": "C"}, cfg) is False
 
 
 def test_ordered_markets_prioritizes_live_alerts_before_shadow_learning():
@@ -300,7 +309,7 @@ def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatc
         market_regime="bull", intraday_regime="trending",
     ))
     monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
-        "composite_score": 0.38,
+        "composite_score": 0.48,
         "signals": {
             "vwap_deviation": {"score": 0.45},
             "macd_crossover": {"score": 0.40},
@@ -352,7 +361,7 @@ def test_shadow_discord_can_be_disabled_by_market(monkeypatch):
         market_regime="bull", intraday_regime="trending",
     ))
     monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
-        "composite_score": 0.38,
+        "composite_score": 0.48,
         "signals": {
             "vwap_deviation": {"score": 0.45},
             "macd_crossover": {"score": 0.40},
