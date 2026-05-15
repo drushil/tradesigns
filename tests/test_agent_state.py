@@ -254,6 +254,41 @@ def test_sector_momentum_applies_rank_bonus_inside_existing_universe():
     assert candidate["setup_context"]["sector_momentum_multiplier"] == pytest.approx(1.15)
 
 
+def test_sector_config_merge_preserves_base_lists_for_partial_override():
+    import backend.agent as agent
+    base = {
+        "defaults": {"core_tickers": ["SPY"]},
+        "sectors": {
+            "semis": {
+                "proxy": "SMH",
+                "core": ["NVDA", "AMD"],
+                "shadow": ["TSM"],
+                "max_live_per_cycle": 2,
+            }
+        },
+    }
+    override = {"sectors": {"semis": {"max_live_per_cycle": 3}}}
+
+    merged = agent._merge_sector_config(base, override)
+
+    assert merged["sectors"]["semis"]["core"] == ["NVDA", "AMD"]
+    assert merged["sectors"]["semis"]["shadow"] == ["TSM"]
+    assert merged["sectors"]["semis"]["max_live_per_cycle"] == 3
+
+
+def test_sector_proxy_return_uses_basket_average_when_configured(monkeypatch):
+    import backend.agent as agent
+    monkeypatch.setitem(agent._THEME_PROXY_BASKETS, "ai_power", ["VRT", "ETN", "CEG", "VST"])
+
+    result = agent._sector_proxy_return(
+        "ai_power",
+        "XLI",
+        {"VRT": 4.0, "ETN": 2.0, "CEG": 6.0, "VST": 8.0, "XLI": 1.0},
+    )
+
+    assert result == pytest.approx(5.0)
+
+
 def test_theme_cap_limits_correlated_candidates_per_cycle():
     import backend.agent as agent
     candidates = [
