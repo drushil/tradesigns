@@ -1,0 +1,81 @@
+[defaults]
+core_tickers = ["SPY", "QQQ", "GLD", "TLT", "SMH", "NVDA", "AMD", "META"]
+index_or_etf_tickers = [
+  "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "IEF", "SHY", "SGOV", "BIL",
+  "SMH", "XOP", "XLE", "XLF", "XLV", "VGT", "IBIT", "TQQQ", "SOXL", "NVDL",
+]
+defensive_tickers = ["GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"]
+inverse_etfs = ["SH", "PSQ", "SQQQ", "SPXU", "SDS", "QID", "DOG", "TZA"]
+
+[sectors.semis]
+proxy = "SMH"
+core = ["NVDA", "AMD", "ARM", "AVGO", "SMH", "MU"]
+shadow = ["TSM", "ASML", "INTC", "QCOM"]
+leveraged = ["SOXL", "NVDL"]
+max_live_per_cycle = 2
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.15
+min_5d_return_for_bonus_pct = 2.0
+
+[sectors.broad_tech]
+proxy = "QQQ"
+core = ["QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "PLTR"]
+shadow = ["TSLA", "CRM", "NOW", "ORCL", "ADBE"]
+max_live_per_cycle = 2
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.10
+min_5d_return_for_bonus_pct = 2.0
+
+[sectors.ai_power]
+proxy = "XLU"
+core = ["VRT", "ETN", "CEG", "VST"]
+shadow = ["GEV", "NEE", "PEG"]
+max_live_per_cycle = 1
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.12
+min_5d_return_for_bonus_pct = 1.5
+
+[sectors.crypto]
+proxy = "IBIT"
+core = ["IBIT", "COIN", "MSTR"]
+shadow = ["MARA", "RIOT"]
+max_live_per_cycle = 1
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.10
+min_5d_return_for_bonus_pct = 2.5
+
+[sectors.energy]
+proxy = "XOP"
+core = ["XOP"]
+shadow = ["XLE", "CVX", "XOM", "OXY"]
+max_live_per_cycle = 1
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.08
+min_5d_return_for_bonus_pct = 1.5
+
+[sectors.financials]
+proxy = "XLF"
+core = ["XLF"]
+shadow = ["JPM", "BAC", "GS", "MS"]
+max_live_per_cycle = 1
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.08
+min_5d_return_for_bonus_pct = 1.5
+
+[sectors.defensive]
+proxy = "TLT"
+core = ["GLD", "TLT", "IEF", "SGOV"]
+shadow = ["SHY", "BIL"]
+max_live_per_cycle = 1
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.05
+min_5d_return_for_bonus_pct = 1.0
+
+[sectors.broad_market]
+proxy = "SPY"
+core = ["SPY", "IWM", "DIA"]
+shadow = []
+max_live_per_cycle = 2
+max_leveraged_per_cycle = 0
+leadership_bonus = 0.05
+min_5d_return_for_bonus_pct = 1.0

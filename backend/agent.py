@@ -9,8 +9,17 @@ import time
 import asyncio
 import math
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
+
+try:
+    import tomllib
+except Exception:  # pragma: no cover - Python < 3.11 fallback
+    try:
+        import tomli as tomllib
+    except Exception:
+        tomllib = None
 
 try:
     from zoneinfo import ZoneInfo
@@ -118,7 +127,205 @@ def _eur_to_usd(amount_eur: float) -> float:
     return float(amount_eur or 0) * _eurusd_rate()
 
 
-TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",") if t.strip()]
+_DEFAULT_SECTOR_UNIVERSE = {
+    "defaults": {
+        "core_tickers": ["SPY", "QQQ", "GLD", "TLT", "SMH", "NVDA", "AMD", "META"],
+        "index_or_etf_tickers": [
+            "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "IEF", "SHY", "SGOV", "BIL",
+            "SMH", "XOP", "XLE", "XLF", "XLV", "VGT", "IBIT", "TQQQ", "SOXL", "NVDL",
+        ],
+        "defensive_tickers": ["GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"],
+        "inverse_etfs": ["SH", "PSQ", "SQQQ", "SPXU", "SDS", "QID", "DOG", "TZA"],
+    },
+    "sectors": {
+        "semis": {
+            "proxy": "SMH",
+            "core": ["NVDA", "AMD", "ARM", "AVGO", "SMH", "MU"],
+            "shadow": ["TSM", "ASML", "INTC", "QCOM"],
+            "leveraged": ["SOXL", "NVDL"],
+            "max_live_per_cycle": 2,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.15,
+            "min_5d_return_for_bonus_pct": 2.0,
+        },
+        "broad_tech": {
+            "proxy": "QQQ",
+            "core": ["QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "PLTR"],
+            "shadow": ["TSLA", "CRM", "NOW", "ORCL", "ADBE"],
+            "max_live_per_cycle": 2,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.10,
+            "min_5d_return_for_bonus_pct": 2.0,
+        },
+        "ai_power": {
+            "proxy": "XLU",
+            "core": ["VRT", "ETN", "CEG", "VST"],
+            "shadow": ["GEV", "NEE", "PEG"],
+            "max_live_per_cycle": 1,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.12,
+            "min_5d_return_for_bonus_pct": 1.5,
+        },
+        "crypto": {
+            "proxy": "IBIT",
+            "core": ["IBIT", "COIN", "MSTR"],
+            "shadow": ["MARA", "RIOT"],
+            "max_live_per_cycle": 1,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.10,
+            "min_5d_return_for_bonus_pct": 2.5,
+        },
+        "energy": {
+            "proxy": "XOP",
+            "core": ["XOP"],
+            "shadow": ["XLE", "CVX", "XOM", "OXY"],
+            "max_live_per_cycle": 1,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.08,
+            "min_5d_return_for_bonus_pct": 1.5,
+        },
+        "financials": {
+            "proxy": "XLF",
+            "core": ["XLF"],
+            "shadow": ["JPM", "BAC", "GS", "MS"],
+            "max_live_per_cycle": 1,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.08,
+            "min_5d_return_for_bonus_pct": 1.5,
+        },
+        "defensive": {
+            "proxy": "TLT",
+            "core": ["GLD", "TLT", "IEF", "SGOV"],
+            "shadow": ["SHY", "BIL"],
+            "max_live_per_cycle": 1,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.05,
+            "min_5d_return_for_bonus_pct": 1.0,
+        },
+        "broad_market": {
+            "proxy": "SPY",
+            "core": ["SPY", "IWM", "DIA"],
+            "shadow": [],
+            "max_live_per_cycle": 2,
+            "max_leveraged_per_cycle": 0,
+            "leadership_bonus": 0.05,
+            "min_5d_return_for_bonus_pct": 1.0,
+        },
+    },
+}
+
+
+def _normalize_ticker_list(values) -> list[str]:
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = values.split(",")
+    return [str(v).strip().upper() for v in values if str(v).strip()]
+
+
+def _merge_sector_config(base: dict, override: dict) -> dict:
+    merged = {
+        "defaults": {**base.get("defaults", {})},
+        "sectors": {k: dict(v) for k, v in base.get("sectors", {}).items()},
+    }
+    for key, value in (override.get("defaults") or {}).items():
+        merged["defaults"][key] = value
+    for name, sector in (override.get("sectors") or {}).items():
+        current = dict(merged["sectors"].get(name, {}))
+        current.update(sector or {})
+        merged["sectors"][name] = current
+    return merged
+
+
+def _load_sector_universe_config() -> dict:
+    config = _merge_sector_config(_DEFAULT_SECTOR_UNIVERSE, {})
+    if tomllib is None:
+        return config
+    raw_path = _env_value("SECTOR_UNIVERSE_CONFIG_PATH", "config/sector_universe.toml")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[1] / path
+    if not path.exists():
+        return config
+    try:
+        with path.open("rb") as fh:
+            override = tomllib.load(fh)
+        return _merge_sector_config(config, override)
+    except Exception:
+        return config
+
+
+def _active_sector_names(config: dict) -> set[str]:
+    configured = _normalize_ticker_list(os.getenv("ACTIVE_SECTORS", ""))
+    if configured:
+        return {s.lower() for s in configured}
+    return {
+        str(name).lower()
+        for name, sector in config.get("sectors", {}).items()
+        if bool(sector.get("enabled", True))
+    }
+
+
+def _sector_members(sector: dict) -> set[str]:
+    members = set()
+    for key in ("core", "shadow", "leveraged", "aliases"):
+        members.update(_normalize_ticker_list(sector.get(key, [])))
+    return members
+
+
+_SECTOR_UNIVERSE = _load_sector_universe_config()
+_ACTIVE_SECTORS = _active_sector_names(_SECTOR_UNIVERSE)
+
+
+def _sector_data(theme: str) -> dict:
+    return dict((_SECTOR_UNIVERSE.get("sectors") or {}).get(str(theme or "").lower(), {}))
+
+
+def _sector_setting(theme: str, key: str, default=None):
+    return _sector_data(theme).get(key, default)
+
+
+def _sector_default_tickers(key: str) -> set[str]:
+    return set(_normalize_ticker_list((_SECTOR_UNIVERSE.get("defaults") or {}).get(key, [])))
+
+
+_THEME_MAP = {
+    name: _sector_members(sector)
+    for name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items()
+    if str(name).lower() in _ACTIVE_SECTORS
+}
+_THEME_PROXIES = {
+    name: str(sector.get("proxy", "")).strip().upper()
+    for name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items()
+    if str(name).lower() in _ACTIVE_SECTORS and str(sector.get("proxy", "")).strip()
+}
+_DYNAMIC_CANDIDATE_POOL = {
+    name: _normalize_ticker_list(
+        list(sector.get("core", [])) + list(sector.get("leveraged", [])) + list(sector.get("shadow", []))
+    )
+    for name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items()
+    if str(name).lower() in _ACTIVE_SECTORS
+}
+_DEFAULT_CORE_TICKERS = _sector_default_tickers("core_tickers")
+_CONFIG_LEVERAGED_TICKERS = {
+    ticker
+    for sector in (_SECTOR_UNIVERSE.get("sectors") or {}).values()
+    for ticker in _normalize_ticker_list(sector.get("leveraged", []))
+}
+
+
+def _default_ticker_universe() -> str:
+    core = []
+    for sector_name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items():
+        if str(sector_name).lower() not in _ACTIVE_SECTORS:
+            continue
+        core.extend(_normalize_ticker_list(sector.get("core", [])))
+    if core:
+        return ",".join(dict.fromkeys(core))
+    return "SPY,QQQ,GLD"
+
+
+TICKERS  = [t.strip().upper() for t in _env_value("TICKER_UNIVERSE", _default_ticker_universe()).split(",") if t.strip()]
 SWING_TICKERS = [t.strip().upper() for t in _env_value("SWING_TICKERS", "").split(",") if t.strip()]
 PROFILE  = get_profile(_env_value("RISK_PROFILE", "moderate"))
 HORIZON  = _env_value("INVESTMENT_HORIZON", "short")
@@ -283,7 +490,9 @@ def _is_leveraged_etf(ticker: str, profile: dict) -> bool:
     """Return True if ticker is a leveraged ETF defined in the profile."""
     if not profile.get("allow_leveraged_etfs"):
         return False
-    return ticker.upper() in [t.upper() for t in profile.get("leveraged_etf_tickers", [])]
+    configured = {t.upper() for t in profile.get("leveraged_etf_tickers", [])}
+    configured.update(_CONFIG_LEVERAGED_TICKERS)
+    return ticker.upper() in configured
 
 
 def _leveraged_etf_stop_scalar(ticker: str, profile: dict) -> float:
@@ -645,38 +854,14 @@ def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> 
 
 
 _INVERSE_ETFS = {"SH", "PSQ", "SQQQ", "SPXU", "SDS", "QID", "DOG", "TZA"}
-_DEFENSIVE_TICKERS = {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"}
-_INDEX_OR_ETF_TICKERS = {
-    "SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "IEF", "SHY", "SGOV", "BIL",
-    "SMH", "XOP", "XLF", "XLV", "VGT", "IBIT", "TQQQ", "SOXL", "NVDL",
-} | _INVERSE_ETFS | _DEFENSIVE_TICKERS
-_THEME_MAP = {
-    "semis": {"NVDA", "AMD", "ARM", "AVGO", "SMH", "SOXL", "NVDL", "MU"},
-    "broad_tech": {"QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "TSLA", "PLTR"},
-    "crypto": {"IBIT", "COIN", "MSTR"},
-    "energy": {"XOP", "XLE", "USO"},
-    "financials": {"XLF"},
-    "defensive": {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"},
-    "broad_market": {"SPY", "IWM", "DIA"},
-}
-_THEME_PROXIES = {
-    "semis": "SMH",
-    "broad_tech": "QQQ",
-    "crypto": "IBIT",
-    "energy": "XOP",
-    "financials": "XLF",
-    "defensive": "TLT",
-    "broad_market": "SPY",
-}
-_DYNAMIC_CANDIDATE_POOL = {
-    "semis": ["NVDA", "AMD", "ARM", "AVGO", "SMH", "SOXL", "NVDL", "MU", "TSM", "ASML"],
-    "broad_tech": ["QQQ", "META", "AMZN", "AAPL", "MSFT", "GOOGL", "TSLA", "PLTR", "CRM", "NOW"],
-    "crypto": ["IBIT", "COIN", "MSTR", "MARA", "RIOT"],
-    "energy": ["XOP", "XLE", "CVX", "XOM", "OXY"],
-    "financials": ["XLF", "JPM", "BAC", "GS", "MS"],
-    "defensive": ["GLD", "TLT", "IEF", "SGOV"],
-}
-_DEFAULT_CORE_TICKERS = {"SPY", "QQQ", "GLD", "TLT", "SMH", "NVDA", "AMD", "META"}
+_DEFENSIVE_TICKERS = _sector_default_tickers("defensive_tickers") or {"GLD", "TLT", "IEF", "SHY", "SGOV", "BIL"}
+_INVERSE_ETFS = _sector_default_tickers("inverse_etfs") or _INVERSE_ETFS
+_INDEX_OR_ETF_TICKERS = (
+    _sector_default_tickers("index_or_etf_tickers")
+    | _INVERSE_ETFS
+    | _DEFENSIVE_TICKERS
+    | _CONFIG_LEVERAGED_TICKERS
+)
 _PROBE_EV_DECISIONS = {
     "probe_size", "event_probe_size", "grade_ev_override_probe", "a_plus_probe",
     "b_grade_exploration_size",
@@ -738,8 +923,11 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
         if theme_return is None:
             continue
         relative = theme_return - spy_return
-        leader = relative >= leadership_threshold
-        bonus = min(max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
+        theme_threshold = float(_sector_setting(theme, "min_5d_return_for_bonus_pct", leadership_threshold))
+        theme_max_bonus = float(_sector_setting(theme, "leadership_bonus", max_bonus))
+        theme_max_bonus = min(max_bonus, max(0.0, theme_max_bonus))
+        leader = relative >= theme_threshold
+        bonus = min(theme_max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
         multiplier = round(1.0 + bonus, 4)
         themes[theme] = {
             "proxy": proxy,
@@ -748,6 +936,7 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
             "relative_pct": round(relative, 3),
             "leader": leader,
             "multiplier": multiplier,
+            "leadership_threshold_pct": theme_threshold,
         }
         if leader:
             for ticker in _THEME_MAP.get(theme, set()):
@@ -844,10 +1033,15 @@ def _theme_cap_candidates(candidates: list[dict], profile: dict) -> tuple[list[d
         ticker = candidate["ticker"]
         theme = candidate.get("setup_context", {}).get("theme") or _ticker_theme(ticker)
         is_leveraged = _is_leveraged_etf(ticker, profile)
-        if theme_counts.get(theme, 0) >= max_per_theme:
+        theme_max = int(_sector_setting(theme, "max_live_per_cycle", max_per_theme))
+        theme_max_leveraged = int(_sector_setting(theme, "max_leveraged_per_cycle", max_leveraged))
+        if theme_max <= 0:
+            skipped.append({**candidate, "theme_cap_reason": "theme_disabled", "theme": theme})
+            continue
+        if theme_counts.get(theme, 0) >= theme_max:
             skipped.append({**candidate, "theme_cap_reason": "theme_candidate_cap", "theme": theme})
             continue
-        if is_leveraged and leveraged_counts.get(theme, 0) >= max_leveraged:
+        if is_leveraged and leveraged_counts.get(theme, 0) >= theme_max_leveraged:
             skipped.append({**candidate, "theme_cap_reason": "theme_leveraged_cap", "theme": theme})
             continue
         theme_counts[theme] = theme_counts.get(theme, 0) + 1
@@ -1121,9 +1315,7 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
     )
     atr_data = signal_result.get("atr_data") or {}
     minutes_since_open = _minutes_since_regular_open()
-    is_leveraged = str(ticker or "").upper() in [
-        t.upper() for t in PROFILE.get("leveraged_etf_tickers", [])
-    ]
+    is_leveraged = _is_leveraged_etf(str(ticker or "").upper(), PROFILE)
     return {
         "ticker": ticker,
         "action": action,
@@ -2045,7 +2237,7 @@ def run_signal_cycle():
 
     if not TICKERS:
         log_event("ERROR", "no_tickers_configured", {
-            "hint": "Set TICKER_UNIVERSE or leave it unset to use SPY,QQQ,GLD"
+            "hint": "Set TICKER_UNIVERSE or leave it unset to use config/sector_universe.toml core tickers"
         })
         return
 
