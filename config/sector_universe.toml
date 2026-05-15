@@ -27,7 +27,8 @@ leadership_bonus = 0.10
 min_5d_return_for_bonus_pct = 2.0
 
 [sectors.ai_power]
-proxy = "XLU"
+proxy = "XLI"
+proxy_basket = ["VRT", "ETN", "CEG", "VST"]
 core = ["VRT", "ETN", "CEG", "VST"]
 shadow = ["GEV", "NEE", "PEG"]
 max_live_per_cycle = 1

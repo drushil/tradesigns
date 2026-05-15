@@ -158,7 +158,8 @@ _DEFAULT_SECTOR_UNIVERSE = {
             "min_5d_return_for_bonus_pct": 2.0,
         },
         "ai_power": {
-            "proxy": "XLU",
+            "proxy": "XLI",
+            "proxy_basket": ["VRT", "ETN", "CEG", "VST"],
             "core": ["VRT", "ETN", "CEG", "VST"],
             "shadow": ["GEV", "NEE", "PEG"],
             "max_live_per_cycle": 1,
@@ -213,6 +214,9 @@ _DEFAULT_SECTOR_UNIVERSE = {
         },
     },
 }
+_SECTOR_CONFIG_WARNINGS: list[dict] = []
+_logged_sector_config_warnings = False
+_sector_return_cache: dict[tuple, tuple[datetime, dict[str, float]]] = {}
 
 
 def _normalize_ticker_list(values) -> list[str]:
@@ -224,17 +228,16 @@ def _normalize_ticker_list(values) -> list[str]:
 
 
 def _merge_sector_config(base: dict, override: dict) -> dict:
-    merged = {
-        "defaults": {**base.get("defaults", {})},
-        "sectors": {k: dict(v) for k, v in base.get("sectors", {}).items()},
-    }
-    for key, value in (override.get("defaults") or {}).items():
-        merged["defaults"][key] = value
-    for name, sector in (override.get("sectors") or {}).items():
-        current = dict(merged["sectors"].get(name, {}))
-        current.update(sector or {})
-        merged["sectors"][name] = current
-    return merged
+    def merge_dict(left: dict, right: dict) -> dict:
+        merged = dict(left or {})
+        for key, value in (right or {}).items():
+            if isinstance(merged.get(key), dict) and isinstance(value, dict):
+                merged[key] = merge_dict(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    return merge_dict(base, override)
 
 
 def _load_sector_universe_config() -> dict:
@@ -258,7 +261,16 @@ def _load_sector_universe_config() -> dict:
 def _active_sector_names(config: dict) -> set[str]:
     configured = _normalize_ticker_list(os.getenv("ACTIVE_SECTORS", ""))
     if configured:
-        return {s.lower() for s in configured}
+        available = {str(name).lower() for name in config.get("sectors", {})}
+        requested = {s.lower() for s in configured}
+        unknown = sorted(requested - available)
+        if unknown:
+            _SECTOR_CONFIG_WARNINGS.append({
+                "warning": "unknown_active_sectors_ignored",
+                "unknown": unknown,
+                "available": sorted(available),
+            })
+        return requested & available
     return {
         str(name).lower()
         for name, sector in config.get("sectors", {}).items()
@@ -298,6 +310,11 @@ _THEME_PROXIES = {
     name: str(sector.get("proxy", "")).strip().upper()
     for name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items()
     if str(name).lower() in _ACTIVE_SECTORS and str(sector.get("proxy", "")).strip()
+}
+_THEME_PROXY_BASKETS = {
+    name: _normalize_ticker_list(sector.get("proxy_basket", []))
+    for name, sector in (_SECTOR_UNIVERSE.get("sectors") or {}).items()
+    if str(name).lower() in _ACTIVE_SECTORS and _normalize_ticker_list(sector.get("proxy_basket", []))
 }
 _DYNAMIC_CANDIDATE_POOL = {
     name: _normalize_ticker_list(
@@ -889,19 +906,75 @@ def _ticker_theme(ticker: str) -> str:
 
 
 def _return_pct_from_bars(ticker: str, period: str = "5d", interval: str = "1d") -> Optional[float]:
+    return _return_pcts_from_bars([ticker], period=period, interval=interval).get(str(ticker or "").upper())
+
+
+def _extract_close_series(downloaded, ticker: str):
+    ticker = str(ticker or "").upper()
+    if downloaded is None or downloaded.empty:
+        return None
+    columns = getattr(downloaded, "columns", None)
+    if getattr(columns, "nlevels", 1) > 1:
+        if ticker in columns.get_level_values(0):
+            frame = downloaded[ticker]
+            return frame["Close"].dropna() if "Close" in frame else None
+        if "Close" in columns.get_level_values(0):
+            close = downloaded["Close"]
+            return close[ticker].dropna() if ticker in close else None
+        return None
+    if "Close" not in downloaded:
+        return None
+    return downloaded["Close"].dropna()
+
+
+def _return_pcts_from_bars(tickers: list[str], period: str = "5d", interval: str = "1d") -> dict[str, float]:
+    symbols = sorted(set(_normalize_ticker_list(tickers)))
+    if not symbols:
+        return {}
+    now = datetime.now(timezone.utc)
+    cache_key = (tuple(symbols), period, interval)
+    cached = _sector_return_cache.get(cache_key)
+    if cached and (now - cached[0]).total_seconds() < _env_int("SECTOR_MOMENTUM_CACHE_SECONDS", 900):
+        return dict(cached[1])
     try:
         import yfinance as yf
-        bars = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-        if bars is None or bars.empty or len(bars) < 2:
-            return None
-        close = bars["Close"].squeeze()
-        first = float(close.iloc[0])
-        last = float(close.iloc[-1])
-        if first <= 0:
-            return None
-        return (last - first) / first * 100
+        target = symbols[0] if len(symbols) == 1 else symbols
+        bars = yf.download(
+            target,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+        )
+        results = {}
+        for symbol in symbols:
+            close = _extract_close_series(bars, symbol)
+            if close is None or len(close) < 2:
+                continue
+            first = float(close.iloc[0])
+            last = float(close.iloc[-1])
+            if first <= 0:
+                continue
+            results[symbol] = (last - first) / first * 100
+        _sector_return_cache[cache_key] = (now, results)
+        return results
     except Exception:
+        return {}
+
+
+def _sector_proxy_symbols(theme: str, proxy: str) -> list[str]:
+    basket = _THEME_PROXY_BASKETS.get(theme) or []
+    return basket or [proxy]
+
+
+def _sector_proxy_return(theme: str, proxy: str, returns: dict[str, float]) -> Optional[float]:
+    symbols = _sector_proxy_symbols(theme, proxy)
+    values = [returns[s] for s in symbols if s in returns]
+    if not values:
         return None
+    return sum(values) / len(values)
 
 
 def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
@@ -913,13 +986,17 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
         float(profile.get("sector_momentum_leadership_threshold_pct", 2.0)),
     )
     max_bonus = _env_float("SECTOR_MOMENTUM_MAX_BONUS", float(profile.get("sector_momentum_max_bonus", 0.15)))
-    spy_return = _return_pct_from_bars("SPY", period=lookback, interval="1d")
+    proxy_symbols = ["SPY"]
+    for theme, proxy in _THEME_PROXIES.items():
+        proxy_symbols.extend(_sector_proxy_symbols(theme, proxy))
+    proxy_returns = _return_pcts_from_bars(proxy_symbols, period=lookback, interval="1d")
+    spy_return = proxy_returns.get("SPY")
     themes = {}
     ticker_multipliers = {}
     if spy_return is None:
         return {"enabled": True, "spy_return_pct": None, "themes": {}, "ticker_multipliers": {}}
     for theme, proxy in _THEME_PROXIES.items():
-        theme_return = _return_pct_from_bars(proxy, period=lookback, interval="1d")
+        theme_return = _sector_proxy_return(theme, proxy, proxy_returns)
         if theme_return is None:
             continue
         relative = theme_return - spy_return
@@ -931,6 +1008,7 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
         multiplier = round(1.0 + bonus, 4)
         themes[theme] = {
             "proxy": proxy,
+            "proxy_basket": _sector_proxy_symbols(theme, proxy),
             "return_pct": round(theme_return, 3),
             "spy_return_pct": round(spy_return, 3),
             "relative_pct": round(relative, 3),
@@ -994,13 +1072,54 @@ def _dynamic_universe_shadow_recommendations(tickers: list[str], momentum: dict,
             if added >= max_per_theme:
                 break
     return {
-        "core_tickers": sorted(existing & _DEFAULT_CORE_TICKERS),
+        "core_tickers": sorted(existing),
+        "configured_core_tickers": sorted(existing & _DEFAULT_CORE_TICKERS),
         "daily_intraday_tickers": [],
         "weekly_swing_tickers": [],
         "advisory_tickers": [],
         "shadow_candidates": recs,
         "execution_allowed": False,
     }
+
+
+def _shadow_candidate_repeat_counts(candidates: list[dict], limit: int = 250) -> dict[str, int]:
+    symbols = {str(c.get("ticker") or "").upper() for c in candidates}
+    symbols.discard("")
+    if not symbols:
+        return {}
+    counts = {symbol: 1 for symbol in symbols}
+    try:
+        for row in get_logs(level="INFO", limit=limit):
+            if row.get("event") != "dynamic_universe_shadow_recommendations":
+                continue
+            detail = row.get("detail") or {}
+            for candidate in detail.get("shadow_candidates") or []:
+                ticker = str(candidate.get("ticker") or "").upper()
+                if ticker in counts:
+                    counts[ticker] += 1
+        return counts
+    except Exception:
+        return counts
+
+
+def _enrich_shadow_recommendation_repeats(payload: dict) -> dict:
+    candidates = payload.get("shadow_candidates") or []
+    counts = _shadow_candidate_repeat_counts(candidates)
+    for candidate in candidates:
+        ticker = str(candidate.get("ticker") or "").upper()
+        candidate["recent_shadow_mentions"] = counts.get(ticker, 1)
+    threshold = _env_int("DYNAMIC_UNIVERSE_REPEAT_REVIEW_THRESHOLD", 3)
+    payload["repeat_review_candidates"] = [
+        {
+            "ticker": c.get("ticker"),
+            "theme": c.get("theme"),
+            "recent_shadow_mentions": c.get("recent_shadow_mentions", 1),
+        }
+        for c in candidates
+        if int(c.get("recent_shadow_mentions") or 1) >= threshold
+    ]
+    payload["repeat_review_threshold"] = threshold
+    return payload
 
 
 def _log_dynamic_universe_shadow(tickers: list[str], momentum: dict, profile: dict):
@@ -1015,6 +1134,7 @@ def _log_dynamic_universe_shadow(tickers: list[str], momentum: dict, profile: di
     )
     payload = _dynamic_universe_shadow_recommendations(tickers, momentum, max_per_theme=max_per_theme)
     if payload.get("shadow_candidates"):
+        payload = _enrich_shadow_recommendation_repeats(payload)
         log_event("INFO", "dynamic_universe_shadow_recommendations", payload)
 
 
@@ -2179,7 +2299,7 @@ def _update_signal_percentiles(cycle_composites: dict, db_percentiles: dict):
 
 def run_signal_cycle():
     """Main cycle: compute signals → gate → decide → execute."""
-    global _learning_engine
+    global _learning_engine, _logged_sector_config_warnings
 
     cycle_start_utc = datetime.now(timezone.utc)
 
@@ -2234,6 +2354,9 @@ def run_signal_cycle():
         "regime_state": regime_state.to_dict(),
         "shock_result": shock_result,
     })
+    if _SECTOR_CONFIG_WARNINGS and not _logged_sector_config_warnings:
+        log_event("WARN", "sector_config_warnings", {"warnings": _SECTOR_CONFIG_WARNINGS})
+        _logged_sector_config_warnings = True
 
     if not TICKERS:
         log_event("ERROR", "no_tickers_configured", {
