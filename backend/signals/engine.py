@@ -2102,6 +2102,14 @@ def compute_all_signals(ticker: str, weights: dict,
 
     atr_data = compute_atr(ticker)
 
+    # On strong ORB breakout days, price trading below intraday VWAP is normal
+    # (stock gapped up, VWAP anchors high, consolidation reads as -0.8 despite uptrend).
+    # When ORB >= 0.9 the breakout already encodes the bullish structure — clamp
+    # VWAP's negative drag to 0 so it doesn't cancel the ORB/MACD/tape consensus.
+    if s12 >= 0.9 and s2 < 0:
+        s2 = 0.0
+        m2["orb_vwap_clamp"] = True
+
     pre_news_signals = {
         "rsi_divergence":       s1,
         "vwap_deviation":       s2,

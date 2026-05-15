@@ -1805,6 +1805,14 @@ def run_signal_cycle():
                 "MAX_NEW_INTRADAY_TRADES_PER_CYCLE",
                 int(effective_profile.get("max_new_intraday_trades_per_cycle", 2)),
             )
+            # Expand slot by 1 when 3+ full_size EV-approved setups are ready —
+            # avoids dropping strong conviction tickers on high-conviction cycles.
+            full_size_count = sum(
+                1 for c in candidates
+                if (c.get("ev_result") or {}).get("ev_decision") in ("full_size", "probe_size")
+            )
+            if full_size_count >= 3:
+                max_per_cycle = max_per_cycle + 1
             log_event("INFO", "ranked_trade_candidates", {
                 "selected": [c["ticker"] for c in candidates[:max_per_cycle]],
                 "candidates": [
