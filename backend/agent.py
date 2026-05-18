@@ -718,8 +718,13 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_min_grade_required", "A+")
     p.setdefault("ranging_a_grade_min_breakout_quality", 0.80)
     p.setdefault("ranging_a_grade_min_ev_pct", 0.25)
+    p.setdefault("ranging_a_plus_min_composite", 0.25)
+    p.setdefault("ranging_a_plus_min_breakout_quality", 0.70)
+    p.setdefault("ranging_a_plus_min_ev_pct", 0.20)
+    p.setdefault("ranging_max_notional_eur", 1200)
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
     p.setdefault("thesis_invalidated_cooldown_minutes", 75)
+    p.setdefault("ranging_stop_loss_cooldown_minutes", 90)
     p.setdefault("allow_a_plus_llm_hold_override", False)
     p.setdefault("alignment_orb_veto_threshold", 0.50)
     p.setdefault("alignment_tape_veto_threshold", 0.40)
@@ -756,10 +761,26 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["ranging_max_trades_per_day"] = _env_int("RANGING_MAX_TRADES_PER_DAY", int(p["ranging_max_trades_per_day"]))
     if os.getenv("RANGING_REGIME_SIZE_MULTIPLIER"):
         p["ranging_regime_size_multiplier"] = _env_float("RANGING_REGIME_SIZE_MULTIPLIER", p["ranging_regime_size_multiplier"])
+    if os.getenv("RANGING_A_PLUS_MIN_COMPOSITE"):
+        p["ranging_a_plus_min_composite"] = _env_float("RANGING_A_PLUS_MIN_COMPOSITE", p["ranging_a_plus_min_composite"])
+    if os.getenv("RANGING_A_PLUS_MIN_BREAKOUT_QUALITY"):
+        p["ranging_a_plus_min_breakout_quality"] = _env_float(
+            "RANGING_A_PLUS_MIN_BREAKOUT_QUALITY",
+            p["ranging_a_plus_min_breakout_quality"],
+        )
+    if os.getenv("RANGING_A_PLUS_MIN_EV_PCT"):
+        p["ranging_a_plus_min_ev_pct"] = _env_float("RANGING_A_PLUS_MIN_EV_PCT", p["ranging_a_plus_min_ev_pct"])
+    if os.getenv("RANGING_MAX_NOTIONAL_EUR"):
+        p["ranging_max_notional_eur"] = _env_float("RANGING_MAX_NOTIONAL_EUR", p["ranging_max_notional_eur"])
     if os.getenv("THESIS_INVALIDATED_COOLDOWN_MINUTES"):
         p["thesis_invalidated_cooldown_minutes"] = _env_int(
             "THESIS_INVALIDATED_COOLDOWN_MINUTES",
             int(p["thesis_invalidated_cooldown_minutes"]),
+        )
+    if os.getenv("RANGING_STOP_LOSS_COOLDOWN_MINUTES"):
+        p["ranging_stop_loss_cooldown_minutes"] = _env_int(
+            "RANGING_STOP_LOSS_COOLDOWN_MINUTES",
+            int(p["ranging_stop_loss_cooldown_minutes"]),
         )
     if os.getenv("SECTOR_MOMENTUM_BONUS_ENABLED") is not None:
         p["sector_momentum_bonus_enabled"] = _env_bool("SECTOR_MOMENTUM_BONUS_ENABLED", True)
@@ -1293,6 +1314,32 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
             "breakout_quality": round(breakout_quality, 4),
         }
 
+    if _is_leveraged_etf(ticker, profile):
+        min_lev_ev = float(profile.get("ranging_leveraged_min_ev_pct", 0.25))
+        if net_ev is None or net_ev < min_lev_ev:
+            return {
+                "reason": "ranging_regime_leveraged_ev_veto",
+                "net_ev_pct": net_ev,
+                "min_ev_pct": min_lev_ev,
+            }
+
+    if grade == "A+":
+        composite = abs(float((setup_context or {}).get("composite") or 0))
+        min_composite = float(profile.get("ranging_a_plus_min_composite", 0.25))
+        min_breakout = float(profile.get("ranging_a_plus_min_breakout_quality", 0.70))
+        min_ev = float(profile.get("ranging_a_plus_min_ev_pct", 0.20))
+        if composite < min_composite or breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
+            return {
+                "reason": "ranging_regime_a_plus_quality_veto",
+                "grade": grade,
+                "composite": round(composite, 4),
+                "min_composite": min_composite,
+                "breakout_quality": round(breakout_quality, 4),
+                "min_breakout_quality": min_breakout,
+                "net_ev_pct": net_ev,
+                "min_ev_pct": min_ev,
+            }
+
     if grade == "A":
         min_breakout = float(profile.get("ranging_a_grade_min_breakout_quality", 0.80))
         min_ev = float(profile.get("ranging_a_grade_min_ev_pct", 0.25))
@@ -1306,14 +1353,6 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                 "min_ev_pct": min_ev,
             }
 
-    if _is_leveraged_etf(ticker, profile):
-        min_lev_ev = float(profile.get("ranging_leveraged_min_ev_pct", 0.25))
-        if net_ev is None or net_ev < min_lev_ev:
-            return {
-                "reason": "ranging_regime_leveraged_ev_veto",
-                "net_ev_pct": net_ev,
-                "min_ev_pct": min_lev_ev,
-            }
     return None
 
 
@@ -1905,6 +1944,40 @@ def _thesis_invalidated_cooldown_active(ticker: str, side: str, recent_trades: l
             "ticker": ticker,
             "side": side,
             "minutes_since_thesis_invalidated": round(elapsed, 1),
+            "cooldown_minutes": cooldown_minutes,
+        }
+    return None
+
+
+def _ranging_stop_loss_cooldown_active(ticker: str, side: str, recent_trades: list,
+                                       profile: dict) -> Optional[dict]:
+    """Pause a same-ticker re-entry after a stop loss in choppy intraday regime."""
+    cooldown_minutes = _env_int(
+        "RANGING_STOP_LOSS_COOLDOWN_MINUTES",
+        int(profile.get("ranging_stop_loss_cooldown_minutes", 90)),
+    )
+    if cooldown_minutes <= 0:
+        return None
+    now = datetime.utcnow()
+    latest = None
+    for trade in recent_trades or []:
+        if str(trade.get("ticker", "")).upper() != ticker.upper():
+            continue
+        if str(trade.get("side", "")).upper() != str(side or "").upper():
+            continue
+        if trade.get("exit_reason") != "stop_loss":
+            continue
+        closed_at = _parse_dt(trade.get("exit_time") or trade.get("closed_at") or trade.get("created_at"))
+        if latest is None or closed_at > latest:
+            latest = closed_at
+    if latest is None:
+        return None
+    elapsed = (now - latest).total_seconds() / 60
+    if elapsed < cooldown_minutes:
+        return {
+            "ticker": ticker,
+            "side": side,
+            "minutes_since_stop_loss": round(elapsed, 1),
             "cooldown_minutes": cooldown_minutes,
         }
     return None
@@ -2744,6 +2817,11 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
     if thesis_cooldown:
         log_event("INFO", "thesis_invalidated_cooldown", thesis_cooldown)
         return
+    if str(ticker_regime or "").lower() == "ranging":
+        stop_loss_cooldown = _ranging_stop_loss_cooldown_active(ticker, action_hint, recent_trades, profile)
+        if stop_loss_cooldown:
+            log_event("INFO", "ranging_stop_loss_cooldown", stop_loss_cooldown)
+            return
     loss_cooldown = _ticker_loss_cooldown_active(ticker, action_hint, recent_trades, profile)
     if loss_cooldown and abs(composite) < float(loss_cooldown["min_reentry_score"]):
         loss_cooldown["composite"] = round(composite, 4)
@@ -3124,6 +3202,9 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging":
         ranging_scalar = max(0.0, min(1.0, float(profile.get("ranging_regime_size_multiplier", 0.35))))
         combined_mult *= ranging_scalar
+        ranging_cap = float(profile.get("ranging_max_notional_eur", 0) or 0)
+        if ranging_cap > 0:
+            sizing["ranging_max_notional_eur"] = round(ranging_cap, 2)
         sizing["ranging_regime_size_scalar"] = round(ranging_scalar, 3)
         log_event("INFO", "ranging_regime_size_reduced", {
             "ticker": ticker,
@@ -3137,6 +3218,10 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "MAX_NOTIONAL_PER_TRADE_EUR",
         profile.get("max_trade_notional_eur", final_size),
     )
+    if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging":
+        ranging_cap = _env_float("RANGING_MAX_NOTIONAL_EUR", float(profile.get("ranging_max_notional_eur", max_notional) or max_notional))
+        if ranging_cap > 0:
+            max_notional = min(max_notional, ranging_cap)
     final_size = min(final_size, max_notional)
     sizing["size_eur"] = round(final_size, 2)
     sizing["ev_decision"] = ev_result.get("ev_decision")

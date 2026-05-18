@@ -47,8 +47,8 @@ min_5d_return_for_bonus_pct = 2.5
 
 [sectors.energy]
 proxy = "XOP"
-core = ["XOP"]
-shadow = ["XLE", "CVX", "XOM", "OXY"]
+core = ["XOP", "XLE"]
+shadow = ["CVX", "XOM", "OXY"]
 max_live_per_cycle = 1
 max_leveraged_per_cycle = 0
 leadership_bonus = 0.08

@@ -259,7 +259,7 @@ RISK_PROFILES = {
         "min_hold_minutes": 3,
         "max_hold_minutes": 30,
         "allowed_instruments": [
-            "SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLF",
+            "SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLE", "XLF",
             "NVDA", "AMD", "TSLA", "META", "AMZN", "PLTR", "AVGO",
             "SMH", "IBIT", "COIN", "MSTR", "ARM",
         ],
