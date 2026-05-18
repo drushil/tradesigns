@@ -214,6 +214,102 @@ def test_llm_conflict_rationale_detected():
     assert agent._llm_rationale_mentions_conflict({"rationale": "clean trend continuation"}) is False
 
 
+def test_signal_consensus_blocks_one_signal_trades_in_ranging():
+    import backend.agent as agent
+
+    block = agent._signal_consensus_block(
+        "BUY",
+        {
+            "rsi_divergence": {"score": 0.7},
+            "vwap_deviation": {"score": 0.05},
+            "news_sentiment": {"score": 0.0},
+            "tape_aggression": {"score": 0.1},
+            "order_book_imbalance": {"score": -0.1},
+        },
+        "ranging",
+        {
+            "signal_consensus_min_count": 3,
+            "ranging_signal_consensus_min_count": 4,
+            "signal_consensus_min_strength": 0.15,
+        },
+    )
+
+    assert block["reason"] == "signal_consensus_veto"
+    assert block["aligned_count"] == 1
+    assert block["min_count"] == 4
+
+
+def test_signal_consensus_allows_broad_agreement():
+    import backend.agent as agent
+
+    block = agent._signal_consensus_block(
+        "BUY",
+        {
+            "rsi_divergence": {"score": 0.2},
+            "vwap_deviation": {"score": 0.3},
+            "news_sentiment": {"score": 0.05},
+            "tape_aggression": {"score": 0.4},
+            "order_book_imbalance": {"score": 0.18},
+        },
+        "trending",
+        {
+            "signal_consensus_min_count": 3,
+            "ranging_signal_consensus_min_count": 4,
+            "signal_consensus_min_strength": 0.15,
+        },
+    )
+
+    assert block is None
+
+
+def test_reward_risk_blocks_structurally_poor_trade():
+    import backend.agent as agent
+
+    block = agent._reward_risk_block(
+        stop_pct=2.0,
+        take_profit_pct=2.4,
+        regime="ranging",
+        profile={"min_reward_risk_ratio": 1.5, "ranging_min_reward_risk_ratio": 2.0},
+    )
+
+    assert block["reason"] == "reward_risk_veto"
+    assert block["reward_risk"] == pytest.approx(1.2)
+
+
+def test_reward_risk_allows_good_payoff_structure():
+    import backend.agent as agent
+
+    block = agent._reward_risk_block(
+        stop_pct=1.2,
+        take_profit_pct=2.4,
+        regime="trending",
+        profile={"min_reward_risk_ratio": 1.5, "ranging_min_reward_risk_ratio": 2.0},
+    )
+
+    assert block is None
+
+
+def test_theme_open_exposure_cap_blocks_third_same_theme_position():
+    import backend.agent as agent
+
+    agent._open_trades.clear()
+    agent._open_trades.update({
+        "NVDA": {"status": "open"},
+        "AMD": {"status": "open"},
+    })
+    try:
+        block = agent._theme_open_exposure_block(
+            "AVGO",
+            {"max_open_positions_per_theme": 2},
+        )
+    finally:
+        agent._open_trades.clear()
+
+    assert block["reason"] == "theme_open_exposure_cap"
+    assert block["theme"] == "semis"
+    assert block["open_theme_positions"] == ["AMD", "NVDA"]
+
+
 def test_thesis_invalidated_cooldown_is_db_backed():
     import backend.agent as agent
     now = datetime.utcnow()

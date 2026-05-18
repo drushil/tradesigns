@@ -8,6 +8,7 @@ import os
 import time
 import asyncio
 import math
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -725,6 +726,12 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
     p.setdefault("thesis_invalidated_cooldown_minutes", 75)
     p.setdefault("ranging_stop_loss_cooldown_minutes", 90)
+    p.setdefault("min_reward_risk_ratio", 1.5)
+    p.setdefault("ranging_min_reward_risk_ratio", 2.0)
+    p.setdefault("signal_consensus_min_count", 3)
+    p.setdefault("ranging_signal_consensus_min_count", 4)
+    p.setdefault("signal_consensus_min_strength", 0.15)
+    p.setdefault("max_open_positions_per_theme", 2)
     p.setdefault("allow_a_plus_llm_hold_override", False)
     p.setdefault("alignment_orb_veto_threshold", 0.50)
     p.setdefault("alignment_tape_veto_threshold", 0.40)
@@ -781,6 +788,33 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["ranging_stop_loss_cooldown_minutes"] = _env_int(
             "RANGING_STOP_LOSS_COOLDOWN_MINUTES",
             int(p["ranging_stop_loss_cooldown_minutes"]),
+        )
+    if os.getenv("MIN_REWARD_RISK_RATIO"):
+        p["min_reward_risk_ratio"] = _env_float("MIN_REWARD_RISK_RATIO", p["min_reward_risk_ratio"])
+    if os.getenv("RANGING_MIN_REWARD_RISK_RATIO"):
+        p["ranging_min_reward_risk_ratio"] = _env_float(
+            "RANGING_MIN_REWARD_RISK_RATIO",
+            p["ranging_min_reward_risk_ratio"],
+        )
+    if os.getenv("SIGNAL_CONSENSUS_MIN_COUNT"):
+        p["signal_consensus_min_count"] = _env_int(
+            "SIGNAL_CONSENSUS_MIN_COUNT",
+            int(p["signal_consensus_min_count"]),
+        )
+    if os.getenv("RANGING_SIGNAL_CONSENSUS_MIN_COUNT"):
+        p["ranging_signal_consensus_min_count"] = _env_int(
+            "RANGING_SIGNAL_CONSENSUS_MIN_COUNT",
+            int(p["ranging_signal_consensus_min_count"]),
+        )
+    if os.getenv("SIGNAL_CONSENSUS_MIN_STRENGTH"):
+        p["signal_consensus_min_strength"] = _env_float(
+            "SIGNAL_CONSENSUS_MIN_STRENGTH",
+            p["signal_consensus_min_strength"],
+        )
+    if os.getenv("MAX_OPEN_POSITIONS_PER_THEME"):
+        p["max_open_positions_per_theme"] = _env_int(
+            "MAX_OPEN_POSITIONS_PER_THEME",
+            int(p["max_open_positions_per_theme"]),
         )
     if os.getenv("SECTOR_MOMENTUM_BONUS_ENABLED") is not None:
         p["sector_momentum_bonus_enabled"] = _env_bool("SECTOR_MOMENTUM_BONUS_ENABLED", True)
@@ -1293,6 +1327,101 @@ def _alignment_veto(ticker: str, action: str, signals: dict, profile: dict) -> O
             "score": round(rsi * direction, 4),
             "macd": round(macd * direction, 4),
             "bullish_confirmers": bullish_confirmers,
+        }
+    return None
+
+
+def _signal_consensus_block(action: str, signals: dict, regime: str,
+                            profile: dict) -> Optional[dict]:
+    """Require broad directional agreement instead of one loud signal."""
+    direction = 1 if str(action or "").upper() == "BUY" else -1
+    min_strength = abs(float(profile.get("signal_consensus_min_strength", 0.15)))
+    min_count = int(profile.get("signal_consensus_min_count", 3))
+    if str(regime or "").lower() == "ranging":
+        min_count = int(profile.get("ranging_signal_consensus_min_count", 4))
+    if min_count <= 0:
+        return None
+
+    signal_names = [
+        "rsi_divergence",
+        "vwap_deviation",
+        "news_sentiment",
+        "tape_aggression",
+        "order_book_imbalance",
+        "orb",
+        "macd_crossover",
+        "relative_strength",
+        "put_call_ratio",
+    ]
+    aligned = []
+    opposed = []
+    observed = []
+    for name in signal_names:
+        if name not in (signals or {}):
+            continue
+        directional_score = _signal_score(signals, name) * direction
+        observed.append({"signal": name, "score": round(directional_score, 4)})
+        if directional_score >= min_strength:
+            aligned.append(name)
+        elif directional_score <= -min_strength:
+            opposed.append(name)
+
+    if len(aligned) < min_count:
+        return {
+            "reason": "signal_consensus_veto",
+            "aligned_count": len(aligned),
+            "min_count": min_count,
+            "min_strength": min_strength,
+            "aligned_signals": aligned,
+            "opposed_signals": opposed,
+            "observed_signals": observed,
+        }
+    return None
+
+
+def _reward_risk_block(stop_pct: float, take_profit_pct: float, regime: str,
+                       profile: dict) -> Optional[dict]:
+    """Block trades whose real order stop/target structure has poor payoff."""
+    try:
+        stop_pct = abs(float(stop_pct or 0))
+        take_profit_pct = abs(float(take_profit_pct or 0))
+    except (TypeError, ValueError):
+        stop_pct = 0.0
+        take_profit_pct = 0.0
+    min_rr = float(profile.get("min_reward_risk_ratio", 1.5))
+    if str(regime or "").lower() == "ranging":
+        min_rr = float(profile.get("ranging_min_reward_risk_ratio", 2.0))
+    if min_rr <= 0:
+        return None
+    rr = take_profit_pct / stop_pct if stop_pct > 0 else 0.0
+    if stop_pct <= 0 or take_profit_pct <= 0 or rr < min_rr:
+        return {
+            "reason": "reward_risk_veto",
+            "stop_pct": round(stop_pct, 4),
+            "take_profit_pct": round(take_profit_pct, 4),
+            "reward_risk": round(rr, 4),
+            "min_reward_risk": min_rr,
+        }
+    return None
+
+
+def _theme_open_exposure_block(ticker: str, profile: dict) -> Optional[dict]:
+    max_open = int(profile.get("max_open_positions_per_theme", 2))
+    if max_open <= 0:
+        return None
+    theme = _ticker_theme(ticker)
+    open_same_theme = []
+    for open_ticker, trade in (_open_trades or {}).items():
+        if str(trade.get("status") or "open").lower() == "closed":
+            continue
+        if _ticker_theme(open_ticker) == theme:
+            open_same_theme.append(str(open_ticker).upper())
+    if len(open_same_theme) >= max_open:
+        return {
+            "reason": "theme_open_exposure_cap",
+            "theme": theme,
+            "open_theme_positions": sorted(open_same_theme),
+            "max_open_positions_per_theme": max_open,
         }
     return None
 
@@ -2500,6 +2629,16 @@ def run_signal_cycle():
         _update_signal_percentiles(_cycle_composites, _cycle_db_percentiles)
         sector_momentum = _sector_momentum_snapshot(TICKERS, effective_profile)
         _log_dynamic_universe_shadow(TICKERS, sector_momentum, effective_profile)
+        regime_observed = Counter(
+            str(c.get("ticker_regime") or "unknown") for c in candidates
+        )
+        log_event("INFO", "cycle_regime_observability", {
+            "market_regime": getattr(regime_state, "market_regime", None),
+            "intraday_regimes": dict(regime_observed),
+            "spy_trend_score": getattr(regime_state, "trend_score", None),
+            "spy_trend_threshold": getattr(regime_state, "trend_threshold", None),
+            "spy_regime_reason": getattr(regime_state, "regime_reason", None),
+        })
 
         min_grade = effective_profile.get("min_grade_required", "B")
         graded_candidates = []
@@ -2889,6 +3028,35 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         _record_blocked_opportunity(
             ticker, action_hint, composite, signals_snap, setup_context,
             ticker_regime, "signal_alignment", reason,
+        )
+        return
+    consensus_block = _signal_consensus_block(action_hint, signals_snap, ticker_regime, profile)
+    if consensus_block:
+        reason = consensus_block["reason"]
+        log_event("INFO", "signal_consensus_veto", {
+            "ticker": ticker,
+            "action": action_hint,
+            "composite": round(composite, 4),
+            "regime": ticker_regime,
+            **consensus_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "signal_consensus", reason,
+        )
+        return
+    theme_exposure_block = _theme_open_exposure_block(ticker, profile)
+    if theme_exposure_block:
+        reason = theme_exposure_block["reason"]
+        log_event("INFO", "theme_open_exposure_cap", {
+            "ticker": ticker,
+            "action": action_hint,
+            "composite": round(composite, 4),
+            **theme_exposure_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "exposure", reason,
         )
         return
 
@@ -3373,12 +3541,31 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         )
         sizing["event_risk_intraday_only"] = True
 
+    take_profit_pct = float(profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2))
+    rr_block = _reward_risk_block(stop_loss_pct, take_profit_pct, ticker_regime, profile)
+    if rr_block:
+        log_event("INFO", "reward_risk_veto", {
+            "ticker": ticker,
+            "action": action,
+            "composite": round(composite, 4),
+            "regime": ticker_regime,
+            **rr_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "reward_risk", rr_block["reason"],
+            ev_result=ev_result, reference_price=current_price,
+        )
+        return
+    sizing["take_profit_pct"] = round(take_profit_pct, 4)
+    sizing["reward_risk_ratio"] = round(take_profit_pct / max(float(stop_loss_pct or 0), 0.0001), 4)
+
     order = submit_market_order(
         ticker       = ticker,
         side         = action.lower(),
         qty          = round(qty, 6),
         stop_loss_pct= stop_loss_pct,
-        take_profit_pct= profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2),
+        take_profit_pct= take_profit_pct,
         current_price= current_price,
     )
 
@@ -3396,10 +3583,10 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     # Track open trade for exit monitoring
     if action == "BUY":
         stop_price = current_price * (1 - stop_loss_pct / 100)
-        take_profit_price = current_price * (1 + profile.get("take_profit_pct", 2.0) / 100)
+        take_profit_price = current_price * (1 + take_profit_pct / 100)
     else:
         stop_price = current_price * (1 + stop_loss_pct / 100)
-        take_profit_price = current_price * (1 - profile.get("take_profit_pct", 2.0) / 100)
+        take_profit_price = current_price * (1 - take_profit_pct / 100)
 
     exposure_direction = _exposure_direction(ticker, action)
     strategy_family = _strategy_family(
