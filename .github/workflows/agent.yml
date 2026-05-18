@@ -6,8 +6,8 @@ on:
     - cron: '0 17 * * 0'
     # Weekly digest: Sunday 18:00 UTC
     - cron: '0 18 * * 0'
-    # Off-hours macro/dip alert scan (no trading)
-    - cron: '0 */4 * * *'
+    # Off-hours macro/advisory alert scan (weekdays only; no weekend noise)
+    - cron: '0 */4 * * 1-5'
     # Nightly sweep — after US market close Mon-Fri (21:05 UTC)
     - cron: '5 21 * * 1-5'
     # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
@@ -98,6 +98,7 @@ jobs:
           LLM_CALLS_PER_HOUR_LIMIT: "${{ vars.LLM_CALLS_PER_HOUR_LIMIT }}"
           BROKER_ENV:           "${{ vars.BROKER_ENV }}"
           SWEEP_TICKER:         "${{ vars.SWEEP_TICKER }}"
+          SWEEP_ENABLED:        "${{ vars.SWEEP_ENABLED }}"
           SWEEP_MIN_EUR:        "${{ vars.SWEEP_MIN_EUR }}"
           SWEEP_RESERVE_PCT:    "${{ vars.SWEEP_RESERVE_PCT }}"
           DIVIDEND_SCAN_ENABLED: "${{ vars.DIVIDEND_SCAN_ENABLED }}"
@@ -140,59 +141,81 @@ jobs:
           )
           from backend.advisory import run_advisory_cycle
 
+          def _truthy(value, default=False):
+              raw = str(value if value is not None else "").strip().lower()
+              if not raw:
+                  return default
+              return raw in {"1", "true", "yes", "on"}
+
           # Manual override via workflow_dispatch input takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
+          action_ran = False
           if dispatch_mode == "portfolio_review":
               print("Running weekly portfolio review (manual trigger)...")
               run_portfolio_review()
+              action_ran = True
           elif dispatch_mode == "digest":
               print("Running weekly digest (manual trigger)...")
               run_weekly_digest()
+              action_ran = True
           elif dispatch_mode == "sweep":
               print("Running nightly sweep (manual trigger)...")
               run_nightly_sweep()
+              action_ran = True
           elif dispatch_mode == "analytics":
               print("Running post-market analytics (manual trigger)...")
               run_post_market_analytics()
+              action_ran = True
           elif dispatch_mode == "signal":
               print("Running signal cycle (manual trigger)...")
               run_signal_cycle()
+              action_ran = True
           elif dispatch_mode == "advisory":
               print("Running advisory cycle (manual trigger)...")
               run_advisory_cycle()
+              action_ran = True
           else:
               now = datetime.now(timezone.utc)
               if now.weekday() == 6 and now.hour == 17:
                   print("Running weekly portfolio review...")
                   run_portfolio_review()
+                  action_ran = True
               elif now.weekday() == 6 and now.hour == 18:
                   print("Running weekly digest...")
                   run_weekly_digest()
+                  action_ran = True
               elif now.weekday() < 5 and now.hour == 21 and now.minute < 10:
                   print("Running nightly sweep...")
                   run_nightly_sweep()
                   print("Running post-market analytics...")
                   run_post_market_analytics()
+                  action_ran = True
               elif _should_run_swing_recheck(now):
                   print("Running daily swing re-evaluation...")
                   re_evaluate_swing_positions()
+                  action_ran = True
               else:
                   advisory_result = None
-                  advisory_enabled = os.getenv("ADVISORY_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
-                  advisory_auto = os.getenv("ADVISORY_AUTO_RUN", "true").strip().lower() in {"1", "true", "yes", "on"}
-                  if advisory_enabled and advisory_auto:
+                  advisory_enabled = _truthy(os.getenv("ADVISORY_MODE"), False)
+                  advisory_auto = _truthy(os.getenv("ADVISORY_AUTO_RUN"), True)
+                  advisory_window = now.weekday() < 5 and (7 <= now.hour <= 9 or 13 <= now.hour <= 15 or 18 <= now.hour <= 19)
+                  if advisory_enabled and advisory_auto and advisory_window:
                       print("Running advisory scan...")
                       advisory_result = run_advisory_cycle()
                       print(f"Advisory result: {advisory_result}")
+                      action_ran = True
                   if is_regular_us_market_hours(now):
                       print("Running signal cycle...")
                       run_signal_cycle()
+                      action_ran = True
                   elif advisory_result is None:
                       print("Outside trading window — no action.")
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write(f"AGENT_ACTION_RAN={'true' if action_ran else 'false'}\n")
           PY
 
       - name: Send Discord summary
-        if: always()
+        if: always() && env.AGENT_ACTION_RAN == 'true'
         env:
           PYTHONPATH: "."
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
