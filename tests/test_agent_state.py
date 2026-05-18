@@ -234,6 +234,51 @@ def test_thesis_invalidated_cooldown_is_db_backed():
     assert cooldown["cooldown_minutes"] == 75
 
 
+def test_ranging_a_plus_requires_quality_not_just_grade():
+    import backend.agent as agent
+    block = agent._ranging_regime_block(
+        "SPY",
+        {
+            "intraday_regime": "ranging",
+            "setup_grade": "A+",
+            "composite": 0.17,
+            "breakout_quality": 0.75,
+        },
+        {"net_ev_pct": 0.30},
+        None,
+        {
+            "ranging_min_grade_required": "A+",
+            "ranging_a_plus_min_composite": 0.25,
+            "ranging_a_plus_min_breakout_quality": 0.70,
+            "ranging_a_plus_min_ev_pct": 0.20,
+        },
+    )
+
+    assert block["reason"] == "ranging_regime_a_plus_quality_veto"
+    assert block["min_composite"] == pytest.approx(0.25)
+
+
+def test_ranging_stop_loss_cooldown_blocks_same_ticker_reentry():
+    import backend.agent as agent
+    now = datetime.utcnow()
+
+    cooldown = agent._ranging_stop_loss_cooldown_active(
+        "IWM",
+        "BUY",
+        [{
+            "ticker": "IWM",
+            "side": "BUY",
+            "exit_reason": "stop_loss",
+            "exit_time": (now - timedelta(minutes=30)).isoformat(),
+        }],
+        {"ranging_stop_loss_cooldown_minutes": 90},
+    )
+
+    assert cooldown["ticker"] == "IWM"
+    assert cooldown["cooldown_minutes"] == 90
+    assert cooldown["minutes_since_stop_loss"] == pytest.approx(30, abs=1)
+
+
 def test_sector_momentum_applies_rank_bonus_inside_existing_universe():
     import backend.agent as agent
     candidate = {
