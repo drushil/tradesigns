@@ -1737,7 +1737,7 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
         pass
 
     trend_score = 0.0
-    trend_threshold = 1.5
+    trend_threshold = float(os.getenv("TREND_SCORE_THRESHOLD", "0.8"))
     trend_mean_return = 0.0
     trend_std_return = 0.0
 
@@ -1769,7 +1769,7 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
                 mean_ret = 0.0
                 regime_reason = "insufficient_return_window"
             trend_score = abs(mean_ret) / (std_ret + 1e-9)
-            intraday_regime = "trending" if trend_score > 1.5 else "ranging"
+            intraday_regime = "trending" if trend_score > trend_threshold else "ranging"
             trend_mean_return = mean_ret
             trend_std_return = std_ret
             if regime_reason != "insufficient_return_window":

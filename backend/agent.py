@@ -690,7 +690,7 @@ def _missing_runtime_config() -> list[str]:
 def _apply_execution_overrides(profile: dict) -> dict:
     p = profile.copy()
     p.setdefault("min_grade_required", "A")
-    p.setdefault("allow_b_grade_exploration", True)
+    p.setdefault("allow_b_grade_exploration", False)
     p.setdefault("b_grade_size_multiplier", 0.20)
     p.setdefault("ev_reduced_size_floor_pct", -0.02)
     p.setdefault("ev_probe_floor_pct", -0.10)
@@ -744,7 +744,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     if os.getenv("MIN_GRADE_REQUIRED"):
         p["min_grade_required"] = os.getenv("MIN_GRADE_REQUIRED", "").strip().upper()
     if os.getenv("ALLOW_B_GRADE_EXPLORATION") is not None:
-        p["allow_b_grade_exploration"] = _env_bool("ALLOW_B_GRADE_EXPLORATION", True)
+        p["allow_b_grade_exploration"] = _env_bool("ALLOW_B_GRADE_EXPLORATION", False)
     if os.getenv("B_GRADE_SIZE_MULTIPLIER"):
         p["b_grade_size_multiplier"] = _env_float("B_GRADE_SIZE_MULTIPLIER", p["b_grade_size_multiplier"])
     if os.getenv("GRADE_EV_OVERRIDE_NEGATIVE_MIN_SAMPLES"):

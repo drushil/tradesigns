@@ -125,5 +125,5 @@ def test_execution_overrides_default_to_a_grade_with_b_exploration(monkeypatch):
     })
 
     assert profile["min_grade_required"] == "A"
-    assert profile["allow_b_grade_exploration"] is True
+    assert profile["allow_b_grade_exploration"] is False
     assert profile["b_grade_size_multiplier"] == 0.20
