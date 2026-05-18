@@ -18,6 +18,11 @@ def is_live() -> bool:
     return get_broker_env() == "ibkr_live"
 
 
+def is_sweep_enabled() -> bool:
+    raw = os.getenv("SWEEP_ENABLED", "false").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def compute_sweep_plan(portfolio_state: dict) -> dict:
     """Pure calculation — never executes anything, no side effects."""
     capital_eur = portfolio_state["equity_eur"]
@@ -28,8 +33,10 @@ def compute_sweep_plan(portfolio_state: dict) -> dict:
 
     sweepable = max(0.0, unallocated - reserve_eur)
 
+    enabled = is_sweep_enabled()
     should_sweep = (
-        sweepable >= min_sweep
+        enabled
+        and sweepable >= min_sweep
         and portfolio_state["open_positions"] == 0
         and portfolio_state["pending_signals"] == 0
     )
@@ -38,7 +45,9 @@ def compute_sweep_plan(portfolio_state: dict) -> dict:
     annual_yield_pct = 3.5 if not is_live() else 3.2
     daily_yield_eur  = sweepable * (annual_yield_pct / 100 / 252)
 
-    if sweepable < min_sweep:
+    if not enabled:
+        reason = "disabled"
+    elif sweepable < min_sweep:
         reason = "below_min"
     elif portfolio_state["open_positions"] > 0:
         reason = "positions_open"
@@ -53,6 +62,7 @@ def compute_sweep_plan(portfolio_state: dict) -> dict:
         "est_daily_yield":  round(daily_yield_eur, 4),
         "est_annual_yield": round(sweepable * annual_yield_pct / 100, 2),
         "broker_env":       get_broker_env(),
+        "enabled":          enabled,
         "reason":           reason,
     }
 
@@ -145,6 +155,8 @@ def recall_sweep(reason: str) -> dict:
 
 def has_active_sweep() -> bool:
     """Return True if the last logged sweep was an eligible simulation (i.e. cash was parked)."""
+    if not is_sweep_enabled():
+        return False
     last = _get_last_sweep()
     return bool(last and last.get("mode") == "simulation" and last.get("should_sweep"))
 

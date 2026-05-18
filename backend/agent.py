@@ -4686,6 +4686,10 @@ def _save_snapshot(portfolio_state, regime):
 def run_nightly_sweep():
     """Runs after US market close every weekday. Simulation on alpaca_paper, live on ibkr_live."""
     try:
+        if not _env_bool("SWEEP_ENABLED", False):
+            log_event("INFO", "nightly_sweep_skipped", {"reason": "disabled"})
+            return
+
         account = get_account()
         if "error" in account:
             log_event("ERROR", "nightly_sweep_account_error", {"error": account["error"]})
