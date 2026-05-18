@@ -4821,6 +4821,16 @@ def run_post_market_analytics():
         log_event("ERROR", "post_market_analytics_failed", {"error": str(e)[:160]})
 
 
+def run_daily_eod_review():
+    """Run read-only daily post-market synthesis and recommendations."""
+    try:
+        from backend.daily_review import run_daily_eod_review as _review
+        return _review()
+    except Exception as e:
+        log_event("ERROR", "daily_eod_review_failed", {"error": str(e)[:160]})
+        return {"error": str(e)}
+
+
 # ── Weekly portfolio review (advisory, observation only) ─────────────────────
 
 def run_portfolio_review():

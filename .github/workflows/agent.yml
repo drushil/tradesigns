@@ -10,6 +10,8 @@ on:
     - cron: '0 */4 * * 1-5'
     # Nightly sweep — after US market close Mon-Fri (21:05 UTC)
     - cron: '5 21 * * 1-5'
+    # Daily EOD review — after replay analytics (read-only recommendations)
+    - cron: '25 21 * * 1-5'
     # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
     - cron: '35 13,14 * * 1-5'
     # Manual advisory scan windows — EU open and US high-probability windows
@@ -139,6 +141,7 @@ jobs:
               run_weekly_digest,
               run_nightly_sweep,
               run_post_market_analytics,
+              run_daily_eod_review,
               re_evaluate_swing_positions,
               _should_run_swing_recheck,
           )
@@ -153,6 +156,7 @@ jobs:
           # Manual override via workflow_dispatch input takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
           action_ran = False
+          send_cycle_summary = True
           if dispatch_mode == "portfolio_review":
               print("Running weekly portfolio review (manual trigger)...")
               run_portfolio_review()
@@ -169,6 +173,11 @@ jobs:
               print("Running post-market analytics (manual trigger)...")
               run_post_market_analytics()
               action_ran = True
+          elif dispatch_mode == "eod_review":
+              print("Running daily EOD review (manual trigger)...")
+              run_daily_eod_review()
+              action_ran = True
+              send_cycle_summary = False
           elif dispatch_mode == "signal":
               print("Running signal cycle (manual trigger)...")
               run_signal_cycle()
@@ -193,6 +202,11 @@ jobs:
                   print("Running post-market analytics...")
                   run_post_market_analytics()
                   action_ran = True
+              elif now.weekday() < 5 and now.hour == 21 and 20 <= now.minute < 35:
+                  print("Running daily EOD review...")
+                  run_daily_eod_review()
+                  action_ran = True
+                  send_cycle_summary = False
               elif _should_run_swing_recheck(now):
                   print("Running daily swing re-evaluation...")
                   re_evaluate_swing_positions()
@@ -215,10 +229,11 @@ jobs:
                       print("Outside trading window — no action.")
           with open(os.environ["GITHUB_ENV"], "a") as fh:
               fh.write(f"AGENT_ACTION_RAN={'true' if action_ran else 'false'}\n")
+              fh.write(f"SEND_CYCLE_SUMMARY={'true' if send_cycle_summary else 'false'}\n")
           PY
 
       - name: Send Discord summary
-        if: always() && env.AGENT_ACTION_RAN == 'true'
+        if: always() && env.AGENT_ACTION_RAN == 'true' && env.SEND_CYCLE_SUMMARY == 'true'
         env:
           PYTHONPATH: "."
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
