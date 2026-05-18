@@ -35,13 +35,7 @@
 1. Go to https://newsapi.org → Get API Key (free, instant)
 2. Copy your API key
 
-#### 1e. Reddit app (free sentiment)
-1. Go to https://www.reddit.com/prefs/apps (logged into Reddit)
-2. **Create App** → name: `trading_agent` → type: **script**
-3. Redirect URI: `http://localhost:8080`
-4. Copy `client_id` (under app name) and `secret`
-
-#### 1f. Telegram Bot (free alerts)
+#### 1e. Telegram Bot (free alerts)
 1. Open Telegram → search `@BotFather` → `/newbot`
 2. Choose a name and username → copy the **Bot Token**
 3. Start a chat with your new bot (send it any message)
@@ -62,9 +56,6 @@
    - `SUPABASE_URL`
    - `SUPABASE_ANON_KEY`
    - `NEWSAPI_KEY`
-   - `REDDIT_CLIENT_ID`
-   - `REDDIT_CLIENT_SECRET`
-   - `REDDIT_USER_AGENT` → value: `trading_agent_v1/your@email.com`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
 6. Add these **Variables** (non-sensitive config):
@@ -95,9 +86,6 @@ ANTHROPIC_API_KEY    = "sk-ant-..."
 SUPABASE_URL         = "https://xxxx.supabase.co"
 SUPABASE_ANON_KEY    = "eyJ..."
 NEWSAPI_KEY          = "your_newsapi_key"
-REDDIT_CLIENT_ID     = "your_reddit_id"
-REDDIT_CLIENT_SECRET = "your_reddit_secret"
-REDDIT_USER_AGENT    = "trading_agent_v1/your@email.com"
 TELEGRAM_BOT_TOKEN   = "your_bot_token"
 TELEGRAM_CHAT_ID     = "your_chat_id"
 RISK_PROFILE         = "moderate"
@@ -161,7 +149,6 @@ Dashboard (Streamlit Cloud — always on):
 | GitHub Actions | €0 | Free tier (2000 min/month, we use ~400) |
 | yfinance data | €0 | No API key needed |
 | NewsAPI | €0 | 100 req/day free (we use ~50) |
-| Reddit PRAW | €0 | Free |
 | Anthropic (Haiku) | ~€3-8 | ~10-20 calls/day × €0.001 |
 | Anthropic (Sonnet) | ~€0.05 | 1 weekly digest call |
 | **Total** | **~€3-8/mo** | Only the LLM costs money |
