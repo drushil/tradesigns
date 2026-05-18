@@ -168,9 +168,6 @@ SUPABASE_SERVICE_KEY        # For writes (agent) — never expose to frontend
 
 # Data feeds (all free)
 NEWSAPI_KEY
-REDDIT_CLIENT_ID
-REDDIT_CLIENT_SECRET
-REDDIT_USER_AGENT
 
 # Alerts
 DISCORD_WEBHOOK_URL         # Discord webhook for post-cycle summaries
