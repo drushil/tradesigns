@@ -334,6 +334,7 @@ def insert_blocked_opportunity(opportunity: dict) -> dict:
             "composite_score": opportunity.get("composite_score"),
             "block_stage": opportunity.get("block_stage"),
             "block_reason": opportunity.get("block_reason"),
+            "block_detail": opportunity.get("block_detail") or {},
             "candidate_rank_score": opportunity.get("candidate_rank_score"),
             "breakout_quality": opportunity.get("breakout_quality"),
             "ev_decision": opportunity.get("ev_decision"),
@@ -581,13 +582,17 @@ def get_daily_reviews(limit: int = 20) -> list:
         return []
 
 
-def get_recent_signals(hours: int = 24) -> list:
+def get_recent_signals(hours: int = 24, limit: int = 500, ticker: str = None) -> list:
     db = get_client()
-    result = (db.table("signals")
-               .select("*")
-               .order("created_at", desc=True)
-               .limit(200)
-               .execute())
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat() + "Z"
+    q = (db.table("signals")
+           .select("*")
+           .gte("created_at", cutoff)
+           .order("created_at", desc=True)
+           .limit(limit))
+    if ticker:
+        q = q.eq("ticker", ticker.upper())
+    result = q.execute()
     return result.data or []
 
 

@@ -355,6 +355,7 @@ create table if not exists blocked_opportunities (
                                 'signal_consensus','reward_risk','exposure',
                                 'signal_alignment','regime','time','sizing','position')),
     block_reason            text,
+    block_detail            jsonb default '{}'::jsonb,
     candidate_rank_score    numeric(7,4),
     breakout_quality        numeric(6,4),
     ev_decision             text,

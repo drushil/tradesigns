@@ -1627,7 +1627,8 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
 def _record_blocked_opportunity(ticker: str, action: str, composite: float,
                                 signals: dict, setup_context: dict,
                                 regime: str, block_stage: str, block_reason: str,
-                                ev_result: dict = None, reference_price: float = None):
+                                ev_result: dict = None, reference_price: float = None,
+                                block_detail: dict = None):
     try:
         payload = {
             "ticker": str(ticker or "").upper(),
@@ -1635,6 +1636,7 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             "composite_score": round(float(composite or 0), 4),
             "block_stage": block_stage,
             "block_reason": block_reason,
+            "block_detail": block_detail or {},
             "candidate_rank_score": (setup_context or {}).get("candidate_rank_score"),
             "breakout_quality": (setup_context or {}).get("breakout_quality"),
             "ev_decision": (ev_result or {}).get("ev_decision"),
@@ -1661,6 +1663,33 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             return
     except Exception:
         return
+
+
+def _threshold_block_detail(action: str, composite: float, profile: dict,
+                            market_regime: str = None) -> dict:
+    """Structured analytics for threshold misses; does not affect gate behavior."""
+    action = str(action or "").upper()
+    try:
+        score = abs(float(composite or 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    threshold = float(profile.get("min_signal_score", 0.0) or 0.0)
+    if action == "SELL":
+        threshold = float(profile.get("min_short_signal_score", threshold) or threshold)
+        if str(market_regime or "").lower() == "bull":
+            threshold = float(profile.get("bull_short_signal_score", threshold) or threshold)
+    gap = threshold - score
+    if threshold <= 0 or gap < 0:
+        return {}
+    margin = _env_float("NEAR_THRESHOLD_MARGIN", 0.01)
+    return {
+        "kind": "signal_threshold",
+        "score": round(score, 4),
+        "threshold": round(threshold, 4),
+        "threshold_gap": round(gap, 4),
+        "near_threshold": gap <= margin,
+        "near_threshold_margin": margin,
+    }
 
 
 def _parse_supabase_time(value: str) -> Optional[datetime]:
@@ -1761,6 +1790,16 @@ def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
     if not replay:
         return {}
 
+    favorable = float(replay.get("max_favorable_pct") or 0.0)
+    close_after = float(replay.get("close_after_pct") or 0.0)
+    runner_threshold = _env_float("MISSED_RUNNER_FAVORABLE_THRESHOLD_PCT", 2.0)
+    minor_threshold = _env_float("MISSED_WINNER_FAVORABLE_THRESHOLD_PCT", 0.75)
+    runner_severity = None
+    if favorable >= runner_threshold and close_after > 0:
+        runner_severity = "runner"
+    elif favorable >= minor_threshold and close_after > 0:
+        runner_severity = "minor"
+
     return {
         "max_favorable_pct": replay["max_favorable_pct"],
         "max_adverse_pct": replay["max_adverse_pct"],
@@ -1774,6 +1813,10 @@ def _replay_one_blocked_opportunity(opp: dict, horizon_minutes: int) -> dict:
             "action": action,
             "block_stage": opp.get("block_stage"),
             "block_reason": opp.get("block_reason"),
+            "block_detail": opp.get("block_detail") or {},
+            "missed_runner": runner_severity == "runner",
+            "runner_severity": runner_severity,
+            "runner_threshold_pct": runner_threshold,
         },
     }
 
@@ -3126,6 +3169,14 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         _record_blocked_opportunity(
             ticker, action_hint, composite, signals_snap, setup_context,
             ticker_regime, "gate", gate_reason,
+            block_detail=(
+                _threshold_block_detail(
+                    action_hint, composite, profile,
+                    market_regime=getattr(ticker_regime_state, "market_regime", None),
+                )
+                if "signal below threshold" in str(gate_reason)
+                else {}
+            ),
         )
         return
 

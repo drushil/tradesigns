@@ -46,10 +46,53 @@ def test_collect_daily_metrics_tracks_bad_avoids_and_shadow_repeats(monkeypatch)
             "block_stage": "ranking",
             "created_at": "2026-05-19T14:10:00+00:00",
             "replay_checked_at": "2026-05-19T16:00:00+00:00",
-            "max_favorable_pct": 1.2,
+            "max_favorable_pct": 2.4,
             "max_adverse_pct": -0.1,
-            "close_after_pct": 0.8,
+            "close_after_pct": 1.8,
+            "replay_result_json": {"runner_severity": "runner"},
         },
+        {
+            "ticker": "ARM",
+            "action_hint": "BUY",
+            "block_reason": "signal below threshold (0.047 < 0.05)",
+            "block_stage": "gate",
+            "created_at": "2026-05-19T14:20:00+00:00",
+            "replay_checked_at": "2026-05-19T16:00:00+00:00",
+            "max_favorable_pct": 3.1,
+            "max_adverse_pct": -0.2,
+            "close_after_pct": 2.2,
+            "block_detail": {
+                "kind": "signal_threshold",
+                "score": 0.047,
+                "threshold": 0.05,
+                "threshold_gap": 0.003,
+                "near_threshold": True,
+            },
+        },
+        {
+            "ticker": "SMH",
+            "action_hint": "SELL",
+            "block_reason": "short signal below threshold",
+            "block_stage": "gate",
+            "created_at": "2026-05-19T14:30:00+00:00",
+            "replay_checked_at": "2026-05-19T16:00:00+00:00",
+            "max_favorable_pct": 0.1,
+            "max_adverse_pct": -3.0,
+            "close_after_pct": -2.4,
+        },
+    ])
+    monkeypatch.setattr(daily_review, "get_recent_signals", lambda hours=72, limit=1000: [
+        {
+            "ticker": "SMH",
+            "created_at": "2026-05-19T14:29:00+00:00",
+            "composite_score": -0.094,
+            "rsi_divergence_score": -0.4,
+            "vwap_deviation_score": 0.7,
+            "tape_aggression_score": -0.2,
+            "order_book_score": 0.1,
+            "action_hint": "SELL",
+            "regime": "ranging",
+        }
     ])
     monkeypatch.setattr(daily_review, "get_recent_advisory_signals", lambda days=3, limit=500: [
         {"market": "EU", "mode": "shadow", "status": "shadow_logged", "created_at": "2026-05-19T08:00:00+00:00"}
@@ -95,6 +138,11 @@ def test_collect_daily_metrics_tracks_bad_avoids_and_shadow_repeats(monkeypatch)
     assert metrics["trade_summary"]["total_pnl_eur"] == pytest.approx(0.5)
     assert metrics["blocked_opportunities"]["bad_avoids"][0]["ticker"] == "NVDA"
     assert metrics["blocked_opportunities"]["missed_winners"][0]["ticker"] == "XLE"
+    assert metrics["blocked_opportunities"]["missed_winners"][0]["runner_severity"] == "runner"
+    assert metrics["near_miss_distribution"]["runner_count"] == 1
+    assert metrics["near_miss_distribution"]["top_runners"][0]["ticker"] == "ARM"
+    assert metrics["direction_error_candidates"][0]["ticker"] == "SMH"
+    assert metrics["direction_error_candidates"][0]["signal_snapshot"]["action_hint"] == "SELL"
     assert metrics["shadow_universe"][0]["ticker"] == "XLE"
     assert metrics["shadow_universe"][0]["review_candidate"] is True
     assert metrics["gate_activity"]["event_counts"]["signal_consensus_veto"] == 1
@@ -127,6 +175,8 @@ def test_format_discord_review_is_compact_and_explicitly_read_only():
         "trade_summary": {"total_pnl_eur": -2.95, "total_trades": 3, "wins": 0, "losses": 3},
         "shadow_universe": [{"ticker": "XLE", "mentions": 5, "review_candidate": True}],
         "blocked_opportunities": {"bad_avoids": [{"ticker": "NVDA"}]},
+        "near_miss_distribution": {"total": 2, "checked": 2, "runner_count": 1},
+        "direction_error_candidates": [{"ticker": "SMH", "action": "SELL", "close_after_pct": -2.4}],
         "gate_activity": {"event_counts": {"signal_consensus_veto": 12, "ranging_regime_candidate_block": 5}},
     }
     review = {
@@ -141,4 +191,6 @@ def test_format_discord_review_is_compact_and_explicitly_read_only():
     assert "EOD Review" in text
     assert "XLE" in text
     assert "Gate activity: consensus 12, ranging 5" in text
+    assert "Near-miss watch: 2/2 checked, 1 runners" in text
+    assert "Direction diagnostics: SMH SELL (-2.40%)" in text
     assert "No config changes were auto-applied" in text

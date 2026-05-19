@@ -20,6 +20,7 @@ from database.client import (
     get_blocked_opportunities,
     get_open_trade_records,
     get_recent_advisory_signals,
+    get_recent_signals,
     get_logs,
     save_daily_review,
     insert_config_change_recommendations,
@@ -109,6 +110,19 @@ def _blocked_replay_summary(blocked: list[dict]) -> dict:
             "close_after_pct": round(close_after, 3),
             "setup_grade": item.get("setup_grade"),
         }
+        replay_json = item.get("replay_result_json") or {}
+        block_detail = item.get("block_detail") or replay_json.get("block_detail") or {}
+        severity = replay_json.get("runner_severity")
+        if not severity and favorable >= 2.0 and close_after > 0:
+            severity = "runner"
+        elif not severity and favorable >= 0.75 and close_after > 0:
+            severity = "minor"
+        if severity:
+            payload["runner_severity"] = severity
+        if block_detail:
+            payload["block_detail"] = block_detail
+            if block_detail.get("threshold_gap") is not None:
+                payload["threshold_gap"] = block_detail.get("threshold_gap")
         if favorable >= 0.75 and close_after > 0:
             missed_winners.append(payload)
         elif adverse <= -0.50 or close_after <= 0:
@@ -122,6 +136,138 @@ def _blocked_replay_summary(blocked: list[dict]) -> dict:
         "bad_avoids": bad_avoids[:10],
         "neutral_count": len(neutral),
     }
+
+
+def _median(values: list[float]) -> float:
+    numeric = []
+    for value in values:
+        if value in {None, ""}:
+            continue
+        try:
+            numeric.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    numeric = sorted(numeric)
+    if not numeric:
+        return 0.0
+    mid = len(numeric) // 2
+    if len(numeric) % 2:
+        return round(numeric[mid], 4)
+    return round((numeric[mid - 1] + numeric[mid]) / 2, 4)
+
+
+def _near_miss_distribution(blocked: list[dict]) -> dict:
+    items = []
+    for row in blocked:
+        detail = row.get("block_detail") or {}
+        if not detail.get("near_threshold"):
+            continue
+        favorable = row.get("max_favorable_pct")
+        adverse = row.get("max_adverse_pct")
+        close_after = row.get("close_after_pct")
+        checked = row.get("replay_checked_at") is not None
+        item = {
+            "ticker": row.get("ticker"),
+            "stage": row.get("block_stage"),
+            "reason": row.get("block_reason"),
+            "score": detail.get("score"),
+            "threshold": detail.get("threshold"),
+            "threshold_gap": detail.get("threshold_gap"),
+            "checked": checked,
+            "max_favorable_pct": favorable,
+            "max_adverse_pct": adverse,
+            "close_after_pct": close_after,
+        }
+        items.append(item)
+    checked_items = [i for i in items if i["checked"]]
+    runners = [
+        i for i in checked_items
+        if float(i.get("max_favorable_pct") or 0) >= 2.0
+        and float(i.get("close_after_pct") or 0) > 0
+    ]
+    return {
+        "total": len(items),
+        "checked": len(checked_items),
+        "runner_count": len(runners),
+        "median_max_favorable_pct": _median([i.get("max_favorable_pct") for i in checked_items]),
+        "median_max_adverse_pct": _median([i.get("max_adverse_pct") for i in checked_items]),
+        "median_close_after_pct": _median([i.get("close_after_pct") for i in checked_items]),
+        "top_runners": sorted(
+            runners,
+            key=lambda i: float(i.get("max_favorable_pct") or 0),
+            reverse=True,
+        )[:10],
+        "sample": sorted(
+            checked_items,
+            key=lambda i: float(i.get("max_favorable_pct") or 0),
+            reverse=True,
+        )[:10],
+        "guardrail": (
+            "Observability only: do not change trading behavior until at least 14 days "
+            "or 20 near-threshold cases across multiple regimes, whichever comes later."
+        ),
+    }
+
+
+def _signal_time(row: dict) -> Optional[datetime]:
+    return _parse_dt(row.get("created_at") or row.get("logged_at"))
+
+
+def _nearest_signal_snapshot(ticker: str, when: datetime, signals: list[dict]) -> dict:
+    ticker = str(ticker or "").upper()
+    candidates = []
+    for row in signals:
+        if str(row.get("ticker") or "").upper() != ticker:
+            continue
+        ts = _signal_time(row)
+        if not ts or not when:
+            continue
+        delta = abs((ts - when).total_seconds())
+        if delta <= 15 * 60:
+            candidates.append((delta, row))
+    if not candidates:
+        return {}
+    row = min(candidates, key=lambda item: item[0])[1]
+    return {
+        "created_at": row.get("created_at"),
+        "composite_score": row.get("composite_score"),
+        "rsi_divergence_score": row.get("rsi_divergence_score"),
+        "vwap_deviation_score": row.get("vwap_deviation_score"),
+        "news_sentiment_score": row.get("news_sentiment_score"),
+        "tape_aggression_score": row.get("tape_aggression_score"),
+        "order_book_score": row.get("order_book_score"),
+        "macd_score": row.get("macd_score"),
+        "rel_strength_score": row.get("rel_strength_score"),
+        "orb_score": row.get("orb_score"),
+        "action_hint": row.get("action_hint"),
+        "regime": row.get("regime"),
+    }
+
+
+def _direction_error_candidates(blocked: list[dict], signals: list[dict]) -> list[dict]:
+    output = []
+    for row in blocked:
+        if not row.get("replay_checked_at"):
+            continue
+        adverse = float(row.get("max_adverse_pct") or 0)
+        close_after = float(row.get("close_after_pct") or 0)
+        if adverse > -2.0 and close_after > -1.0:
+            continue
+        created_at = _parse_dt(row.get("created_at"))
+        output.append({
+            "ticker": row.get("ticker"),
+            "action": row.get("action_hint"),
+            "stage": row.get("block_stage"),
+            "reason": row.get("block_reason"),
+            "max_favorable_pct": round(float(row.get("max_favorable_pct") or 0), 3),
+            "max_adverse_pct": round(adverse, 3),
+            "close_after_pct": round(close_after, 3),
+            "signal_snapshot": _nearest_signal_snapshot(row.get("ticker"), created_at, signals),
+        })
+    return sorted(
+        output,
+        key=lambda item: (item["close_after_pct"], item["max_adverse_pct"]),
+    )[:10]
 
 
 def _shadow_repeats_from_logs(review_date: date) -> list[dict]:
@@ -265,6 +411,7 @@ def collect_daily_metrics(review_date: date = None) -> dict:
     trades = _rows_for_date(get_recent_trades(days=3), review_date, "exit_time", "created_at")
     blocked = _rows_for_date(get_blocked_opportunities(days=3, limit=500), review_date, "created_at")
     advisory = _rows_for_date(get_recent_advisory_signals(days=3, limit=500), review_date, "created_at")
+    signals = _rows_for_date(get_recent_signals(hours=72, limit=1000), review_date, "created_at")
     open_trades = get_open_trade_records()
 
     wins = [t for t in trades if float(t.get("pnl_eur") or 0) > 0]
@@ -297,6 +444,8 @@ def collect_daily_metrics(review_date: date = None) -> dict:
         "regime_counts": dict(regime_counts),
         "same_ticker_loss_clusters": same_ticker_losses,
         "blocked_opportunities": _blocked_replay_summary(blocked),
+        "near_miss_distribution": _near_miss_distribution(blocked),
+        "direction_error_candidates": _direction_error_candidates(blocked, signals),
         "gate_activity": _gate_activity_from_logs(review_date),
         "shadow_universe": _shadow_repeats_from_logs(review_date),
         "advisory": {
@@ -353,6 +502,9 @@ Use ONLY the facts in METRICS. Do not invent trades or prices.
 Return compact JSON only. Config changes must be recommendations only;
 auto_apply must always be false for risk, sizing, universe, and threshold changes.
 One noisy day is not enough to change thresholds unless it is an urgent safety fix.
+near_miss_distribution and direction_error_candidates are observability only:
+do not recommend trading behavior changes from them until there are at least
+14 days or 20 near-threshold cases across multiple regimes, whichever comes later.
 
 METRICS:
 {json.dumps(metrics, default=str)[:18000]}
@@ -467,6 +619,20 @@ def format_discord_review(review: dict, metrics: dict) -> str:
         lines.append("Shadow review: " + ", ".join(parts))
     if bad_avoids:
         lines.append(f"Bad avoids tracked: {len(bad_avoids)} blocked signals likely avoided losses")
+    near_miss = metrics.get("near_miss_distribution") or {}
+    if near_miss.get("total"):
+        lines.append(
+            "Near-miss watch: "
+            f"{near_miss.get('checked', 0)}/{near_miss.get('total', 0)} checked, "
+            f"{near_miss.get('runner_count', 0)} runners. Observability only."
+        )
+    direction_errors = metrics.get("direction_error_candidates") or []
+    if direction_errors:
+        parts = [
+            f"{d.get('ticker')} {d.get('action')} ({float(d.get('close_after_pct') or 0):+.2f}%)"
+            for d in direction_errors[:3]
+        ]
+        lines.append("Direction diagnostics: " + ", ".join(parts))
     gate_counts = (metrics.get("gate_activity") or {}).get("event_counts") or {}
     if gate_counts:
         important = [
