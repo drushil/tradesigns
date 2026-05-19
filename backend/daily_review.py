@@ -315,7 +315,8 @@ Return this JSON object:
         client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         response = client.chat.completions.create(
             model=MODEL,
-            max_tokens=1200,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
             messages=[{"role": "user", "content": prompt}],
         )
         raw = response.choices[0].message.content.strip()
