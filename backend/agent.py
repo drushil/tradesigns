@@ -1785,7 +1785,12 @@ def _replay_blocked_opportunities():
     min_age = _env_int("BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES", 20)
     horizon = _env_int("BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES", 90)
     limit = _env_int("BLOCKED_OPPORTUNITY_REPLAY_LIMIT", 25)
-    opportunities = get_unchecked_blocked_opportunities(min_age_minutes=min_age, limit=limit)
+    newest_first = _env_bool("BLOCKED_OPPORTUNITY_REPLAY_NEWEST_FIRST", True)
+    opportunities = get_unchecked_blocked_opportunities(
+        min_age_minutes=min_age,
+        limit=limit,
+        newest_first=newest_first,
+    )
     if not opportunities:
         return
 
@@ -1816,11 +1821,19 @@ def _replay_blocked_opportunities():
                 "error": str(e)[:160],
             })
     if checked:
+        created_dates = {}
+        for opp in opportunities:
+            created = str(opp.get("created_at") or "")[:10] or "unknown"
+            created_dates[created] = created_dates.get(created, 0) + 1
         log_event("INFO", "blocked_opportunity_replay_complete", {
             "checked": checked,
             "updated": updated,
             "skipped_no_bars": skipped,
             "horizon_minutes": horizon,
+            "newest_first": newest_first,
+            "created_dates": created_dates,
+            "oldest_created_at": min((str(o.get("created_at")) for o in opportunities if o.get("created_at")), default=None),
+            "newest_created_at": max((str(o.get("created_at")) for o in opportunities if o.get("created_at")), default=None),
         })
 
 

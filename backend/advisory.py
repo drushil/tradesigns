@@ -83,6 +83,8 @@ class AdvisoryConfig:
     min_ev_pct: float
     min_breakout_quality: float
     min_discord_grade: str
+    shadow_min_discord_grade: str
+    us_min_minutes_after_open: int
     allow_short: bool
     discord_webhook_url: str
     fx_rate: float
@@ -138,6 +140,11 @@ def load_config() -> AdvisoryConfig:
         min_ev_pct=_env_float("ADVISORY_MIN_EV_PCT", 0.50),
         min_breakout_quality=_env_float("ADVISORY_MIN_BREAKOUT_QUALITY", 0.45),
         min_discord_grade=_env_value("ADVISORY_DISCORD_MIN_GRADE", "A").upper(),
+        shadow_min_discord_grade=_env_value(
+            "ADVISORY_SHADOW_DISCORD_MIN_GRADE",
+            _env_value("ADVISORY_DISCORD_MIN_GRADE", "A"),
+        ).upper(),
+        us_min_minutes_after_open=_env_int("ADVISORY_US_MIN_MINUTES_AFTER_OPEN", 15),
         allow_short=_env_bool("ADVISORY_ALLOW_SHORT", False),
         discord_webhook_url=_env_value("DISCORD_WEBHOOK_URL", ""),
         fx_rate=_env_float("EURUSD_RATE", 1.08),
@@ -181,6 +188,11 @@ def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
     }
     hour, minute = starts.get(market, {}).get(window, (now_cet.hour, now_cet.minute))
     return now_cet.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+
+def _minutes_since_session_start(market: str, window: str, now_cet: datetime) -> float:
+    start = _session_start_cet(market, window, now_cet)
+    return (now_cet - start).total_seconds() / 60
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -412,7 +424,12 @@ def _format_trade_card(signal: dict) -> str:
     if approx_usd:
         notional += f" (~${approx_usd:.0f})"
     fx_text = f"  |  FX: {signal['fx_rate']:.4f}" if signal["currency"] == "USD" else ""
-    opportunity = "EXCELLENT" if signal["grade"] == "A+" else "VERY GOOD"
+    opportunity = {
+        "A+": "EXCELLENT",
+        "A": "VERY GOOD",
+        "B": "WATCHLIST-QUALITY",
+        "C": "LOW-GRADE SHADOW",
+    }.get(str(signal.get("grade", "")).upper(), "OBSERVATION")
     quick_why = signal["rationale"].split(", window ")[0]
     headline = (
         f"{opportunity} {signal['side']} OPPORTUNITY: {sym} / {name} "
@@ -468,10 +485,12 @@ def _weights_for_market(market: str) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
-    if not _meets_min_grade(candidate.get("grade"), cfg.min_discord_grade):
-        return False
     if candidate.get("mode") == "live":
+        if not _meets_min_grade(candidate.get("grade"), cfg.min_discord_grade):
+            return False
         return True
+    if not _meets_min_grade(candidate.get("grade"), cfg.shadow_min_discord_grade):
+        return False
     return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
 
 
@@ -639,6 +658,15 @@ def run_advisory_cycle() -> dict:
         mode = "live" if market in cfg.live_markets else "shadow"
         if market not in cfg.live_markets and market not in cfg.shadow_markets:
             continue
+        window = _window_name(market, now_cet)
+        if mode == "live" and market == "US" and window == "us_open":
+            minutes_since_open = _minutes_since_session_start(market, window, now_cet)
+            if minutes_since_open < cfg.us_min_minutes_after_open:
+                log_event("INFO", "advisory_live_waiting_for_us_open_bars", {
+                    "minutes_since_open": round(minutes_since_open, 1),
+                    "required_minutes": cfg.us_min_minutes_after_open,
+                })
+                continue
         if mode == "live" and daily_live_pnl <= -abs(cfg.max_daily_loss_eur):
             log_event("INFO", "advisory_live_blocked_daily_loss_cap", {
                 "daily_live_pnl": daily_live_pnl,

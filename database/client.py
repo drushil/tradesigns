@@ -376,7 +376,8 @@ def insert_blocked_opportunity(opportunity: dict) -> dict:
 
 
 def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 50,
-                                        max_age_days: int = 4) -> list:
+                                        max_age_days: int = 4,
+                                        newest_first: bool = None) -> list:
     """Fetch blocked opportunities eligible for replay against subsequent price action.
 
     Only fetches rows within the yfinance 1m data window (max_age_days, default 4).
@@ -386,12 +387,14 @@ def get_unchecked_blocked_opportunities(min_age_minutes: int = 20, limit: int = 
         recent_cutoff = (now - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
         oldest_cutoff = (now - timedelta(days=max_age_days)).isoformat() + "Z"
         db = get_client()
+        if newest_first is None:
+            newest_first = os.getenv("BLOCKED_OPPORTUNITY_REPLAY_NEWEST_FIRST", "true").strip().lower() not in {"0", "false", "no"}
         result = (db.table("blocked_opportunities")
                   .select("*")
                   .is_("replay_checked_at", "null")
                   .gte("created_at", oldest_cutoff)
                   .lte("created_at", recent_cutoff)
-                  .order("created_at", desc=False)
+                  .order("created_at", desc=bool(newest_first))
                   .limit(limit)
                   .execute())
         return result.data or []
