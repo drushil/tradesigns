@@ -5112,11 +5112,12 @@ def run_portfolio_review():
 # ── Weekly digest (called by scheduler) ──────────────────────────────────────
 
 def run_weekly_digest():
-    from database.client import get_recent_trades, save_learning
+    from database.client import get_recent_trades, get_daily_reviews, save_learning
     trades = get_recent_trades(days=7)
-    if not trades:
+    daily_reviews = get_daily_reviews(limit=7)
+    if not trades and not daily_reviews:
         return
-    insights = generate_weekly_insights(trades)
+    insights = generate_weekly_insights(trades, daily_reviews=daily_reviews)
     from datetime import date
     save_learning(
         week_start      = date.today(),

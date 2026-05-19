@@ -6,6 +6,7 @@ and generates weekly LLM insight digests.
 """
 import os
 import json
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, date
 from typing import Optional
 try:
@@ -354,13 +355,130 @@ def get_effective_profile(base_profile: dict, portfolio_state: dict) -> dict:
 
 # ── Weekly LLM Digest ─────────────────────────────────────────────────────────
 
-def generate_weekly_insights(trades: list) -> list:
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def build_weekly_eod_evidence(daily_reviews: list) -> dict:
+    """Aggregate daily EOD reviews into evidence governance for weekly learning."""
+    if not daily_reviews:
+        return {
+            "review_days": 0,
+            "guardrail": (
+                "No daily EOD evidence supplied. Do not recommend trading logic changes "
+                "unless trade data alone shows an urgent safety issue."
+            ),
+        }
+
+    trade_totals = {"trades": 0, "wins": 0, "losses": 0, "pnl_eur": 0.0}
+    gate_counts = Counter()
+    missed = Counter()
+    runners = Counter()
+    bad_avoids = Counter()
+    direction_errors = Counter()
+    shadow = defaultdict(lambda: {"mentions": 0, "days": set(), "theme": None})
+    near_total = near_checked = near_runners = 0
+    rec_counts = Counter()
+
+    for review in daily_reviews:
+        day = str(review.get("review_date") or review.get("created_at") or "")[:10]
+        metrics = review.get("metrics_json") or {}
+        review_json = review.get("review_json") or {}
+        trade = metrics.get("trade_summary") or {}
+        trade_totals["trades"] += int(trade.get("total_trades") or 0)
+        trade_totals["wins"] += int(trade.get("wins") or 0)
+        trade_totals["losses"] += int(trade.get("losses") or 0)
+        trade_totals["pnl_eur"] += _safe_float(trade.get("total_pnl_eur"))
+
+        for name, count in ((metrics.get("gate_activity") or {}).get("event_counts") or {}).items():
+            gate_counts[str(name)] += int(count or 0)
+
+        blocked = metrics.get("blocked_opportunities") or {}
+        for item in blocked.get("missed_winners") or []:
+            ticker = str(item.get("ticker") or "unknown").upper()
+            missed[ticker] += 1
+            if item.get("runner_severity") == "runner":
+                runners[ticker] += 1
+        for item in blocked.get("bad_avoids") or []:
+            bad_avoids[str(item.get("ticker") or "unknown").upper()] += 1
+
+        near = metrics.get("near_miss_distribution") or {}
+        near_total += int(near.get("total") or 0)
+        near_checked += int(near.get("checked") or 0)
+        near_runners += int(near.get("runner_count") or 0)
+
+        for item in metrics.get("direction_error_candidates") or []:
+            direction_errors[str(item.get("ticker") or "unknown").upper()] += 1
+
+        for item in metrics.get("shadow_universe") or []:
+            ticker = str(item.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            shadow[ticker]["mentions"] += int(item.get("mentions") or 0)
+            shadow[ticker]["theme"] = item.get("theme")
+            if day:
+                shadow[ticker]["days"].add(day)
+
+        for rec in (review.get("recommendations_json") or review_json.get("recommendations") or []):
+            key = str(rec.get("variable") or rec.get("category") or rec.get("reason") or "unknown")
+            rec_counts[key] += 1
+
+    return {
+        "review_days": len(daily_reviews),
+        "trade_totals": {
+            **trade_totals,
+            "pnl_eur": round(trade_totals["pnl_eur"], 2),
+            "win_rate_pct": round(
+                trade_totals["wins"] / trade_totals["trades"] * 100, 1
+            ) if trade_totals["trades"] else 0.0,
+        },
+        "gate_event_totals": dict(gate_counts.most_common(12)),
+        "missed_winner_tickers": dict(missed.most_common(10)),
+        "runner_tickers": dict(runners.most_common(10)),
+        "bad_avoid_tickers": dict(bad_avoids.most_common(10)),
+        "near_miss_distribution": {
+            "total": near_total,
+            "checked": near_checked,
+            "runner_count": near_runners,
+            "sample_size_ready": near_checked >= 20 and len(daily_reviews) >= 10,
+        },
+        "direction_error_tickers": dict(direction_errors.most_common(10)),
+        "shadow_candidates": [
+            {
+                "ticker": ticker,
+                "theme": data["theme"],
+                "mentions": data["mentions"],
+                "evidence_days": len(data["days"]),
+            }
+            for ticker, data in sorted(
+                shadow.items(),
+                key=lambda item: (len(item[1]["days"]), item[1]["mentions"]),
+                reverse=True,
+            )[:12]
+        ],
+        "repeated_recommendations": dict(rec_counts.most_common(8)),
+        "decision_guardrails": {
+            "daily_reviews_are_observation": True,
+            "trading_logic_change_requires": ">=10-20 comparable cases across multiple days/regimes",
+            "near_threshold_change_requires": "at least 14 days or 20 checked near-threshold cases, whichever comes later",
+            "universe_promotion_requires": "at least 2 evidence_days and human approval",
+            "operational_bugs": "fix immediately",
+        },
+    }
+
+
+def generate_weekly_insights(trades: list, daily_reviews: list = None) -> list:
     """
     Sends the week's trades to Claude Sonnet for qualitative pattern extraction.
     Returns a list of actionable insight dicts.
     Uses Sonnet (not Haiku) — called once/week so cost is minimal (~€0.05).
     """
-    if len(trades) < 5:
+    eod_evidence = build_weekly_eod_evidence(daily_reviews or [])
+
+    if len(trades) < 5 and not daily_reviews:
         return [{"insight": "Insufficient trades for analysis (need ≥5)",
                  "action": "Continue paper trading to build history",
                  "confidence": 1.0}]
@@ -380,8 +498,8 @@ def generate_weekly_insights(trades: list) -> list:
 
     # Stats
     wins      = [t for t in trades if (t.get("net_pnl_pct") or 0) > 0]
-    win_rate  = len(wins) / len(trades) * 100
-    avg_pnl   = sum(t.get("net_pnl_pct", 0) for t in trades) / len(trades)
+    win_rate  = len(wins) / len(trades) * 100 if trades else 0
+    avg_pnl   = sum(t.get("net_pnl_pct", 0) for t in trades) / len(trades) if trades else 0
 
     prompt = f"""You are a quantitative trading analyst reviewing paper trading data.
 
@@ -393,21 +511,34 @@ SUMMARY STATS:
 TRADE LOG (most recent 50):
 {summary}
 
-Analyse these trades and identify 4-6 CONCRETE, ACTIONABLE patterns.
+WEEKLY EOD EVIDENCE:
+{json.dumps(eod_evidence, default=str)[:10000]}
+
+Analyse these trades and EOD evidence. Identify 4-6 CONCRETE patterns.
 Look for: time-of-day effects, signal combinations that work/fail,
 regime-specific patterns, holding duration effects, ticker preferences.
-Also include one universe-management recommendation for the coming week:
-which tickers/themes to keep, remove, add only to shadow watch, or consider
-for manual review. Do not recommend automatic execution of brand-new tickers
-without warm-up evidence.
+Also review repeated EOD observations: missed runners, bad avoids,
+near-threshold distribution, direction-error candidates, shadow universe,
+and repeated recommendations.
+
+Separate observation from action:
+- Operational bugs, schema gaps, broken logging, or safety issues can be urgent fixes.
+- Trading logic changes require >=10-20 comparable cases across multiple days/regimes.
+- Near-threshold trading changes require at least 14 days OR 20 checked near-threshold
+  cases across multiple regimes, whichever comes later.
+- Universe promotion requires >=2 evidence_days and human approval.
+- If evidence is insufficient, say observe_only.
 
 Output ONLY a valid JSON array, no other text:
 [
   {{
     "insight": "One clear factual observation from the data",
-    "action": "Specific parameter or behaviour to change",
+    "action": "Specific next step, or observe_only if evidence is insufficient",
     "confidence": 0.0-1.0,
-    "category": "signals|timing|risk|costs|regime|universe"
+    "category": "signals|timing|risk|costs|regime|universe|instrumentation|operations",
+    "action_class": "observe_only|ready_for_human_decision|urgent_fix|reject",
+    "sample_size": 0,
+    "evidence_days": 0
   }}
 ]"""
 
