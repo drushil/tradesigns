@@ -48,6 +48,7 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 0.5px solid #1
 
 PAGES = {
     "📊 Overview":         "overview",
+    "📅 EOD Review":       "eod_review",
     "📡 Live Signals":     "signals",
     "🔄 Trades":           "trades",
     "📈 Performance":      "performance",
@@ -68,6 +69,32 @@ with st.sidebar:
         label_visibility="collapsed",
         help=help_text("Navigation"),
     )
+    st.markdown("---")
+    try:
+        from database.client import get_logs
+
+        logs = get_logs(limit=100)
+        latest = logs[0] if logs else {}
+        last_seen = str(latest.get("logged_at") or latest.get("created_at") or "—")
+        errors = sum(1 for row in logs if str(row.get("level") or "").upper() == "ERROR")
+        health_color = "#ff5c5c" if errors else "#00d4a0"
+        health_label = "needs attention" if errors else "healthy"
+        st.markdown(
+            f"""
+            <div style="font-size:11px;color:#777;line-height:1.55">
+              <div style="text-transform:uppercase;letter-spacing:.08em;color:#555">System health</div>
+              <div><span style="color:{health_color}">●</span> {health_label}</div>
+              <div>Last log: {last_seen[:16]}</div>
+              <div>Errors in recent log: {errors}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        st.markdown(
+            "<div style='font-size:11px;color:#777;'>System health unavailable</div>",
+            unsafe_allow_html=True,
+        )
     st.markdown("---")
     st.markdown(
         "<div style='font-size:11px;color:#555;'>Paper trading · Alpaca + Claude</div>",

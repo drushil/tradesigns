@@ -7,6 +7,15 @@ from datetime import datetime
 from frontend.ui_help import metric, section_title
 
 
+def _safe_float(value, default=0.0):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def render():
     st.title("📊 Portfolio Overview")
 
@@ -25,14 +34,48 @@ def render():
         return
 
     import os
-    equity_usd    = account.get("portfolio_value", 0)
-    cash_usd      = account.get("cash", 0)
-    start         = float(os.getenv("STARTING_CAPITAL_EUR", "3000"))
-    fx_rate       = float(os.getenv("EURUSD_RATE", "1.08") or "1.08")
-    ceiling       = account.get("capital_ceiling_eur")
-    alpaca_actual = account.get("alpaca_actual_usd")
-    equity_eur    = equity_usd / fx_rate if fx_rate else equity_usd
-    cash_eur      = cash_usd / fx_rate if fx_rate else cash_usd
+    latest_snapshot = snapshots[0] if snapshots else {}
+    account_error = account.get("error") if isinstance(account, dict) else None
+    start         = _safe_float(os.getenv("STARTING_CAPITAL_EUR", "3000"), 3000.0)
+    fx_rate       = _safe_float(os.getenv("EURUSD_RATE", "1.08"), 1.08) or 1.08
+    ceiling       = account.get("capital_ceiling_eur") if isinstance(account, dict) else None
+    alpaca_actual = account.get("alpaca_actual_usd") if isinstance(account, dict) else None
+
+    if account_error:
+        equity_eur = _safe_float(latest_snapshot.get("total_value_eur"))
+        cash_eur = _safe_float(latest_snapshot.get("cash_eur"))
+        equity_usd = _safe_float(
+            latest_snapshot.get("effective_equity_usd")
+            or latest_snapshot.get("broker_equity_usd")
+            or equity_eur * fx_rate
+        )
+        cash_usd = _safe_float(
+            latest_snapshot.get("effective_cash_usd")
+            or latest_snapshot.get("broker_cash_usd")
+            or cash_eur * fx_rate
+        )
+    else:
+        equity_usd = _safe_float(account.get("portfolio_value") or account.get("equity"))
+        cash_usd = _safe_float(account.get("cash"))
+        equity_eur = equity_usd / fx_rate if fx_rate else equity_usd
+        cash_eur = cash_usd / fx_rate if fx_rate else cash_usd
+
+        if equity_eur <= 0 and _safe_float(latest_snapshot.get("total_value_eur")) > 0:
+            equity_eur = _safe_float(latest_snapshot.get("total_value_eur"))
+            cash_eur = _safe_float(latest_snapshot.get("cash_eur"))
+            equity_usd = _safe_float(latest_snapshot.get("effective_equity_usd") or equity_eur * fx_rate)
+            cash_usd = _safe_float(latest_snapshot.get("effective_cash_usd") or cash_eur * fx_rate)
+
+    if account_error:
+        st.warning(
+            "Live Alpaca account data is unavailable, so Overview is showing the latest stored "
+            f"portfolio snapshot. Broker error: {str(account_error)[:180]}"
+        )
+
+    if positions and isinstance(positions[0], dict) and positions[0].get("error"):
+        st.warning(f"Live Alpaca positions unavailable: {str(positions[0].get('error'))[:180]}")
+        positions = []
+
     cum_pnl_pct   = (equity_eur - start) / start * 100 if start > 0 else 0
     try:
         from backend.signals.engine import detect_regime
@@ -141,7 +184,7 @@ def render():
             df = df.sort_values("snapshot_at")
             df["total_value_display_eur"] = pd.to_numeric(
                 df["total_value_eur"], errors="coerce"
-            ) / fx_rate
+            )
 
             fig = go.Figure()
             fig.add_trace(go.Scatter(
