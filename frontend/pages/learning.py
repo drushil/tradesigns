@@ -175,13 +175,15 @@ def render():
             if trades and len(trades) >= 5:
                 with st.spinner("Claude Sonnet is analysing your trade history..."):
                     from backend.learning.engine import generate_weekly_insights
-                    from database.client import get_daily_reviews, save_learning
+                    from database import client as db_client
                     from datetime import date
+                    get_daily_reviews = getattr(db_client, "get_daily_reviews", None)
+                    daily_reviews = get_daily_reviews(limit=7) if callable(get_daily_reviews) else []
                     insights = generate_weekly_insights(
                         trades,
-                        daily_reviews=get_daily_reviews(limit=7),
+                        daily_reviews=daily_reviews,
                     )
-                    save_learning(date.today(), insights, len(trades))
+                    db_client.save_learning(date.today(), insights, len(trades))
                     st.success(f"Generated {len(insights)} insights!")
                     learnings = [{"insights_json": insights,
                                   "created_at": str(date.today()),
