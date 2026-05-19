@@ -351,7 +351,9 @@ create table if not exists blocked_opportunities (
     action_hint             text check (action_hint in ('BUY','SELL','HOLD',null)),
     composite_score         numeric(6,4),
     block_stage             text not null check (block_stage in (
-                                'gate','ev','ranking','llm','conviction','price')),
+                                'gate','ev','ranking','llm','conviction','price',
+                                'signal_consensus','reward_risk','exposure',
+                                'signal_alignment','regime','time','sizing','position')),
     block_reason            text,
     candidate_rank_score    numeric(7,4),
     breakout_quality        numeric(6,4),

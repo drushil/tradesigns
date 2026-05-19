@@ -26,6 +26,8 @@ def _cfg(**overrides):
         "min_ev_pct": 0.50,
         "min_breakout_quality": 0.45,
         "min_discord_grade": "A",
+        "shadow_min_discord_grade": "A",
+        "us_min_minutes_after_open": 15,
         "allow_short": False,
         "discord_webhook_url": "https://discord.invalid/webhook",
         "fx_rate": 1.08,
@@ -122,6 +124,40 @@ def test_discord_alert_requires_a_grade_or_better():
     assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "A"}, cfg) is True
     assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "A+"}, cfg) is True
     assert advisory._should_send_discord({"mode": "live", "market": "US", "grade": "B"}, cfg) is False
+    assert advisory._should_send_discord({"mode": "shadow", "market": "EU", "grade": "C"}, cfg) is False
+
+
+def test_shadow_trade_card_does_not_overstate_c_grade():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=180.0, side="BUY", atr_pct=0.9, currency="EUR", cfg=cfg, grade="C")
+    signal = {
+        "mode": "shadow",
+        "market": "EU",
+        "data_symbol": "SAP.DE",
+        "broker_display_name": "SAP",
+        "exchange": "Xetra",
+        "currency": "EUR",
+        "side": "BUY",
+        "valid_until_cet": "09:57 Berlin",
+        "time_exit_cet": "16:45 Berlin",
+        "rationale": "C setup, VWAP +0.10",
+        "grade": "C",
+        "composite_score": 0.12,
+        "ev_net_pct": -0.02,
+        "fx_rate": 1.08,
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "LOW-GRADE SHADOW BUY OPPORTUNITY" in card
+    assert "VERY GOOD" not in card
+
+
+def test_shadow_discord_uses_separate_min_grade():
+    cfg = _cfg(shadow_min_discord_grade="B")
+
+    assert advisory._should_send_discord({"mode": "shadow", "market": "EU", "grade": "B"}, cfg) is True
     assert advisory._should_send_discord({"mode": "shadow", "market": "EU", "grade": "C"}, cfg) is False
 
 
@@ -228,6 +264,28 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert advisory._parse_dt(saved[0]["valid_until"]) == datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
     assert len(sent) == 1
     assert "NVDA" in sent[0]
+
+
+def test_run_advisory_cycle_waits_for_us_open_bars(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    saved = []
+    logs = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(us_min_minutes_after_open=15))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 35, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
+    monkeypatch.setattr(advisory, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 0
+    assert saved == []
+    assert any(event == "advisory_live_waiting_for_us_open_bars" for _, event, _ in logs)
 
 
 def test_run_advisory_cycle_suppresses_duplicate_ticker_but_expiry_frees_open_cap(monkeypatch):

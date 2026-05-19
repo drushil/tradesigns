@@ -150,10 +150,77 @@ def _shadow_repeats_from_logs(review_date: date) -> list[dict]:
             "mentions": count,
             "threshold": threshold,
             "review_candidate": count >= threshold,
+            "evidence_days": _shadow_evidence_days(ticker, theme, review_date),
             "reason": candidate.get("reason"),
             "theme_relative_pct": candidate.get("theme_relative_pct"),
         })
     return output
+
+
+def _shadow_evidence_days(ticker: str, theme: str, review_date: date) -> int:
+    ticker = str(ticker or "").upper()
+    theme = str(theme or "")
+    days = set()
+    try:
+        rows = get_logs(level="INFO", limit=1500)
+    except Exception:
+        rows = []
+    for row in rows or []:
+        if row.get("event") != "dynamic_universe_shadow_recommendations":
+            continue
+        logged_at = _parse_dt(row.get("logged_at") or row.get("created_at"))
+        if not logged_at:
+            continue
+        if not (review_date - timedelta(days=6) <= logged_at.date() <= review_date):
+            continue
+        for candidate in (row.get("detail") or {}).get("shadow_candidates") or []:
+            if str(candidate.get("ticker") or "").upper() == ticker and str(candidate.get("theme") or "") == theme:
+                days.add(logged_at.date().isoformat())
+                break
+    return len(days) or 1
+
+
+def _gate_activity_from_logs(review_date: date) -> dict:
+    rows = _rows_for_date(get_logs(limit=1500), review_date, "logged_at", "created_at")
+    gate_events = {
+        "signal_consensus_veto",
+        "reward_risk_veto",
+        "theme_open_exposure_cap",
+        "signal_alignment_veto",
+        "ranging_regime_candidate_block",
+        "trade_gated",
+        "ev_blocked_pending_grade",
+        "grade_ev_override_known_negative_block",
+    }
+    counts = Counter(row.get("event") for row in rows if row.get("event") in gate_events)
+    veto_tickers = Counter()
+    consensus_aligned = Counter()
+    ranging_reasons = Counter()
+    regime_observations = []
+    for row in rows:
+        event = row.get("event")
+        detail = row.get("detail") or {}
+        if event in gate_events and detail.get("ticker"):
+            veto_tickers[str(detail.get("ticker")).upper()] += 1
+        if event == "signal_consensus_veto":
+            consensus_aligned[str(detail.get("aligned_count"))] += 1
+        if event == "ranging_regime_candidate_block":
+            ranging_reasons[str(detail.get("reason") or "unknown")] += 1
+        if event == "cycle_regime_observability":
+            regime_observations.append({
+                "logged_at": row.get("logged_at"),
+                "intraday_regimes": detail.get("intraday_regimes") or {},
+                "spy_trend_score": detail.get("spy_trend_score"),
+                "spy_trend_threshold": detail.get("spy_trend_threshold"),
+                "spy_regime_reason": detail.get("spy_regime_reason"),
+            })
+    return {
+        "event_counts": dict(counts),
+        "top_veto_tickers": [{"ticker": k, "count": v} for k, v in veto_tickers.most_common(12)],
+        "consensus_aligned_count_distribution": dict(consensus_aligned),
+        "ranging_block_reasons": dict(ranging_reasons),
+        "latest_regime_observations": regime_observations[-5:],
+    }
 
 
 def _config_recommendations_from_metrics(metrics: dict) -> list[dict]:
@@ -166,17 +233,24 @@ def _config_recommendations_from_metrics(metrics: dict) -> list[dict]:
         tickers = [t.strip().upper() for t in current.split(",") if t.strip()]
         if ticker in tickers:
             continue
+        evidence_days = int(item.get("evidence_days") or 1)
+        watch_only = evidence_days < 2
         suggested = ",".join(tickers + [ticker]) if tickers else ticker
         recs.append({
-            "category": "universe",
+            "category": "universe_watch" if watch_only else "universe",
             "variable": "TICKER_UNIVERSE",
             "current_value": current,
             "suggested_value": suggested,
-            "command_text": f"gh variable set TICKER_UNIVERSE --body {suggested}",
-            "reason": f"{ticker} appeared in shadow universe {item['mentions']} times for theme {item['theme']}.",
+            "command_text": None if watch_only else f"gh variable set TICKER_UNIVERSE --body {suggested}",
+            "reason": (
+                f"Watch {ticker}: {item['mentions']} shadow mentions for theme {item['theme']} "
+                f"over {evidence_days} evidence day(s). Require 2 days before promotion."
+                if watch_only
+                else f"{ticker} appeared in shadow universe {item['mentions']} times for theme {item['theme']} across {evidence_days} evidence days."
+            ),
             "evidence": item,
-            "confidence": min(0.9, 0.55 + 0.05 * int(item["mentions"])),
-            "evidence_days": 1,
+            "confidence": min(0.9, 0.45 + 0.10 * evidence_days + 0.03 * int(item["mentions"])),
+            "evidence_days": evidence_days,
             "expected_effect": "Expose live ranking to a repeatedly leading sector candidate without bypassing normal gates.",
             "success_metric": "Candidate ranks above existing theme members and produces non-negative net P&L after 3-5 signals.",
             "rollback_condition": "Remove if it produces two same-direction losses or repeatedly fails EV/ranging gates.",
@@ -223,6 +297,7 @@ def collect_daily_metrics(review_date: date = None) -> dict:
         "regime_counts": dict(regime_counts),
         "same_ticker_loss_clusters": same_ticker_losses,
         "blocked_opportunities": _blocked_replay_summary(blocked),
+        "gate_activity": _gate_activity_from_logs(review_date),
         "shadow_universe": _shadow_repeats_from_logs(review_date),
         "advisory": {
             "total": len(advisory),
@@ -392,6 +467,18 @@ def format_discord_review(review: dict, metrics: dict) -> str:
         lines.append("Shadow review: " + ", ".join(parts))
     if bad_avoids:
         lines.append(f"Bad avoids tracked: {len(bad_avoids)} blocked signals likely avoided losses")
+    gate_counts = (metrics.get("gate_activity") or {}).get("event_counts") or {}
+    if gate_counts:
+        important = [
+            ("consensus", gate_counts.get("signal_consensus_veto", 0)),
+            ("ranging", gate_counts.get("ranging_regime_candidate_block", 0)),
+            ("alignment", gate_counts.get("signal_alignment_veto", 0)),
+            ("R:R", gate_counts.get("reward_risk_veto", 0)),
+        ]
+        lines.append(
+            "Gate activity: "
+            + ", ".join(f"{name} {count}" for name, count in important if count)
+        )
 
     recs = review.get("recommendations") or []
     if recs:
@@ -433,8 +520,9 @@ def run_daily_eod_review(review_date: date = None, send_discord: bool = True) ->
         "model": MODEL,
         "error": review.get("error"),
     })
-    if saved and "error" not in saved:
-        insert_config_change_recommendations(saved.get("id"), review_date.isoformat(), recommendations)
+    if recommendations:
+        review_id = saved.get("id") if isinstance(saved, dict) and "error" not in saved else None
+        insert_config_change_recommendations(review_id, review_date.isoformat(), recommendations)
     if send_discord:
         _send_discord(discord_message)
     log_event("INFO", "daily_eod_review_complete", {
