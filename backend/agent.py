@@ -724,6 +724,19 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_a_plus_min_ev_pct", 0.20)
     p.setdefault("ranging_max_notional_eur", 1200)
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
+    p.setdefault("ranging_probe_enabled", True)
+    p.setdefault("ranging_probe_allowed_grades", "A+,A")
+    p.setdefault("ranging_probe_size_multiplier", 0.35)
+    p.setdefault("ranging_probe_min_ev_pct", 0.03)
+    p.setdefault("ranging_probe_min_composite", 0.20)
+    p.setdefault("ranging_probe_min_breakout_quality", 0.35)
+    p.setdefault("ranging_probe_min_aligned_signals", 2)
+    p.setdefault("ranging_probe_min_macd", 0.35)
+    p.setdefault("ranging_probe_min_tape", 0.10)
+    p.setdefault("ranging_probe_min_relative_strength", 0.25)
+    p.setdefault("ranging_probe_max_tape_against", 0.05)
+    p.setdefault("ranging_probe_min_sector_relative_pct", -0.50)
+    p.setdefault("ranging_probe_blocked_themes", "")
     p.setdefault("thesis_invalidated_cooldown_minutes", 75)
     p.setdefault("ranging_stop_loss_cooldown_minutes", 90)
     p.setdefault("min_reward_risk_ratio", 1.5)
@@ -777,6 +790,66 @@ def _apply_execution_overrides(profile: dict) -> dict:
         )
     if os.getenv("RANGING_A_PLUS_MIN_EV_PCT"):
         p["ranging_a_plus_min_ev_pct"] = _env_float("RANGING_A_PLUS_MIN_EV_PCT", p["ranging_a_plus_min_ev_pct"])
+    if os.getenv("RANGING_A_GRADE_MIN_BREAKOUT_QUALITY"):
+        p["ranging_a_grade_min_breakout_quality"] = _env_float(
+            "RANGING_A_GRADE_MIN_BREAKOUT_QUALITY",
+            p["ranging_a_grade_min_breakout_quality"],
+        )
+    if os.getenv("RANGING_A_GRADE_MIN_EV_PCT"):
+        p["ranging_a_grade_min_ev_pct"] = _env_float("RANGING_A_GRADE_MIN_EV_PCT", p["ranging_a_grade_min_ev_pct"])
+    if os.getenv("RANGING_PROBE_ENABLED") is not None:
+        p["ranging_probe_enabled"] = _env_bool("RANGING_PROBE_ENABLED", bool(p["ranging_probe_enabled"]))
+    if os.getenv("RANGING_PROBE_ALLOWED_GRADES"):
+        p["ranging_probe_allowed_grades"] = _env_value(
+            "RANGING_PROBE_ALLOWED_GRADES",
+            str(p["ranging_probe_allowed_grades"]),
+        )
+    if os.getenv("RANGING_PROBE_SIZE_MULTIPLIER"):
+        p["ranging_probe_size_multiplier"] = _env_float(
+            "RANGING_PROBE_SIZE_MULTIPLIER",
+            p["ranging_probe_size_multiplier"],
+        )
+    if os.getenv("RANGING_PROBE_MIN_EV_PCT"):
+        p["ranging_probe_min_ev_pct"] = _env_float("RANGING_PROBE_MIN_EV_PCT", p["ranging_probe_min_ev_pct"])
+    if os.getenv("RANGING_PROBE_MIN_COMPOSITE"):
+        p["ranging_probe_min_composite"] = _env_float(
+            "RANGING_PROBE_MIN_COMPOSITE",
+            p["ranging_probe_min_composite"],
+        )
+    if os.getenv("RANGING_PROBE_MIN_BREAKOUT_QUALITY"):
+        p["ranging_probe_min_breakout_quality"] = _env_float(
+            "RANGING_PROBE_MIN_BREAKOUT_QUALITY",
+            p["ranging_probe_min_breakout_quality"],
+        )
+    if os.getenv("RANGING_PROBE_MIN_ALIGNED_SIGNALS"):
+        p["ranging_probe_min_aligned_signals"] = _env_int(
+            "RANGING_PROBE_MIN_ALIGNED_SIGNALS",
+            int(p["ranging_probe_min_aligned_signals"]),
+        )
+    if os.getenv("RANGING_PROBE_MIN_MACD"):
+        p["ranging_probe_min_macd"] = _env_float("RANGING_PROBE_MIN_MACD", p["ranging_probe_min_macd"])
+    if os.getenv("RANGING_PROBE_MIN_TAPE"):
+        p["ranging_probe_min_tape"] = _env_float("RANGING_PROBE_MIN_TAPE", p["ranging_probe_min_tape"])
+    if os.getenv("RANGING_PROBE_MIN_RELATIVE_STRENGTH"):
+        p["ranging_probe_min_relative_strength"] = _env_float(
+            "RANGING_PROBE_MIN_RELATIVE_STRENGTH",
+            p["ranging_probe_min_relative_strength"],
+        )
+    if os.getenv("RANGING_PROBE_MAX_TAPE_AGAINST"):
+        p["ranging_probe_max_tape_against"] = _env_float(
+            "RANGING_PROBE_MAX_TAPE_AGAINST",
+            p["ranging_probe_max_tape_against"],
+        )
+    if os.getenv("RANGING_PROBE_MIN_SECTOR_RELATIVE_PCT"):
+        p["ranging_probe_min_sector_relative_pct"] = _env_float(
+            "RANGING_PROBE_MIN_SECTOR_RELATIVE_PCT",
+            p["ranging_probe_min_sector_relative_pct"],
+        )
+    if os.getenv("RANGING_PROBE_BLOCKED_THEMES"):
+        p["ranging_probe_blocked_themes"] = _env_value(
+            "RANGING_PROBE_BLOCKED_THEMES",
+            str(p["ranging_probe_blocked_themes"]),
+        )
     if os.getenv("RANGING_MAX_NOTIONAL_EUR"):
         p["ranging_max_notional_eur"] = _env_float("RANGING_MAX_NOTIONAL_EUR", p["ranging_max_notional_eur"])
     if os.getenv("THESIS_INVALIDATED_COOLDOWN_MINUTES"):
@@ -1093,9 +1166,9 @@ def _apply_sector_momentum_to_candidate(candidate: dict, momentum: dict) -> dict
     setup_context["theme"] = theme
     setup_context["sector_momentum_multiplier"] = round(multiplier, 4)
     setup_context["base_candidate_rank_score"] = round(base_rank, 4)
+    setup_context["sector_momentum"] = (momentum or {}).get("themes", {}).get(theme, {})
     if multiplier > 1.0:
         setup_context["candidate_rank_score"] = round(base_rank * multiplier, 4)
-        setup_context["sector_momentum"] = (momentum or {}).get("themes", {}).get(theme, {})
     return candidate
 
 
@@ -1426,6 +1499,136 @@ def _theme_open_exposure_block(ticker: str, profile: dict) -> Optional[dict]:
     return None
 
 
+def _csv_upper_set(value: str) -> set[str]:
+    return {item.strip().upper() for item in str(value or "").split(",") if item.strip()}
+
+
+def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
+                            grade: str, profile: dict, block_reason: str,
+                            signals_snap: dict = None) -> dict:
+    """Decide whether a strict ranging-regime block should become a tiny probe."""
+    setup_context = setup_context or {}
+    ev_result = ev_result or {}
+    signals_snap = signals_snap or {}
+    grade = str(grade or "").upper()
+    action = str(setup_context.get("action") or "BUY").upper()
+    direction = 1 if action == "BUY" else -1
+    allowed_grades = _csv_upper_set(profile.get("ranging_probe_allowed_grades", "A+,A"))
+    theme = str(setup_context.get("theme") or _ticker_theme(ticker)).lower()
+    blocked_themes = {item.lower() for item in _csv_upper_set(profile.get("ranging_probe_blocked_themes", ""))}
+
+    def reject(reason: str, probe_eligible: bool = True, **detail) -> dict:
+        payload = {
+            "allowed": False,
+            "probe_eligible": probe_eligible,
+            "reason_not_probed": reason,
+            "block_reason": block_reason,
+            "grade": grade,
+            "theme": theme,
+            **detail,
+        }
+        setup_context["probe_eligible"] = probe_eligible
+        setup_context["reason_not_probed"] = reason
+        setup_context["ranging_probe_detail"] = payload
+        return payload
+
+    if not bool(profile.get("ranging_probe_enabled", False)):
+        return reject("ranging_probe_disabled", probe_eligible=False)
+    if grade not in allowed_grades:
+        return reject("grade_not_probe_allowed", allowed_grades=sorted(allowed_grades))
+    if block_reason not in {
+        "ranging_regime_grade_veto",
+        "ranging_regime_a_plus_quality_veto",
+        "ranging_regime_a_grade_quality_veto",
+    }:
+        return reject("block_reason_not_probeable")
+    if theme in blocked_themes:
+        return reject("theme_probe_blocked")
+
+    try:
+        net_ev = float(ev_result.get("net_ev_pct"))
+    except (TypeError, ValueError):
+        net_ev = None
+    min_ev = float(profile.get("ranging_probe_min_ev_pct", 0.03))
+    if net_ev is None or net_ev < min_ev:
+        return reject("ev_below_probe_min", net_ev_pct=net_ev, min_ev_pct=min_ev)
+
+    composite = abs(float(setup_context.get("composite") or 0))
+    min_composite = float(profile.get("ranging_probe_min_composite", 0.20))
+    if composite < min_composite:
+        return reject("composite_below_probe_min", composite=round(composite, 4), min_composite=min_composite)
+
+    breakout_quality = float(setup_context.get("breakout_quality") or 0)
+    min_breakout = float(profile.get("ranging_probe_min_breakout_quality", 0.35))
+    if breakout_quality < min_breakout:
+        return reject(
+            "breakout_quality_below_probe_min",
+            breakout_quality=round(breakout_quality, 4),
+            min_breakout_quality=min_breakout,
+        )
+
+    sector_momentum = setup_context.get("sector_momentum") or {}
+    relative_pct = sector_momentum.get("relative_pct")
+    if relative_pct is not None:
+        min_relative = float(profile.get("ranging_probe_min_sector_relative_pct", -0.50))
+        if float(relative_pct) < min_relative:
+            return reject(
+                "sector_relative_strength_too_weak",
+                sector_relative_pct=round(float(relative_pct), 4),
+                min_sector_relative_pct=min_relative,
+            )
+
+    directional = {
+        "macd_crossover": _signal_score(signals_snap, "macd_crossover") * direction,
+        "tape_aggression": _signal_score(signals_snap, "tape_aggression") * direction,
+        "relative_strength": _signal_score(signals_snap, "relative_strength") * direction,
+    }
+    max_tape_against = abs(float(profile.get("ranging_probe_max_tape_against", 0.05)))
+    if directional["tape_aggression"] < -max_tape_against:
+        return reject(
+            "tape_opposes_probe",
+            tape_aggression=round(directional["tape_aggression"], 4),
+            max_tape_against=-max_tape_against,
+        )
+
+    thresholds = {
+        "macd_crossover": float(profile.get("ranging_probe_min_macd", 0.35)),
+        "tape_aggression": float(profile.get("ranging_probe_min_tape", 0.10)),
+        "relative_strength": float(profile.get("ranging_probe_min_relative_strength", 0.25)),
+    }
+    aligned = [name for name, score in directional.items() if score >= thresholds[name]]
+    min_aligned = int(profile.get("ranging_probe_min_aligned_signals", 2))
+    if len(aligned) < min_aligned:
+        return reject(
+            "too_few_probe_momentum_signals",
+            aligned_signals=aligned,
+            aligned_count=len(aligned),
+            min_aligned_signals=min_aligned,
+            directional_scores={k: round(v, 4) for k, v in directional.items()},
+        )
+
+    size_multiplier = float(profile.get("ranging_probe_size_multiplier", 0.35))
+    current_multiplier = float(ev_result.get("size_multiplier") or 1.0)
+    ev_result["size_multiplier"] = min(current_multiplier, size_multiplier)
+    ev_result["ev_decision"] = "ranging_regime_probe"
+    ev_result["decision"] = "proceed"
+    ev_result["ranging_probe"] = True
+    setup_context["ranging_probe"] = True
+    setup_context["probe_eligible"] = True
+    setup_context["reason_not_probed"] = None
+    setup_context["ranging_probe_detail"] = {
+        "grade": grade,
+        "block_reason_overridden": block_reason,
+        "aligned_signals": aligned,
+        "directional_scores": {k: round(v, 4) for k, v in directional.items()},
+        "net_ev_pct": net_ev,
+        "size_multiplier": ev_result["size_multiplier"],
+        "theme": theme,
+        "sector_relative_pct": relative_pct,
+    }
+    return {"allowed": True, **setup_context["ranging_probe_detail"]}
+
+
 def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                           setup_grade: Optional[SetupGrade], profile: dict,
                           signals_snap: dict = None) -> Optional[dict]:
@@ -1437,12 +1640,20 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
     net_ev = float(net_ev) if net_ev is not None else None
     min_grade = str(profile.get("ranging_min_grade_required", "A+")).upper()
     if grade_sort_key(grade or "C") < grade_sort_key(min_grade):
-        return {
+        probe = _ranging_probe_decision(
+            ticker, setup_context, ev_result, grade, profile,
+            "ranging_regime_grade_veto", signals_snap,
+        )
+        if probe.get("allowed"):
+            return None
+        block = {
             "reason": "ranging_regime_grade_veto",
             "grade": grade,
             "min_grade": min_grade,
             "breakout_quality": round(breakout_quality, 4),
         }
+        block["probe"] = probe
+        return block
 
     if _is_leveraged_etf(ticker, profile):
         min_lev_ev = float(profile.get("ranging_leveraged_min_ev_pct", 0.25))
@@ -1453,32 +1664,19 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                 "min_ev_pct": min_lev_ev,
             }
 
-    # Helper: check if this setup qualifies for the ranging probe lane.
-    # Probe trades bypass the strict quality veto when momentum signals
-    # (relative strength + tape) confirm direction and EV is strictly positive.
-    # They are sized small by the existing ranging_regime_size_multiplier.
-    def _probe_lane_qualifies(min_rel_strength: float, min_ev_probe: float) -> bool:
-        if net_ev is None or net_ev <= min_ev_probe:
-            return False
-        snap = signals_snap or {}
-        rel_strength = float((snap.get("relative_strength") or {}).get("score", 0))
-        tape = float((snap.get("tape_aggression") or {}).get("score", 0))
-        action = str((setup_context or {}).get("action") or "BUY").upper()
-        direction = 1 if action == "BUY" else -1
-        return (rel_strength * direction) >= min_rel_strength and (tape * direction) >= 0
-
     if grade == "A+":
         composite = abs(float((setup_context or {}).get("composite") or 0))
         min_composite = float(profile.get("ranging_a_plus_min_composite", 0.25))
         min_breakout = float(profile.get("ranging_a_plus_min_breakout_quality", 0.70))
         min_ev = float(profile.get("ranging_a_plus_min_ev_pct", 0.20))
         if composite < min_composite or breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
-            # Probe lane: A+ with strictly positive EV and confirmed momentum
-            # (rel_strength >= 0.05 in trade direction, tape not opposed) bypasses
-            # the strict breakout/EV bar and proceeds at reduced probe size.
-            if _probe_lane_qualifies(min_rel_strength=0.05, min_ev_probe=0.0):
+            probe = _ranging_probe_decision(
+                ticker, setup_context, ev_result, grade, profile,
+                "ranging_regime_a_plus_quality_veto", signals_snap,
+            )
+            if probe.get("allowed"):
                 return None
-            return {
+            block = {
                 "reason": "ranging_regime_a_plus_quality_veto",
                 "grade": grade,
                 "composite": round(composite, 4),
@@ -1488,16 +1686,20 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                 "net_ev_pct": net_ev,
                 "min_ev_pct": min_ev,
             }
+            block["probe"] = probe
+            return block
 
     if grade == "A":
         min_breakout = float(profile.get("ranging_a_grade_min_breakout_quality", 0.80))
         min_ev = float(profile.get("ranging_a_grade_min_ev_pct", 0.25))
         if breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
-            # Probe lane: A grade needs a higher rel_strength bar (0.10) and
-            # at least 0.03% net EV to qualify.
-            if _probe_lane_qualifies(min_rel_strength=0.10, min_ev_probe=0.03):
+            probe = _ranging_probe_decision(
+                ticker, setup_context, ev_result, grade, profile,
+                "ranging_regime_a_grade_quality_veto", signals_snap,
+            )
+            if probe.get("allowed"):
                 return None
-            return {
+            block = {
                 "reason": "ranging_regime_a_grade_quality_veto",
                 "grade": grade,
                 "breakout_quality": round(breakout_quality, 4),
@@ -1505,6 +1707,8 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                 "net_ev_pct": net_ev,
                 "min_ev_pct": min_ev,
             }
+            block["probe"] = probe
+            return block
 
     return None
 
@@ -1679,8 +1883,8 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             "atr_pct": (setup_context or {}).get("atr_pct"),
             "volatility_bucket": (setup_context or {}).get("volatility_regime"),
             "is_leveraged_etf": (setup_context or {}).get("is_leveraged_etf"),
-            "probe_eligible": False,
-            "reason_not_probed": "probe_not_implemented",
+            "probe_eligible": bool((setup_context or {}).get("probe_eligible", False)),
+            "reason_not_probed": (setup_context or {}).get("reason_not_probed") or "not_probe_eligible",
         }
         result = insert_blocked_opportunity(payload)
         if result.get("error"):
@@ -2797,6 +3001,8 @@ def run_signal_cycle():
                     signals_snap=candidate.get("signals_snap"),
                 )
                 if ranging_block:
+                    if ranging_block.get("probe"):
+                        log_event("INFO", "ranging_probe_rejected", ranging_block["probe"])
                     log_event("INFO", "ranging_regime_candidate_block", {
                         "ticker": t,
                         "composite": round(float(candidate.get("composite") or 0), 4),
@@ -2810,6 +3016,12 @@ def run_signal_cycle():
                         ev_result=candidate.get("ev_result"),
                     )
                     continue
+                if candidate["setup_context"].get("ranging_probe"):
+                    log_event("INFO", "ranging_probe_allowed", {
+                        "ticker": t,
+                        "composite": round(float(candidate.get("composite") or 0), 4),
+                        **candidate["setup_context"].get("ranging_probe_detail", {}),
+                    })
 
                 # Leveraged ETFs require A+ grade — drop anything weaker
                 if _is_leveraged_etf(t, effective_profile) and setup_grade.grade != "A+":
