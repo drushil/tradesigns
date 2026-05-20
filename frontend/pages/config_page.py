@@ -3,11 +3,10 @@ import streamlit as st
 import os
 from frontend.ticker_profiles import get_ticker_profile, ticker_profile_html
 from frontend.ui_help import column_config, info_label, section_title
+from frontend.ui_theme import page_header, status_pill
 
 
 def render():
-    st.title("⚙️ Configuration")
-
     profile_name = os.getenv("RISK_PROFILE", "moderate")
     horizon      = os.getenv("INVESTMENT_HORIZON", "short")
     tickers      = os.getenv("TICKER_UNIVERSE", "SPY,QQQ,GLD")
@@ -15,6 +14,17 @@ def render():
 
     from config.risk_profiles import get_profile, RISK_PROFILES
     profile = get_profile(profile_name)
+
+    page_header(
+        "Configuration",
+        "Read-only view of active risk profile, ticker universe, and signal priors.",
+        eyebrow="Runtime Config",
+        pills=[
+            status_pill(profile_name, "info"),
+            status_pill(horizon, "neutral"),
+            status_pill(f"€{capital} capital", "positive"),
+        ],
+    )
 
     section_title("Active Risk Profile", level=3)
     c1, c2 = st.columns(2)

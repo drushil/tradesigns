@@ -5,6 +5,7 @@ import plotly.express as px
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from frontend.ui_help import column_config, help_text, info_label, metric, section_header
+from frontend.ui_theme import page_header, status_pill
 
 
 # ── Colour palette ────────────────────────────────────────────────────────────
@@ -13,8 +14,6 @@ _GRADE_ORDER = ["A+", "A", "B", "C"]
 
 
 def render():
-    st.title("🏆 Setup Grading")
-
     try:
         from database.client import get_client
         client = get_client()
@@ -33,6 +32,16 @@ def render():
         )
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    page_header(
+        "Setup Grading",
+        "Adaptive setup quality, percentile baselines, and alpha leakage from blocked opportunities.",
+        eyebrow="Quality Control",
+        pills=[
+            status_pill(f"{days}d look-back", "info"),
+            status_pill(f"{min_fav:.1f}% leakage bar", "warning"),
+        ],
+    )
 
     # ── Load signals with grade ───────────────────────────────────────────────
     try:

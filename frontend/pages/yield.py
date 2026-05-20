@@ -5,14 +5,22 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import datetime
 from frontend.ui_help import column_config, metric, section_title
+from frontend.ui_theme import page_header, status_pill
 
 
 def render():
-    st.title("💰 Yield & Sweep")
-    st.caption("Cash sweep simulation · Dividend calendar · Live mode readiness")
-
     broker_env = os.getenv("BROKER_ENV", "alpaca_paper")
     is_live    = broker_env == "ibkr_live"
+
+    page_header(
+        "Yield & Sweep",
+        "Cash sweep simulation, dividend calendar, and live-mode readiness.",
+        eyebrow="Cash Operations",
+        pills=[
+            status_pill("Live mode" if is_live else "Simulation mode", "positive" if is_live else "warning"),
+            status_pill(broker_env, "info"),
+        ],
+    )
 
     if is_live:
         st.success("🟢 **LIVE MODE** — Cash sweeps execute via IBKR")

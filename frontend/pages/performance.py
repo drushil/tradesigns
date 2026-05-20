@@ -4,14 +4,12 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 from frontend.ui_help import column_config, metric, section_title
+from frontend.ui_theme import page_header, panel_html, status_pill
 
 MIN_TRADES = 20
 
 
 def render():
-    st.title("📈 Performance Metrics")
-    st.caption("Strategy health · All metrics computed from closed trades in Supabase")
-
     try:
         from database.client import get_recent_trades
         trades = get_recent_trades(days=90)
@@ -20,6 +18,12 @@ def render():
         return
 
     if len(trades) < MIN_TRADES:
+        page_header(
+            "Performance Metrics",
+            "Strategy health and validation metrics from closed trades in Supabase.",
+            eyebrow="Risk Analytics",
+            pills=[status_pill(f"{len(trades)}/{MIN_TRADES} trades", "warning")],
+        )
         st.markdown(
             f"""
             <div style="
@@ -63,6 +67,16 @@ def render():
     avg_r         = r_data["avg_r"]
     expectancy    = exp_data["expectancy_pct"] if exp_data else None
     win_rate      = exp_data["win_rate"]        if exp_data else None
+
+    page_header(
+        "Performance Metrics",
+        "Strategy health, expectancy, R-multiple behavior, costs, and validation checks.",
+        eyebrow="Risk Analytics",
+        pills=[
+            status_pill(f"{len(trades)} trades", "info"),
+            status_pill(f"{health['status']} health", "positive" if health["status"] == "GREEN" else ("warning" if health["status"] == "AMBER" else "negative")),
+        ],
+    )
 
     # ── Section 1: Strategy Health Badge ──────────────────────────────────────
     _STATUS_COLORS = {

@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from frontend.ui_help import metric, section_title, column_config
+from frontend.ui_theme import page_header, status_pill
 
 
 def _as_dict(value) -> dict:
@@ -72,8 +73,6 @@ def _review_recommendations(review: dict, row: dict) -> list[dict]:
 
 
 def render():
-    st.title("📅 EOD Review")
-
     try:
         from database.client import get_daily_reviews
 
@@ -95,6 +94,17 @@ def render():
     gate_activity = _as_dict(metrics_json.get("gate_activity"))
     shadow = _as_list(metrics_json.get("shadow_universe"))
     recommendations = _review_recommendations(review_json, latest)
+
+    page_header(
+        "EOD Review",
+        "Post-market evidence for trades, gate activity, missed winners, and recommended config changes.",
+        eyebrow="Daily Review",
+        pills=[
+            status_pill(str(latest.get("review_date", "latest")), "info"),
+            status_pill(f"{int(near_miss.get('runner_count') or 0)} missed runners", "warning"),
+            status_pill(f"{len(recommendations)} recommendations", "positive" if recommendations else "neutral"),
+        ],
+    )
 
     c1, c2, c3, c4, c5 = st.columns(5)
     metric(c1, "Review Date", latest.get("review_date", "—"))

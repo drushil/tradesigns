@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 from frontend.ui_help import button, column_config, metric, section_title
+from frontend.ui_theme import page_header, status_pill
 
 
 SIGNAL_LABELS = {
@@ -22,9 +23,6 @@ SIGNAL_COLORS = ["#00d4a0", "#6c63ff", "#ffd166", "#ff5c5c",
 
 
 def render():
-    st.title("🧠 Learning Engine")
-    st.caption("How the agent learns from every trade to improve signal weights")
-
     try:
         from database.client import get_weight_history, get_learnings, get_recent_trades
         weight_history = get_weight_history("global", limit=60)
@@ -33,6 +31,17 @@ def render():
     except Exception as e:
         st.error(f"DB error: {e}")
         return
+
+    page_header(
+        "Learning Engine",
+        "Signal weights, attribution, expected-value gates, blocked replay, and weekly AI insights.",
+        eyebrow="Adaptive Memory",
+        pills=[
+            status_pill(f"{len(weight_history)} weight rows", "info"),
+            status_pill(f"{len(learnings)} learnings", "positive" if learnings else "neutral"),
+            status_pill(f"{len(trades)} trades", "neutral"),
+        ],
+    )
 
     # ── Current weights ────────────────────────────────────────────────────
     section_title("Current Signal Weights", level=3, help_key="Weights update after each trade via Exponential Weight Averaging (EWA).")

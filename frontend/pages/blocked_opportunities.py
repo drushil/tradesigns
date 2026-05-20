@@ -15,7 +15,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from frontend.ui_help import column_config, metric, section_title
+from frontend.ui_help import column_config
+from frontend.ui_theme import (
+    ACCENT,
+    INFO,
+    WARNING,
+    apply_plotly_theme,
+    metric_card,
+    modern_section,
+    page_header,
+    status_pill,
+)
 
 
 STAGE_ORDER = [
@@ -238,7 +248,7 @@ def _filter_df(df: pd.DataFrame, tickers: list[str], stages: list[str], severiti
 
 
 def _render_stage_breakdown(df: pd.DataFrame):
-    section_title("Today's Blocks By Gate Stage", help_key="Stage")
+    modern_section("Blocks By Gate Stage", "Where candidates stopped before becoming trades.")
     start, end = _today_local_bounds()
     today = df[(df["created_at_ts"] >= start) & (df["created_at_ts"] <= end)].copy()
     count_label = "Today blocked"
@@ -256,10 +266,10 @@ def _render_stage_breakdown(df: pd.DataFrame):
     breakdown = "/".join(str(count) for _, count in ordered)
 
     c1, c2, c3, c4 = st.columns(4)
-    metric(c1, count_label, f"{len(today):,}")
-    metric(c2, "Stage breakdown", breakdown)
-    metric(c3, "Replayed today", f"{today['replay_checked_at'].notna().sum():,}")
-    metric(c4, "Runner blocks", f"{(today['runner_severity'] == 'runner').sum():,}")
+    metric_card(c1, count_label, f"{len(today):,}", tone="info")
+    metric_card(c2, "Stage breakdown", breakdown)
+    metric_card(c3, "Replayed", f"{today['replay_checked_at'].notna().sum():,}")
+    metric_card(c4, "Runner blocks", f"{(today['runner_severity'] == 'runner').sum():,}", tone="warning")
 
     stage_df = pd.DataFrame(
         [
@@ -281,17 +291,10 @@ def _render_stage_breakdown(df: pd.DataFrame):
             y=stage_df["stage"],
             orientation="h",
             text=stage_df["blocks"].map(lambda v: f"{v:,}"),
-            marker_color="#00d4a0",
+            marker_color=ACCENT,
         ))
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            height=max(280, 28 * len(stage_df)),
-            margin=dict(l=0, r=0, t=8, b=0),
-            xaxis=dict(gridcolor="#1a1a1a"),
-            yaxis=dict(gridcolor="#1a1a1a", autorange="reversed"),
-        )
+        apply_plotly_theme(fig, height=max(280, 28 * len(stage_df)))
+        fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, width="stretch")
     with col_table:
         _dataframe(stage_df)
@@ -314,15 +317,15 @@ def _render_eod_gate_activity():
     if not event_counts:
         return
 
-    section_title("Latest EOD Gate Activity")
+    modern_section("Latest EOD Gate Activity", "Log-derived gate counts from the latest daily review.")
     ordered = sorted(event_counts.items(), key=lambda item: item[1], reverse=True)
     review_date = latest.get("review_date") or "latest review"
     breakdown = "/".join(str(count) for _, count in ordered)
 
     c1, c2, c3 = st.columns(3)
-    metric(c1, "Review date", review_date)
-    metric(c2, "Gate events", f"{sum(int(v or 0) for _, v in ordered):,}")
-    metric(c3, "Event breakdown", breakdown)
+    metric_card(c1, "Review date", review_date)
+    metric_card(c2, "Gate events", f"{sum(int(v or 0) for _, v in ordered):,}", tone="warning")
+    metric_card(c3, "Event breakdown", breakdown)
 
     col_chart, col_table = st.columns([1.2, 1])
     with col_chart:
@@ -331,17 +334,10 @@ def _render_eod_gate_activity():
             y=[item[0] for item in ordered],
             orientation="h",
             text=[f"{item[1]:,}" for item in ordered],
-            marker_color="#facc15",
+            marker_color=WARNING,
         ))
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            height=max(260, 30 * len(ordered)),
-            margin=dict(l=0, r=0, t=8, b=0),
-            xaxis=dict(gridcolor="#1a1a1a"),
-            yaxis=dict(gridcolor="#1a1a1a", autorange="reversed"),
-        )
+        apply_plotly_theme(fig, height=max(260, 30 * len(ordered)))
+        fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, width="stretch")
     with col_table:
         event_df = pd.DataFrame([{"event": k, "count": v} for k, v in ordered])
@@ -349,12 +345,12 @@ def _render_eod_gate_activity():
 
     top_veto = _as_list(gate.get("top_veto_tickers"))
     if top_veto:
-        st.markdown("##### Most Vetoed In Latest Review")
+        modern_section("Most Vetoed In Latest Review")
         _dataframe(pd.DataFrame(top_veto).head(12))
 
 
 def _render_missed_runners(df: pd.DataFrame):
-    section_title("Missed Runners")
+    modern_section("Missed Runners", "Blocked candidates whose replay later moved favorably.")
     checked = df[df["replay_checked_at"].notna()].copy()
     runners = checked[
         (checked["runner_severity"].isin(["runner", "minor"]))
@@ -380,7 +376,7 @@ def _render_missed_runners(df: pd.DataFrame):
 
 
 def _render_near_threshold(df: pd.DataFrame):
-    section_title("Near-Threshold Distribution")
+    modern_section("Near-Threshold Distribution", "Candidates that landed close to a configured gate threshold.")
     near = df[df["near_threshold"]].copy()
     if near.empty:
         st.info("No near-threshold blocks recorded in the current window.")
@@ -388,10 +384,10 @@ def _render_near_threshold(df: pd.DataFrame):
 
     checked = near[near["replay_checked_at"].notna()]
     c1, c2, c3, c4 = st.columns(4)
-    metric(c1, "Near threshold", f"{len(near):,}")
-    metric(c2, "Checked", f"{len(checked):,}")
-    metric(c3, "Runners", f"{(near['runner_severity'] == 'runner').sum():,}")
-    metric(c4, "Median gap", f"{checked['threshold_gap'].median():.4f}" if len(checked) else "—")
+    metric_card(c1, "Near threshold", f"{len(near):,}", tone="info")
+    metric_card(c2, "Checked", f"{len(checked):,}")
+    metric_card(c3, "Runners", f"{(near['runner_severity'] == 'runner').sum():,}", tone="warning")
+    metric_card(c4, "Median gap", f"{checked['threshold_gap'].median():.4f}" if len(checked) else "—")
 
     bins = pd.cut(
         pd.to_numeric(near["threshold_gap"], errors="coerce"),
@@ -415,16 +411,8 @@ def _render_near_threshold(df: pd.DataFrame):
                 y=subset["blocks"],
                 name=severity or "unchecked/neutral",
             ))
-        fig.update_layout(
-            template="plotly_dark",
-            barmode="stack",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            height=260,
-            margin=dict(l=0, r=0, t=8, b=0),
-            yaxis=dict(gridcolor="#1a1a1a"),
-            xaxis=dict(gridcolor="#1a1a1a"),
-        )
+        apply_plotly_theme(fig, height=270)
+        fig.update_layout(barmode="stack")
         st.plotly_chart(fig, width="stretch")
 
     cols = [
@@ -446,7 +434,7 @@ def _render_near_threshold(df: pd.DataFrame):
 
 
 def _render_direction_errors(df: pd.DataFrame):
-    section_title("Direction Error Candidates")
+    modern_section("Direction Error Candidates", "Blocked setups whose replay moved strongly against the hinted direction.")
     checked = df[df["replay_checked_at"].notna()].copy()
     candidates = checked[
         (checked["max_adverse_pct"].fillna(0) <= -2.0)
@@ -475,7 +463,7 @@ def _render_direction_errors(df: pd.DataFrame):
 
 
 def _render_most_vetoed(df: pd.DataFrame):
-    section_title("Tickers Most Vetoed")
+    modern_section("Tickers Most Vetoed", "Symbols repeatedly stopped by gates, useful for unfair-block checks.")
     if df.empty:
         st.info("No veto rows in the current window.")
         return
@@ -503,17 +491,10 @@ def _render_most_vetoed(df: pd.DataFrame):
             y=top["ticker"],
             orientation="h",
             text=top["blocks"].map(lambda v: f"{v:,}"),
-            marker_color="#7dd3fc",
+            marker_color=INFO,
         ))
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            height=320,
-            margin=dict(l=0, r=0, t=8, b=0),
-            xaxis=dict(gridcolor="#1a1a1a"),
-            yaxis=dict(gridcolor="#1a1a1a", autorange="reversed"),
-        )
+        apply_plotly_theme(fig, height=320)
+        fig.update_yaxes(autorange="reversed")
         st.plotly_chart(fig, width="stretch")
     with col_table:
         display = grouped.head(30).copy()
@@ -523,8 +504,6 @@ def _render_most_vetoed(df: pd.DataFrame):
 
 
 def render():
-    st.title("🚧 Blocked Opportunities")
-
     with st.sidebar:
         st.markdown("---")
         st.markdown("#### Block Filters")
@@ -545,6 +524,17 @@ def render():
     stages = sorted((s for s in df["block_stage"].dropna().unique()), key=_stage_sort_key)
     severities = sorted(s for s in df["runner_severity"].dropna().unique() if s)
 
+    page_header(
+        "Blocked Opportunities",
+        "The full decision surface behind non-trades: gate stops, replayed runners, near-threshold cases, and repeated ticker vetoes.",
+        eyebrow="Decision Observatory",
+        pills=[
+            status_pill(f"{len(df):,} blocked", "info"),
+            status_pill(f"{df['replay_checked_at'].notna().sum():,} replayed", "positive" if df["replay_checked_at"].notna().any() else "neutral"),
+            status_pill(f"{(df['runner_severity'] == 'runner').sum():,} runners", "warning"),
+        ],
+    )
+
     c_filter1, c_filter2, c_filter3 = st.columns(3)
     with c_filter1:
         selected_tickers = st.multiselect("Ticker", tickers, default=[])
@@ -557,11 +547,11 @@ def render():
     checked = filtered[filtered["replay_checked_at"].notna()]
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    metric(k1, "Blocked", f"{len(filtered):,}", help_key="Total blocked")
-    metric(k2, "Replayed", f"{len(checked):,}")
-    metric(k3, "Missed runners", f"{(filtered['runner_severity'] == 'runner').sum():,}")
-    metric(k4, "Near threshold", f"{filtered['near_threshold'].sum():,}")
-    metric(k5, "Tickers", f"{filtered['ticker'].nunique():,}")
+    metric_card(k1, "Blocked", f"{len(filtered):,}", tone="info")
+    metric_card(k2, "Replayed", f"{len(checked):,}", tone="positive" if len(checked) else "neutral")
+    metric_card(k3, "Missed runners", f"{(filtered['runner_severity'] == 'runner').sum():,}", tone="warning")
+    metric_card(k4, "Near threshold", f"{filtered['near_threshold'].sum():,}")
+    metric_card(k5, "Tickers", f"{filtered['ticker'].nunique():,}")
 
     _render_stage_breakdown(filtered)
     st.markdown("---")

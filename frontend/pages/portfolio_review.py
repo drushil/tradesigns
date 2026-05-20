@@ -12,6 +12,7 @@ import plotly.express as px
 
 from database.client import get_portfolio_reviews
 from frontend.ui_help import metric, section_title, selectbox
+from frontend.ui_theme import page_header, status_pill
 
 # ── Colour map for recommendations ───────────────────────────────────────────
 _REC_COLOR = {
@@ -29,18 +30,23 @@ _THESIS_COLOR = {
 
 
 def render():
-    st.title("📋 Weekly Portfolio Review")
-    st.caption(
-        "Advisory layer — observation and recommendation only. "
-        "No trades are placed automatically. "
-        "Execution authority unlocks after 8–10 weeks of validated recommendations."
-    )
-
     reviews = get_portfolio_reviews(limit=12)
 
     if not reviews:
+        page_header(
+            "Weekly Portfolio Review",
+            "Advisory portfolio observations, recommendation mix, thesis checks, and exposure alerts.",
+            eyebrow="Portfolio Advisory",
+        )
         st.info("No portfolio reviews yet. The first review runs Sunday 17:00 UTC.")
         return
+
+    page_header(
+        "Weekly Portfolio Review",
+        "Advisory observations only: no automatic portfolio trades are placed from this page.",
+        eyebrow="Portfolio Advisory",
+        pills=[status_pill(f"{len(reviews)} reviews", "neutral")],
+    )
 
     # ── Review selector ───────────────────────────────────────────────────────
     dates = [r["reviewed_at"][:10] for r in reviews]

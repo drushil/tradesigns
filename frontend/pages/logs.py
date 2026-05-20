@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 from frontend.ui_help import button, section_title, selectbox
+from frontend.ui_theme import page_header, status_pill
 
 
 LEVEL_COLORS = {
@@ -15,14 +16,18 @@ LEVEL_COLORS = {
 
 
 def render():
-    st.title("📋 Agent Logs")
-    st.caption("Real-time log of every decision, trade, signal and learning event")
-
     try:
         from database.client import get_logs
     except Exception as e:
         st.error(f"DB error: {e}")
         return
+
+    page_header(
+        "Agent Logs",
+        "Runtime trail of decisions, trades, signals, learning events, and blockers.",
+        eyebrow="Observability",
+        pills=[status_pill("Live log stream", "info")],
+    )
 
     col_f1, col_f2, col_ref = st.columns([2, 2, 1])
     with col_f1:

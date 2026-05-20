@@ -1,10 +1,20 @@
 """frontend/pages/overview.py — Portfolio overview dashboard."""
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 import pandas as pd
 from datetime import datetime
-from frontend.ui_help import metric, section_title
+from frontend.ui_help import metric
+from frontend.ui_theme import (
+    ACCENT,
+    NEGATIVE,
+    POSITIVE,
+    apply_plotly_theme,
+    metric_card,
+    modern_section,
+    page_header,
+    panel_html,
+    status_pill,
+)
 
 
 def _safe_float(value, default=0.0):
@@ -17,8 +27,6 @@ def _safe_float(value, default=0.0):
 
 
 def render():
-    st.title("📊 Portfolio Overview")
-
     # ── Load data ──────────────────────────────────────────────────────────
     try:
         from database.client import get_snapshots, get_trade_stats
@@ -83,19 +91,53 @@ def render():
     except Exception:
         regime_state = None
 
+    regime_pills = []
+    if regime_state:
+        label = regime_state.market_regime.upper()
+        tone = "positive" if label == "BULL" else ("negative" if label == "BEAR" else "warning")
+        regime_pills.append(status_pill(f"{label} regime", tone))
+        regime_pills.append(status_pill(f"VIX {regime_state.vix:.1f}", "info"))
+    if account_error:
+        regime_pills.append(status_pill("Snapshot fallback", "warning"))
+
+    page_header(
+        "Portfolio Overview",
+        "Live operating view for equity, cash, market regime, open exposure, and recent trading quality.",
+        eyebrow="Command Center",
+        pills=regime_pills,
+    )
+
     # ── KPI row ────────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
-    metric(c1, "Portfolio Value", f"€{equity_eur:,.2f}",
-           delta=f"{cum_pnl_pct:+.2f}% all-time")
-    metric(c2, "Cash Available", f"€{cash_eur:,.2f}",
-           delta=f"{cash_usd/equity_usd*100:.0f}% of portfolio" if equity_usd else None)
-    metric(c3, "Total Trades", trade_stats.get("total", 0))
-    metric(c4, "Win Rate",
-           f"{trade_stats.get('win_rate', 0):.1f}%",
-           delta=f"W:{trade_stats.get('wins',0)} L:{trade_stats.get('losses',0)}")
-    metric(c5, "Total P&L",
-           f"€{trade_stats.get('total_pnl_eur', 0):+.2f}",
-           delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade")
+    metric_card(
+        c1,
+        "Portfolio Value",
+        f"€{equity_eur:,.2f}",
+        delta=f"{cum_pnl_pct:+.2f}% all-time",
+        tone="positive" if cum_pnl_pct >= 0 else "negative",
+    )
+    metric_card(
+        c2,
+        "Cash Available",
+        f"€{cash_eur:,.2f}",
+        delta=f"{cash_usd/equity_usd*100:.0f}% of portfolio" if equity_usd else None,
+        tone="info",
+    )
+    metric_card(c3, "Total Trades", trade_stats.get("total", 0))
+    metric_card(
+        c4,
+        "Win Rate",
+        f"{trade_stats.get('win_rate', 0):.1f}%",
+        delta=f"W:{trade_stats.get('wins',0)} L:{trade_stats.get('losses',0)}",
+    )
+    total_pnl = _safe_float(trade_stats.get("total_pnl_eur"))
+    metric_card(
+        c5,
+        "Total P&L",
+        f"€{total_pnl:+.2f}",
+        delta=f"avg {trade_stats.get('avg_pnl',0):+.3f}%/trade",
+        tone="positive" if total_pnl >= 0 else "negative",
+    )
 
     if ceiling and alpaca_actual:
         st.info(
@@ -116,29 +158,29 @@ def render():
 
     if regime_state:
         label = regime_state.market_regime.upper()
-        icon = "🐂" if label == "BULL" else ("🐻" if label == "BEAR" else "↔")
+        tone = "positive" if label == "BULL" else ("negative" if label == "BEAR" else "warning")
         swing_frag = ""
         if open_swings:
             tickers_str = ", ".join(r["ticker"] for r in open_swings[:3])
-            swing_frag = (f'<span style="margin-left:20px;color:#ffd166">'
-                          f'🚀 Open swings: {len(open_swings)}/{max_swings} ({tickers_str})'
+            swing_frag = (f'<span style="margin-left:16px;color:var(--td-warning)">'
+                          f'Open swings: {len(open_swings)}/{max_swings} ({tickers_str})'
                           f'</span>')
         else:
-            swing_frag = (f'<span style="margin-left:20px;color:#555">'
-                          f'🚀 Open swings: 0/{max_swings}'
+            swing_frag = (f'<span style="margin-left:16px;color:var(--td-muted)">'
+                          f'Open swings: 0/{max_swings}'
                           f'</span>')
         st.markdown(f"""
-        <div style="margin:12px 0 4px;padding:12px 14px;border:1px solid #222;border-radius:8px;background:#101010">
-          <span style="font-size:22px;font-weight:700">{icon} {label}</span>
-          <span style="margin-left:16px;color:#aaa">VIX {regime_state.vix:.1f}</span>
-          <span style="margin-left:16px;color:#777">SPY vs SMA200 {regime_state.price_vs_sma200_pct:+.2f}%</span>
+        <div class="td-panel" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:16px">
+          <span class="{tone}" style="font-size:21px;font-weight:700">{label}</span>
+          <span style="color:var(--td-muted)">VIX {regime_state.vix:.1f}</span>
+          <span style="color:var(--td-muted)">SPY vs SMA200 {regime_state.price_vs_sma200_pct:+.2f}%</span>
           {swing_frag}
         </div>
         """, unsafe_allow_html=True)
 
     # ── Open swing position cards ──────────────────────────────────────────
     if open_swings:
-        section_title("Open Momentum Swings")
+        modern_section("Open Momentum Swings", "Positions promoted from intraday momentum into multi-day holds.")
         cols = st.columns(min(len(open_swings), 3))
         for i, rec in enumerate(open_swings):
             ticker     = rec.get("ticker", "?")
@@ -171,13 +213,11 @@ def render():
                     <div style="font-size:11px;color:#555">{days_held}d held · {days_rem}d remaining</div>
                 </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
-
     # ── Equity curve ───────────────────────────────────────────────────────
     col_chart, col_pos = st.columns([2, 1])
 
     with col_chart:
-        section_title("Equity Curve")
+        modern_section("Equity Curve", "Stored portfolio snapshots across the active review window.")
         if snapshots:
             df = pd.DataFrame(snapshots)
             df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
@@ -192,28 +232,19 @@ def render():
                 y=df["total_value_display_eur"],
                 mode="lines",
                 fill="tozeroy",
-                line=dict(color="#00d4a0", width=2),
-                fillcolor="rgba(0,212,160,0.08)",
+                line=dict(color=ACCENT, width=2),
+                fillcolor="rgba(79, 209, 197, 0.10)",
                 name="Portfolio Value",
             ))
             fig.add_hline(y=start, line_dash="dot",
                           line_color="#555", annotation_text="Start")
-            fig.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                height=280,
-                margin=dict(l=0, r=0, t=10, b=0),
-                showlegend=False,
-                yaxis=dict(gridcolor="#1a1a1a"),
-                xaxis=dict(gridcolor="#1a1a1a"),
-            )
+            apply_plotly_theme(fig, height=300, showlegend=False)
             st.plotly_chart(fig, width="stretch")
         else:
             st.info("No portfolio history yet. Start the agent to begin trading.")
 
     with col_pos:
-        section_title("Open Positions")
+        modern_section("Open Positions", "Broker-reported open exposure.")
         if positions:
             for p in positions:
                 pnl_color = "positive" if p["unrealized_pl"] >= 0 else "negative"
@@ -228,28 +259,25 @@ def render():
                     </div>
                 </div>""", unsafe_allow_html=True)
         else:
-            st.info("No open positions")
+            st.markdown(
+                panel_html("No Open Positions", "The broker is reporting no active positions."),
+                unsafe_allow_html=True,
+            )
 
     # ── Daily P&L bar chart ────────────────────────────────────────────────
     if snapshots and len(snapshots) > 1:
-        section_title("Daily P&L")
+        modern_section("Daily P&L", "Snapshot-level daily movement in portfolio value.")
         df = pd.DataFrame(snapshots)
         df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
         df = df.sort_values("snapshot_at")
-        df["color"] = df["daily_pnl_pct"].apply(lambda x: "#00d4a0" if x >= 0 else "#ff5c5c")
+        df["color"] = df["daily_pnl_pct"].apply(lambda x: POSITIVE if x >= 0 else NEGATIVE)
 
         fig2 = go.Figure(go.Bar(
             x=df["snapshot_at"], y=df["daily_pnl_pct"],
             marker_color=df["color"], name="Daily P&L %"
         ))
-        fig2.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            height=180, margin=dict(l=0, r=0, t=10, b=0),
-            yaxis=dict(gridcolor="#1a1a1a", ticksuffix="%"),
-            xaxis=dict(gridcolor="#1a1a1a"),
-        )
+        apply_plotly_theme(fig2, height=210, showlegend=False)
+        fig2.update_yaxes(ticksuffix="%")
         st.plotly_chart(fig2, width="stretch")
 
     # ── Regime & signal breakdown ──────────────────────────────────────────
@@ -257,7 +285,7 @@ def render():
     trades = get_recent_trades(days=30)
     if trades:
         st.markdown("---")
-        section_title("Performance by Market Regime")
+        modern_section("Performance by Market Regime", "Closed trade performance grouped by recorded regime.")
         df_t = pd.DataFrame(trades)
         if "regime" in df_t.columns and "net_pnl_pct" in df_t.columns:
             regime_stats = (df_t.groupby("regime")["net_pnl_pct"]

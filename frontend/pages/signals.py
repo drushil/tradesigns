@@ -6,6 +6,7 @@ import os
 import html
 from frontend.ticker_profiles import ticker_profile_html
 from frontend.ui_help import button, info_label, metric
+from frontend.ui_theme import page_header, status_pill
 
 # ── All 10 signals + earnings multiplier ─────────────────────────────────────
 ALL_SIGNALS = {
@@ -79,13 +80,20 @@ ALL_SIGNALS = {
 
 
 def render():
-    st.title("📡 Live Signals")
-    st.caption("10-signal engine · Updates every 5 minutes during market hours")
-
     tickers = [t.strip() for t in os.getenv("TICKER_UNIVERSE", "SPY,QQQ,GLD").split(",")]
     profile_name = os.getenv("RISK_PROFILE", "moderate")
 
     weighted_count = sum(1 for meta in ALL_SIGNALS.values() if meta["db_col"])
+    page_header(
+        "Live Signals",
+        "Ten-signal scanner with stored scores, sizing previews, regime context, and ticker profiles.",
+        eyebrow="Signal Monitor",
+        pills=[
+            status_pill(f"{len(tickers)} tickers", "info"),
+            status_pill(f"{weighted_count} weighted scores", "positive"),
+            status_pill(profile_name, "neutral"),
+        ],
+    )
     c_total, c_weighted, c_multiplier = st.columns(3)
     metric(c_total, "Signals", len(ALL_SIGNALS))
     metric(c_weighted, "Weighted scores", weighted_count)

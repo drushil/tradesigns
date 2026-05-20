@@ -5,11 +5,10 @@ import plotly.graph_objects as go
 import pandas as pd
 from frontend.ticker_profiles import ticker_profile_html
 from frontend.ui_help import column_config, metric, section_title, selectbox
+from frontend.ui_theme import page_header, status_pill
 
 
 def render():
-    st.title("🔄 Trade History")
-
     try:
         from database.client import get_recent_trades
         trades = get_recent_trades(days=90)
@@ -18,6 +17,11 @@ def render():
         return
 
     if not trades:
+        page_header(
+            "Trade History",
+            "Closed trade execution, P&L, replay, and swing-vs-intraday analysis.",
+            eyebrow="Execution Review",
+        )
         st.info("No trades yet. The agent will populate this once it starts trading.")
         return
 
@@ -61,6 +65,17 @@ def render():
 
     df["is_swing"] = df.apply(_is_swing_trade, axis=1)
     df["hold_type_filter"] = df["is_swing"].map({True: "Swing", False: "Intraday"})
+
+    page_header(
+        "Trade History",
+        "Closed trade execution, P&L, replay, and swing-vs-intraday analysis.",
+        eyebrow="Execution Review",
+        pills=[
+            status_pill(f"{len(df)} trades", "info"),
+            status_pill(f"{int(df['is_swing'].sum())} swings", "warning" if df["is_swing"].any() else "neutral"),
+            status_pill(f"€{df['pnl_eur'].sum():+.2f}", "positive" if df["pnl_eur"].sum() >= 0 else "negative"),
+        ],
+    )
 
     # ── Filters ────────────────────────────────────────────────────────────
     col_f1, col_f2, col_f3, col_f4, col_f5, col_f6 = st.columns(6)

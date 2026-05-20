@@ -198,8 +198,26 @@ def help_text(key: str, fallback: str | None = None) -> str:
 
 def metric(container, label: str, value, delta=None, *, help_key: str | None = None, **kwargs):
     """Render a metric with the shared help copy."""
-    kwargs.setdefault("help", help_text(help_key or label))
-    return container.metric(label, value, delta=delta, **kwargs)
+    from frontend.ui_theme import metric_card
+
+    tone = "neutral"
+    text = f"{value} {delta or ''}"
+    if any(token in text for token in ["+", "W:", "healthy", "Enabled"]):
+        tone = "positive"
+    if any(token in text for token in ["-", "ERROR", "Disabled"]):
+        tone = "negative"
+    if any(token in str(label).lower() for token in ["cash", "replayed", "signals", "positions"]):
+        tone = "info"
+    if any(token in str(label).lower() for token in ["missed", "risk", "reserved", "blocked"]):
+        tone = "warning"
+    return metric_card(
+        container,
+        label,
+        value,
+        delta=delta,
+        tone=tone,
+        help_text=help_text(help_key or label),
+    )
 
 
 def selectbox(label: str, options, *, help_key: str | None = None, **kwargs):
@@ -220,28 +238,28 @@ def info_label(label: str, key: str | None = None) -> str:
     title = html.escape(help_value, quote=True)
     safe_label = html.escape(label)
     return (
-        f"<span title=\"{title}\" "
-        f"style=\"border-bottom:1px dotted #555;cursor:help\">{safe_label}</span>"
+        f"<span class=\"td-has-tooltip\" title=\"{title}\" data-tooltip=\"{title}\" "
+        f"style=\"border-bottom:1px dotted #555;cursor:help;position:relative;display:inline-block\">"
+        f"{safe_label}</span>"
     )
 
 
 def section_title(title: str, level: int = 5, *, help_key: str | None = None):
     """Render a hover-explained section heading without visible helper text."""
-    tag = f"h{level}"
+    from frontend.ui_theme import modern_section
+
     help_value = HELP_TEXT.get(help_key or title, help_key or help_text(title))
-    st.markdown(
-        f"<{tag} title=\"{html.escape(help_value, quote=True)}\" "
-        f"style=\"cursor:help\">{html.escape(title)}</{tag}>",
-        unsafe_allow_html=True,
-    )
+    return modern_section(title, help_value, help_text=help_value)
 
 
 def section_header(title: str, *, help_key: str | None = None):
     """Render the compact uppercase grading header with hover help."""
     help_value = HELP_TEXT.get(help_key or title, help_key or help_text(title))
     st.markdown(
-        f"<div class=\"section-header\" "
-        f"title=\"{html.escape(help_value, quote=True)}\">"
+        f"<div class=\"section-header td-has-tooltip\" "
+        f"title=\"{html.escape(help_value, quote=True)}\" "
+        f"data-tooltip=\"{html.escape(help_value, quote=True)}\" "
+        f"style=\"position:relative;display:inline-block\">"
         f"{html.escape(title)}</div>",
         unsafe_allow_html=True,
     )
