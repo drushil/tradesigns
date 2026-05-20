@@ -1737,7 +1737,7 @@ def detect_regime(ticker: str = "SPY") -> RegimeState:
         pass
 
     trend_score = 0.0
-    trend_threshold = float(os.getenv("TREND_SCORE_THRESHOLD", "0.8"))
+    trend_threshold = float(os.getenv("TREND_SCORE_THRESHOLD", "0.35"))
     trend_mean_return = 0.0
     trend_std_return = 0.0
 
