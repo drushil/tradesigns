@@ -16,7 +16,9 @@ try:
     if hasattr(st, "secrets"):
         for k, v in st.secrets.items():
             if isinstance(v, str):
-                os.environ.setdefault(k, v)
+                # Streamlit Cloud secrets are the dashboard's configured source
+                # of truth. Override stale process env values from old deploys.
+                os.environ[k] = v
 except st.errors.StreamlitSecretNotFoundError:
     # Local runs can rely on .env; Streamlit Cloud still injects st.secrets.
     pass
