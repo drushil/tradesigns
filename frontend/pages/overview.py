@@ -239,7 +239,7 @@ def render():
             fig.add_hline(y=start, line_dash="dot",
                           line_color="#555", annotation_text="Start")
             apply_plotly_theme(fig, height=300, showlegend=False)
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No portfolio history yet. Start the agent to begin trading.")
 
@@ -278,7 +278,7 @@ def render():
         ))
         apply_plotly_theme(fig2, height=210, showlegend=False)
         fig2.update_yaxes(ticksuffix="%")
-        st.plotly_chart(fig2, width="stretch")
+        st.plotly_chart(fig2, use_container_width=True)
 
     # ── Regime & signal breakdown ──────────────────────────────────────────
     from database.client import get_recent_trades

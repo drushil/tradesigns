@@ -189,7 +189,7 @@ def render():
                                   plot_bgcolor="rgba(0,0,0,0)", height=240,
                                   margin=dict(l=0, r=0, t=10, b=0),
                                   showlegend=False)
-            st.plotly_chart(fig_cmp, width="stretch")
+            st.plotly_chart(fig_cmp, use_container_width=True)
         with col_cmp2:
             comparison_display = compare_df.assign(
                 **{
@@ -199,7 +199,7 @@ def render():
             )
             st.dataframe(
                 comparison_display,
-                width="stretch",
+                use_container_width=True,
                 hide_index=True,
                 column_config=column_config(comparison_display.columns),
             )
@@ -225,7 +225,7 @@ def render():
             fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",
                               plot_bgcolor="rgba(0,0,0,0)", height=300,
                               margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True)
 
     with col_exit:
         section_title("Exit Reason Breakdown")
@@ -237,7 +237,7 @@ def render():
                           color_discrete_sequence=["#00d4a0", "#ff5c5c", "#ffd166", "#888"])
             fig2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=300,
                                margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig2, width="stretch")
+            st.plotly_chart(fig2, use_container_width=True)
 
     if "strategy_family" in fdf.columns and "exposure_direction" in fdf.columns:
         col_strategy, col_exposure = st.columns(2)
@@ -255,7 +255,7 @@ def render():
             fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)",
                                plot_bgcolor="rgba(0,0,0,0)", height=280,
                                margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig3, width="stretch")
+            st.plotly_chart(fig3, use_container_width=True)
         with col_exposure:
             section_title("P&L by Exposure")
             exposure_perf = (fdf.groupby("exposure_direction", dropna=False)
@@ -270,7 +270,7 @@ def render():
             fig4.update_layout(paper_bgcolor="rgba(0,0,0,0)",
                                plot_bgcolor="rgba(0,0,0,0)", height=280,
                                margin=dict(l=0,r=0,t=10,b=0))
-            st.plotly_chart(fig4, width="stretch")
+            st.plotly_chart(fig4, use_container_width=True)
 
     # ── Post-exit replay ────────────────────────────────────────────────────
     replay_cols = {
@@ -321,7 +321,7 @@ def render():
                     height=280,
                     margin=dict(l=0, r=0, t=10, b=0),
                 )
-                st.plotly_chart(fig_replay, width="stretch")
+                st.plotly_chart(fig_replay, use_container_width=True)
 
             with col_table:
                 top_left = (
@@ -336,7 +336,7 @@ def render():
                 cols = [c for c in cols if c in top_left.columns]
                 st.dataframe(
                     top_left[cols],
-                    width="stretch",
+                    use_container_width=True,
                     hide_index=True,
                     column_config=column_config(cols),
                 )
@@ -370,7 +370,7 @@ def render():
 
     st.dataframe(
         show_df.style.map(highlight_pnl, subset=["net_pnl_pct"] if "net_pnl_pct" in show_df.columns else []),
-        width="stretch",
+        use_container_width=True,
         height=400,
         column_config=column_config(show_df.columns),
     )
