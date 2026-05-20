@@ -1639,7 +1639,7 @@ def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
         )
 
     thresholds = {
-        "macd_crossover": float(profile.get("ranging_probe_min_macd", 0.35)),
+        "macd_crossover": float(profile.get("ranging_probe_min_macd", 0.10)),
         "tape_aggression": float(profile.get("ranging_probe_min_tape", 0.10)),
         "relative_strength": float(profile.get("ranging_probe_min_relative_strength", 0.25)),
     }
