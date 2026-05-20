@@ -51,6 +51,7 @@ div[data-testid="stSidebar"] { background: #0a0a0a; border-right: 0.5px solid #1
 PAGES = {
     "📊 Overview":         "overview",
     "📅 EOD Review":       "eod_review",
+    "🚧 Blocked Ops":      "blocked_opportunities",
     "📡 Live Signals":     "signals",
     "🔄 Trades":           "trades",
     "📈 Performance":      "performance",
