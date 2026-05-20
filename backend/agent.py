@@ -797,7 +797,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
         )
     if os.getenv("RANGING_A_GRADE_MIN_EV_PCT"):
         p["ranging_a_grade_min_ev_pct"] = _env_float("RANGING_A_GRADE_MIN_EV_PCT", p["ranging_a_grade_min_ev_pct"])
-    if os.getenv("RANGING_PROBE_ENABLED") is not None:
+    if os.getenv("RANGING_PROBE_ENABLED"):
         p["ranging_probe_enabled"] = _env_bool("RANGING_PROBE_ENABLED", bool(p["ranging_probe_enabled"]))
     if os.getenv("RANGING_PROBE_ALLOWED_GRADES"):
         p["ranging_probe_allowed_grades"] = _env_value(
@@ -3006,7 +3006,7 @@ def run_signal_cycle():
                     log_event("INFO", "ranging_regime_candidate_block", {
                         "ticker": t,
                         "composite": round(float(candidate.get("composite") or 0), 4),
-                        **ranging_block,
+                        **{k: v for k, v in ranging_block.items() if k != "probe"},
                     })
                     _record_blocked_opportunity(
                         t, candidate.get("action_hint"), candidate["composite"],
