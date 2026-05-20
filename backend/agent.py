@@ -731,7 +731,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_probe_min_composite", 0.20)
     p.setdefault("ranging_probe_min_breakout_quality", 0.35)
     p.setdefault("ranging_probe_min_aligned_signals", 2)
-    p.setdefault("ranging_probe_min_macd", 0.35)
+    p.setdefault("ranging_probe_min_macd", 0.10)
     p.setdefault("ranging_probe_min_tape", 0.10)
     p.setdefault("ranging_probe_min_relative_strength", 0.25)
     p.setdefault("ranging_probe_max_tape_against", 0.05)
@@ -743,6 +743,8 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_min_reward_risk_ratio", 2.0)
     p.setdefault("signal_consensus_min_count", 3)
     p.setdefault("ranging_signal_consensus_min_count", 4)
+    p.setdefault("ranging_core_consensus_min_count", 2)
+    p.setdefault("ranging_core_consensus_enabled", True)
     p.setdefault("signal_consensus_min_strength", 0.15)
     p.setdefault("max_open_positions_per_theme", 2)
     p.setdefault("allow_a_plus_llm_hold_override", False)
@@ -878,6 +880,16 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["ranging_signal_consensus_min_count"] = _env_int(
             "RANGING_SIGNAL_CONSENSUS_MIN_COUNT",
             int(p["ranging_signal_consensus_min_count"]),
+        )
+    if os.getenv("RANGING_CORE_CONSENSUS_ENABLED"):
+        p["ranging_core_consensus_enabled"] = _env_bool(
+            "RANGING_CORE_CONSENSUS_ENABLED",
+            bool(p["ranging_core_consensus_enabled"]),
+        )
+    if os.getenv("RANGING_CORE_CONSENSUS_MIN_COUNT"):
+        p["ranging_core_consensus_min_count"] = _env_int(
+            "RANGING_CORE_CONSENSUS_MIN_COUNT",
+            int(p["ranging_core_consensus_min_count"]),
         )
     if os.getenv("SIGNAL_CONSENSUS_MIN_STRENGTH"):
         p["signal_consensus_min_strength"] = _env_float(
@@ -1410,7 +1422,42 @@ def _signal_consensus_block(action: str, signals: dict, regime: str,
     direction = 1 if str(action or "").upper() == "BUY" else -1
     min_strength = abs(float(profile.get("signal_consensus_min_strength", 0.15)))
     min_count = int(profile.get("signal_consensus_min_count", 3))
-    if str(regime or "").lower() == "ranging":
+    is_ranging = str(regime or "").lower() == "ranging"
+    if is_ranging and bool(profile.get("ranging_core_consensus_enabled", True)):
+        core_names = [
+            "macd_crossover",
+            "relative_strength",
+            "tape_aggression",
+            "vwap_deviation",
+        ]
+        aligned_core = []
+        opposed_core = []
+        observed_core = []
+        for name in core_names:
+            if name not in (signals or {}):
+                continue
+            directional_score = _signal_score(signals, name) * direction
+            observed_core.append({"signal": name, "score": round(directional_score, 4)})
+            if directional_score >= min_strength:
+                aligned_core.append(name)
+            elif directional_score <= -min_strength:
+                opposed_core.append(name)
+
+        core_min_count = int(profile.get("ranging_core_consensus_min_count", 2))
+        if core_min_count <= 0 or len(aligned_core) >= core_min_count:
+            return None
+        return {
+            "reason": "ranging_core_consensus_veto",
+            "aligned_count": len(aligned_core),
+            "min_count": core_min_count,
+            "min_strength": min_strength,
+            "aligned_signals": aligned_core,
+            "opposed_signals": opposed_core,
+            "observed_signals": observed_core,
+            "core_signals": core_names,
+        }
+
+    if is_ranging:
         min_count = int(profile.get("ranging_signal_consensus_min_count", 4))
     if min_count <= 0:
         return None

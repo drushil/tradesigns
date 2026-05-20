@@ -234,9 +234,9 @@ def test_signal_consensus_blocks_one_signal_trades_in_ranging():
         },
     )
 
-    assert block["reason"] == "signal_consensus_veto"
-    assert block["aligned_count"] == 1
-    assert block["min_count"] == 4
+    assert block["reason"] == "ranging_core_consensus_veto"
+    assert block["aligned_count"] == 0
+    assert block["min_count"] == 2
 
 
 def test_signal_consensus_allows_broad_agreement():
@@ -449,6 +449,75 @@ def test_ranging_probe_rejects_weak_sector_relative_strength():
     assert block["reason"] == "ranging_regime_a_plus_quality_veto"
     assert block["probe"]["reason_not_probed"] == "sector_relative_strength_too_weak"
     assert setup_context["reason_not_probed"] == "sector_relative_strength_too_weak"
+
+
+def test_ranging_core_consensus_passes_with_two_core_signals():
+    import backend.agent as agent
+
+    block = agent._signal_consensus_block(
+        "BUY",
+        {
+            "macd_crossover": {"score": 0.18},
+            "relative_strength": {"score": 0.22},
+            "tape_aggression": {"score": 0.01},
+            "vwap_deviation": {"score": 0.0},
+            "news_sentiment": {"score": 0.0},
+            "order_book_imbalance": {"score": -0.05},
+        },
+        "ranging",
+        {
+            "signal_consensus_min_strength": 0.15,
+            "ranging_core_consensus_enabled": True,
+            "ranging_core_consensus_min_count": 2,
+            "ranging_signal_consensus_min_count": 4,
+        },
+    )
+
+    assert block is None
+
+
+def test_ranging_core_consensus_blocks_when_core_confirmers_are_thin():
+    import backend.agent as agent
+
+    block = agent._signal_consensus_block(
+        "BUY",
+        {
+            "macd_crossover": {"score": 0.21},
+            "relative_strength": {"score": 0.04},
+            "tape_aggression": {"score": 0.02},
+            "vwap_deviation": {"score": 0.0},
+            "news_sentiment": {"score": 0.8},
+            "order_book_imbalance": {"score": 0.7},
+        },
+        "ranging",
+        {
+            "signal_consensus_min_strength": 0.15,
+            "ranging_core_consensus_enabled": True,
+            "ranging_core_consensus_min_count": 2,
+            "ranging_signal_consensus_min_count": 4,
+        },
+    )
+
+    assert block["reason"] == "ranging_core_consensus_veto"
+    assert block["aligned_signals"] == ["macd_crossover"]
+    assert block["min_count"] == 2
+
+
+def test_ranging_a_thresholds_are_not_looser_than_a_plus_thresholds():
+    import backend.agent as agent
+
+    profile = agent._apply_execution_overrides({})
+
+    assert profile["ranging_a_grade_min_breakout_quality"] >= profile["ranging_a_plus_min_breakout_quality"]
+    assert profile["ranging_a_grade_min_ev_pct"] >= profile["ranging_a_plus_min_ev_pct"]
+
+
+def test_ranging_probe_macd_default_is_ranging_sized():
+    import backend.agent as agent
+
+    profile = agent._apply_execution_overrides({})
+
+    assert profile["ranging_probe_min_macd"] == pytest.approx(0.10)
 
 
 def test_ranging_stop_loss_cooldown_blocks_same_ticker_reentry():
