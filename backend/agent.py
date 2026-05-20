@@ -717,11 +717,11 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_regime_size_multiplier", 0.35)
     p.setdefault("ranging_max_trades_per_day", 6)
     p.setdefault("ranging_min_grade_required", "A+")
-    p.setdefault("ranging_a_grade_min_breakout_quality", 0.50)
-    p.setdefault("ranging_a_grade_min_ev_pct", 0.10)
+    p.setdefault("ranging_a_grade_min_breakout_quality", 0.80)
+    p.setdefault("ranging_a_grade_min_ev_pct", 0.25)
     p.setdefault("ranging_a_plus_min_composite", 0.25)
-    p.setdefault("ranging_a_plus_min_breakout_quality", 0.40)
-    p.setdefault("ranging_a_plus_min_ev_pct", 0.10)
+    p.setdefault("ranging_a_plus_min_breakout_quality", 0.70)
+    p.setdefault("ranging_a_plus_min_ev_pct", 0.20)
     p.setdefault("ranging_max_notional_eur", 1200)
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
     p.setdefault("thesis_invalidated_cooldown_minutes", 75)
@@ -1427,7 +1427,8 @@ def _theme_open_exposure_block(ticker: str, profile: dict) -> Optional[dict]:
 
 
 def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
-                          setup_grade: Optional[SetupGrade], profile: dict) -> Optional[dict]:
+                          setup_grade: Optional[SetupGrade], profile: dict,
+                          signals_snap: dict = None) -> Optional[dict]:
     if str((setup_context or {}).get("intraday_regime", "")).lower() != "ranging":
         return None
     grade = setup_grade.grade if setup_grade else (setup_context or {}).get("setup_grade")
@@ -1452,12 +1453,31 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
                 "min_ev_pct": min_lev_ev,
             }
 
+    # Helper: check if this setup qualifies for the ranging probe lane.
+    # Probe trades bypass the strict quality veto when momentum signals
+    # (relative strength + tape) confirm direction and EV is strictly positive.
+    # They are sized small by the existing ranging_regime_size_multiplier.
+    def _probe_lane_qualifies(min_rel_strength: float, min_ev_probe: float) -> bool:
+        if net_ev is None or net_ev <= min_ev_probe:
+            return False
+        snap = signals_snap or {}
+        rel_strength = float((snap.get("relative_strength") or {}).get("score", 0))
+        tape = float((snap.get("tape_aggression") or {}).get("score", 0))
+        action = str((setup_context or {}).get("action") or "BUY").upper()
+        direction = 1 if action == "BUY" else -1
+        return (rel_strength * direction) >= min_rel_strength and (tape * direction) >= 0
+
     if grade == "A+":
         composite = abs(float((setup_context or {}).get("composite") or 0))
         min_composite = float(profile.get("ranging_a_plus_min_composite", 0.25))
         min_breakout = float(profile.get("ranging_a_plus_min_breakout_quality", 0.70))
         min_ev = float(profile.get("ranging_a_plus_min_ev_pct", 0.20))
         if composite < min_composite or breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
+            # Probe lane: A+ with strictly positive EV and confirmed momentum
+            # (rel_strength >= 0.05 in trade direction, tape not opposed) bypasses
+            # the strict breakout/EV bar and proceeds at reduced probe size.
+            if _probe_lane_qualifies(min_rel_strength=0.05, min_ev_probe=0.0):
+                return None
             return {
                 "reason": "ranging_regime_a_plus_quality_veto",
                 "grade": grade,
@@ -1473,6 +1493,10 @@ def _ranging_regime_block(ticker: str, setup_context: dict, ev_result: dict,
         min_breakout = float(profile.get("ranging_a_grade_min_breakout_quality", 0.80))
         min_ev = float(profile.get("ranging_a_grade_min_ev_pct", 0.25))
         if breakout_quality < min_breakout or net_ev is None or net_ev < min_ev:
+            # Probe lane: A grade needs a higher rel_strength bar (0.10) and
+            # at least 0.03% net EV to qualify.
+            if _probe_lane_qualifies(min_rel_strength=0.10, min_ev_probe=0.03):
+                return None
             return {
                 "reason": "ranging_regime_a_grade_quality_veto",
                 "grade": grade,
@@ -2770,6 +2794,7 @@ def run_signal_cycle():
                 ranging_block = _ranging_regime_block(
                     t, candidate["setup_context"], candidate.get("ev_result"),
                     setup_grade, effective_profile,
+                    signals_snap=candidate.get("signals_snap"),
                 )
                 if ranging_block:
                     log_event("INFO", "ranging_regime_candidate_block", {
@@ -3137,6 +3162,7 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         "earnings_mult":          signals_snap.get("earnings_proximity", {}).get("meta", {}).get("earnings_multiplier", 1.0),
         "macro_regime":           signal_result.get("macro_regime"),
         "macro_multiplier":       signal_result.get("macro_multiplier", 1.0),
+        "market_regime":          getattr(ticker_regime_state, "market_regime", None),
         "regime_bull_bear":       signal_result.get("regime_bull_bear"),
         "shock_detected":         signal_result.get("shock_detected", False),
         "shock_classification":   signal_result.get("shock_classification"),
