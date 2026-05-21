@@ -367,7 +367,8 @@ create table if not exists blocked_opportunities (
     block_stage             text not null check (block_stage in (
                                 'gate','ev','ranking','llm','conviction','price',
                                 'signal_consensus','reward_risk','exposure',
-                                'signal_alignment','regime','time','sizing','position')),
+                                'signal_alignment','regime','time','sizing','position',
+                                'entry_quality')),
     block_reason            text,
     block_detail            jsonb default '{}'::jsonb,
     candidate_rank_score    numeric(7,4),

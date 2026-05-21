@@ -700,6 +700,59 @@ def tape_aggression_score(ticker: str) -> tuple[float, dict]:
     }
 
 
+def compute_rvol(ticker: str) -> dict:
+    """
+    Relative volume for the current 5m slot versus matching slots from prior days.
+    Uses the shared bar cache so it is usually free after MACD/relative-strength fetches.
+    """
+    df = _get_bars(ticker, period="5d", interval="5m")
+    if df is None or df.empty or "Volume" not in df:
+        return {"rvol_available": False, "error": "no_data"}
+
+    try:
+        bars = df.copy()
+        if not isinstance(bars.index, pd.DatetimeIndex):
+            bars.index = pd.to_datetime(bars.index)
+        volume = bars["Volume"].squeeze()
+        if len(volume) < 2:
+            return {"rvol_available": False, "error": "insufficient_bars"}
+
+        latest_ts = volume.index[-1]
+        current_vol = float(volume.iloc[-1])
+        slot_key = latest_ts.strftime("%H:%M")
+
+        prior = volume.iloc[:-1]
+        prior_slots = prior[prior.index.strftime("%H:%M") == slot_key]
+        if prior_slots.empty:
+            return {
+                "rvol_available": False,
+                "current_vol": round(current_vol, 2),
+                "slot": slot_key,
+                "error": "no_prior_slot",
+            }
+
+        avg_vol = float(prior_slots.mean())
+        if avg_vol <= 0:
+            return {
+                "rvol_available": False,
+                "current_vol": round(current_vol, 2),
+                "avg_vol": round(avg_vol, 2),
+                "slot": slot_key,
+                "error": "zero_avg_volume",
+            }
+
+        return {
+            "rvol_available": True,
+            "rvol_ratio": round(current_vol / avg_vol, 3),
+            "avg_vol": round(avg_vol, 2),
+            "current_vol": round(current_vol, 2),
+            "slot": slot_key,
+            "samples": int(len(prior_slots)),
+        }
+    except Exception as e:
+        return {"rvol_available": False, "error": str(e)[:120]}
+
+
 # ── Signal 5: Order Book Imbalance (Alpaca free — best bid/ask spread proxy) ──
 
 def _score_quote_imbalance(bid: float, ask: float, bid_size: float = 1.0,
@@ -2101,6 +2154,7 @@ def compute_all_signals(ticker: str, weights: dict,
         s12, m12 = 0.0, {"active": False, "error": "signal_crashed"}
 
     atr_data = compute_atr(ticker)
+    rvol_data = compute_rvol(ticker)
 
     # On strong ORB breakout days, price trading below intraday VWAP is normal
     # (stock gapped up, VWAP anchors high, consolidation reads as -0.8 despite uptrend).
@@ -2270,6 +2324,7 @@ def compute_all_signals(ticker: str, weights: dict,
         "orb_score":           s12,
         "orb_meta":            m12,
         "orb_active":          bool(m12.get("active", False)),
+        "rvol_data":           rvol_data,
         "dividend_opportunity": div_opportunity,
         "computed_at":         datetime.utcnow().isoformat(),
     }

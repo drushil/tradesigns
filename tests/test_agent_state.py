@@ -779,6 +779,95 @@ def test_high_atr_stop_is_capped_by_reward_risk():
     assert sizing["size_eur"] <= 5000 * 0.30
 
 
+def test_late_chase_blocks_directional_vwap_extension():
+    import backend.agent as agent
+
+    block = agent._late_chase_block(
+        "BUY",
+        {"vwap_deviation": {"score": -0.8, "meta": {"pct_deviation": 2.1}}},
+        {"atr_pct": 1.0},
+        {"late_chase_block_enabled": True, "late_chase_atr_mult": 1.5},
+    )
+
+    assert block["reason"] == "late_chase"
+    assert block["threshold_pct"] == pytest.approx(1.5)
+
+
+def test_rvol_gate_blocks_low_available_rvol():
+    import backend.agent as agent
+
+    block = agent._rvol_block(
+        {"rvol_data": {"rvol_available": True, "rvol_ratio": 0.9, "avg_vol": 1000, "current_vol": 900}},
+        {"rvol_gate_enabled": True, "rvol_min_multiplier": 1.3},
+    )
+
+    assert block["reason"] == "low_rvol"
+    assert block["rvol_ratio"] == pytest.approx(0.9)
+
+
+def test_time_of_day_bonus_affects_candidate_rank():
+    import backend.agent as agent
+
+    base = agent._candidate_rank_score(0.3, 0.5, "trend_following", minutes_since_open=180)
+    orb = agent._candidate_rank_score(0.3, 0.5, "trend_following", minutes_since_open=30)
+
+    assert orb > base
+    assert agent._time_of_day_rank_bonus(30) == pytest.approx(0.10)
+    assert agent._time_of_day_rank_bonus(90) == pytest.approx(-0.08)
+
+
+def test_a_plus_downgrades_when_1m_vwap_confirmation_fails(monkeypatch):
+    import backend.agent as agent
+
+    logs = []
+    monkeypatch.setattr(agent, "log_event", lambda level, event, detail=None: logs.append(event))
+    grade = agent.SetupGrade("A+", 1.5, 0.25, 1.5, True, ["pct_97"], 4, 1.0, 97, False)
+    candidate = {
+        "ticker": "AMD",
+        "action_hint": "BUY",
+        "signals_snap": {
+            "vwap_deviation": {
+                "score": 0.2,
+                "meta": {"price": 99.5, "vwap": 100.0},
+            }
+        },
+        "setup_context": {},
+    }
+
+    downgraded = agent._vwap_1m_confirmation_downgrade(
+        candidate, grade, {"vwap_1m_confirm_enabled": True}
+    )
+
+    assert downgraded.grade == "A"
+    assert "a_plus_downgraded_1m_confirmation" in logs
+    assert candidate["setup_context"]["a_plus_downgraded_1m_confirmation"] is True
+
+
+def test_crypto_internal_alignment_penalizes_partial_cluster(monkeypatch):
+    import backend.agent as agent
+
+    monkeypatch.setattr(agent, "_return_pcts_from_bars", lambda symbols, period="5d", interval="1d": {
+        "SPY": 1.0,
+        "IBIT": 1.2,
+        "COIN": 1.4,
+        "MSTR": 1.5,
+    })
+    agent._cycle_composites = {"IBIT": 0.4, "COIN": 0.3, "MSTR": -0.3}
+
+    snapshot = agent._sector_momentum_snapshot(
+        ["IBIT", "COIN", "MSTR"],
+        {
+            "sector_momentum_bonus_enabled": True,
+            "sector_momentum_leadership_threshold_pct": 2.0,
+            "sector_momentum_max_bonus": 0.15,
+            "crypto_internal_align_enabled": True,
+        },
+    )
+
+    assert snapshot["ticker_multipliers"]["IBIT"] == pytest.approx(0.7)
+    assert snapshot["themes"]["crypto"]["internal_alignment"]["aligned_count"] == 2
+
+
 def test_ranging_stop_loss_cooldown_blocks_same_ticker_reentry():
     import backend.agent as agent
     now = datetime.utcnow()

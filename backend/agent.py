@@ -782,6 +782,16 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("hold_score_exit_enabled", False)     # off: enable after validation
     p.setdefault("hold_score_extend_minutes", 30)
     p.setdefault("hold_score_trim_pct", 0.33)
+    # Phase 3: entry precision
+    p.setdefault("late_chase_block_enabled", True)
+    p.setdefault("late_chase_atr_mult", 1.5)
+    p.setdefault("rvol_gate_enabled", True)
+    p.setdefault("rvol_min_multiplier", 1.3)
+    p.setdefault("vwap_1m_confirm_enabled", True)
+    # Phase 4: advisory-only gate intelligence
+    p.setdefault("crypto_internal_align_enabled", True)
+    p.setdefault("gate_controller_enabled", True)
+    p.setdefault("b_shadow_promote_enabled", True)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -1011,6 +1021,22 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["hold_score_extend_minutes"] = _env_int("HOLD_SCORE_EXTEND_MINUTES", 30)
     if os.getenv("HOLD_SCORE_TRIM_PCT"):
         p["hold_score_trim_pct"] = _env_float("HOLD_SCORE_TRIM_PCT", 0.33)
+    if os.getenv("LATE_CHASE_BLOCK_ENABLED") is not None:
+        p["late_chase_block_enabled"] = _env_bool("LATE_CHASE_BLOCK_ENABLED", True)
+    if os.getenv("LATE_CHASE_ATR_MULT"):
+        p["late_chase_atr_mult"] = _env_float("LATE_CHASE_ATR_MULT", 1.5)
+    if os.getenv("RVOL_GATE_ENABLED") is not None:
+        p["rvol_gate_enabled"] = _env_bool("RVOL_GATE_ENABLED", True)
+    if os.getenv("RVOL_MIN_MULTIPLIER"):
+        p["rvol_min_multiplier"] = _env_float("RVOL_MIN_MULTIPLIER", 1.3)
+    if os.getenv("VWAP_1M_CONFIRM_ENABLED") is not None:
+        p["vwap_1m_confirm_enabled"] = _env_bool("VWAP_1M_CONFIRM_ENABLED", True)
+    if os.getenv("CRYPTO_INTERNAL_ALIGN_ENABLED") is not None:
+        p["crypto_internal_align_enabled"] = _env_bool("CRYPTO_INTERNAL_ALIGN_ENABLED", True)
+    if os.getenv("GATE_CONTROLLER_ENABLED") is not None:
+        p["gate_controller_enabled"] = _env_bool("GATE_CONTROLLER_ENABLED", True)
+    if os.getenv("B_SHADOW_PROMOTE_ENABLED") is not None:
+        p["b_shadow_promote_enabled"] = _env_bool("B_SHADOW_PROMOTE_ENABLED", True)
     return p
 
 
@@ -1229,9 +1255,49 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
         theme_threshold = float(_sector_setting(theme, "min_5d_return_for_bonus_pct", leadership_threshold))
         theme_max_bonus = float(_sector_setting(theme, "leadership_bonus", max_bonus))
         theme_max_bonus = min(max_bonus, max(0.0, theme_max_bonus))
-        leader = relative >= theme_threshold
-        bonus = min(theme_max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
-        multiplier = round(1.0 + bonus, 4)
+        internal_alignment = None
+        if (
+            theme == "crypto"
+            and bool(profile.get("crypto_internal_align_enabled", True))
+        ):
+            cluster = ["IBIT", "COIN", "MSTR"]
+            values = {
+                symbol: float(_cycle_composites.get(symbol) or 0)
+                for symbol in cluster
+                if symbol in _cycle_composites
+            }
+            if values:
+                avg = sum(values.values()) / len(values)
+                direction = 1 if avg >= 0 else -1
+                aligned = [symbol for symbol, score in values.items() if score * direction > 0.05]
+                if len(aligned) >= 3:
+                    leader = True
+                    bonus = theme_max_bonus
+                    multiplier = round(1.0 + bonus, 4)
+                elif len(aligned) >= 2:
+                    leader = False
+                    bonus = 0.0
+                    multiplier = 0.7
+                else:
+                    leader = False
+                    bonus = 0.0
+                    multiplier = 1.0
+                internal_alignment = {
+                    "enabled": True,
+                    "cluster": cluster,
+                    "observed": values,
+                    "aligned": aligned,
+                    "direction": "bullish" if direction > 0 else "bearish",
+                    "aligned_count": len(aligned),
+                }
+            else:
+                leader = relative >= theme_threshold
+                bonus = min(theme_max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
+                multiplier = round(1.0 + bonus, 4)
+        else:
+            leader = relative >= theme_threshold
+            bonus = min(theme_max_bonus, max(0.0, relative / 20.0)) if leader else 0.0
+            multiplier = round(1.0 + bonus, 4)
         themes[theme] = {
             "proxy": proxy,
             "proxy_basket": _sector_proxy_symbols(theme, proxy),
@@ -1242,7 +1308,9 @@ def _sector_momentum_snapshot(tickers: list[str], profile: dict) -> dict:
             "multiplier": multiplier,
             "leadership_threshold_pct": theme_threshold,
         }
-        if leader:
+        if internal_alignment:
+            themes[theme]["internal_alignment"] = internal_alignment
+        if multiplier != 1.0:
             for ticker in _THEME_MAP.get(theme, set()):
                 if ticker in tickers:
                     ticker_multipliers[ticker] = multiplier
@@ -1265,7 +1333,7 @@ def _apply_sector_momentum_to_candidate(candidate: dict, momentum: dict) -> dict
     setup_context["sector_momentum_multiplier"] = round(multiplier, 4)
     setup_context["base_candidate_rank_score"] = round(base_rank, 4)
     setup_context["sector_momentum"] = (momentum or {}).get("themes", {}).get(theme, {})
-    if multiplier > 1.0:
+    if multiplier != 1.0:
         setup_context["candidate_rank_score"] = round(base_rank * multiplier, 4)
     return candidate
 
@@ -1933,6 +2001,107 @@ def _probe_floor_inflation_block(ev_decision: str, grade_min_notional_applied: b
     return None
 
 
+def _late_chase_block(action: str, signals_snap: dict, atr_data: dict, profile: dict) -> Optional[dict]:
+    if not bool(profile.get("late_chase_block_enabled", True)):
+        return None
+    try:
+        pct_dev = float(
+            ((signals_snap or {}).get("vwap_deviation") or {})
+            .get("meta", {})
+            .get("pct_deviation")
+        )
+        atr_pct = float((atr_data or {}).get("atr_pct") or 0)
+    except (TypeError, ValueError):
+        return None
+    if atr_pct <= 0:
+        return None
+
+    threshold = atr_pct * float(profile.get("late_chase_atr_mult", 1.5))
+    side = str(action or "").upper()
+    directionally_extended = (side == "BUY" and pct_dev > threshold) or (side == "SELL" and pct_dev < -threshold)
+    if not directionally_extended:
+        return None
+    return {
+        "reason": "late_chase",
+        "pct_deviation": round(pct_dev, 4),
+        "atr_pct": round(atr_pct, 4),
+        "threshold_pct": round(threshold, 4),
+        "late_chase_atr_mult": float(profile.get("late_chase_atr_mult", 1.5)),
+    }
+
+
+def _rvol_block(signal_result: dict, profile: dict) -> Optional[dict]:
+    if not bool(profile.get("rvol_gate_enabled", True)):
+        return None
+    rvol = (signal_result or {}).get("rvol_data") or {}
+    if not rvol.get("rvol_available"):
+        return None
+    try:
+        ratio = float(rvol.get("rvol_ratio") or 0)
+    except (TypeError, ValueError):
+        return None
+    min_ratio = float(profile.get("rvol_min_multiplier", 1.3))
+    if ratio >= min_ratio:
+        return None
+    return {
+        "reason": "low_rvol",
+        "rvol_ratio": round(ratio, 4),
+        "min_rvol": min_ratio,
+        "avg_vol": rvol.get("avg_vol"),
+        "current_vol": rvol.get("current_vol"),
+        "slot": rvol.get("slot"),
+    }
+
+
+def _vwap_1m_confirmation_downgrade(candidate: dict, setup_grade: SetupGrade,
+                                    profile: dict) -> SetupGrade:
+    if not bool(profile.get("vwap_1m_confirm_enabled", True)):
+        return setup_grade
+    if setup_grade is None or setup_grade.grade != "A+":
+        return setup_grade
+
+    signals = candidate.get("signals_snap") or {}
+    vwap_signal = signals.get("vwap_deviation") or {}
+    vwap_meta = vwap_signal.get("meta") or {}
+    try:
+        price = float(vwap_meta.get("price"))
+        vwap = float(vwap_meta.get("vwap"))
+        vwap_score = float(vwap_signal.get("score") or 0)
+    except (TypeError, ValueError):
+        return setup_grade
+    if price <= 0 or vwap <= 0:
+        return setup_grade
+
+    action = str(candidate.get("action_hint") or "").upper()
+    wrong_side = (action == "BUY" and price < vwap) or (action == "SELL" and price > vwap)
+    weakly_against = (action == "BUY" and vwap_score > 0.05) or (action == "SELL" and vwap_score < -0.05)
+    if not (wrong_side and weakly_against):
+        return setup_grade
+
+    downgraded = SetupGrade(
+        grade="A",
+        size_multiplier=min(float(setup_grade.size_multiplier or 1.0), 1.0),
+        partial_exit_pct=max(float(setup_grade.partial_exit_pct or 0.25), 0.40),
+        runner_atr_multiplier=min(float(setup_grade.runner_atr_multiplier or 1.0), 1.0),
+        allow_leverage=False,
+        reasons=list(setup_grade.reasons or []) + ["1m_vwap_not_confirmed"],
+        confirmations=setup_grade.confirmations,
+        sector_confirmation=setup_grade.sector_confirmation,
+        percentile_rank=setup_grade.percentile_rank,
+        orb_active=setup_grade.orb_active,
+    )
+    log_event("INFO", "a_plus_downgraded_1m_confirmation", {
+        "ticker": candidate.get("ticker"),
+        "action": action,
+        "price": round(price, 4),
+        "vwap": round(vwap, 4),
+        "vwap_score": round(vwap_score, 4),
+        "reason": "wrong_side_of_vwap",
+    })
+    candidate.setdefault("setup_context", {})["a_plus_downgraded_1m_confirmation"] = True
+    return downgraded
+
+
 def _event_risk_active(ticker: str) -> dict:
     try:
         from backend.earnings.scanner import get_cached_earnings_guard
@@ -1982,8 +2151,25 @@ def _breakout_quality(side: str, composite: float, signals: dict, market_regime:
     return round(sum(components) / len(components), 4)
 
 
+def _time_of_day_rank_bonus(minutes_since_open: Optional[int]) -> float:
+    try:
+        minutes = int(minutes_since_open)
+    except (TypeError, ValueError):
+        return 0.0
+    if 15 <= minutes <= 45:
+        return 0.10
+    if 60 <= minutes <= 120:
+        return -0.08
+    if 300 <= minutes <= 345:
+        return 0.07
+    if 360 <= minutes <= 385:
+        return 0.05
+    return 0.0
+
+
 def _candidate_rank_score(composite: float, breakout_quality: float, strategy_family: str,
-                          event_risk_active: bool = False) -> float:
+                          event_risk_active: bool = False,
+                          minutes_since_open: Optional[int] = None) -> float:
     strategy_bonus = {
         "trend_following": 0.12,
         "signal_composite": 0.04,
@@ -1991,8 +2177,9 @@ def _candidate_rank_score(composite: float, breakout_quality: float, strategy_fa
         "direct_short": -0.03,
     }.get(str(strategy_family or ""), 0.0)
     event_penalty = 0.08 if event_risk_active else 0.0
+    time_bonus = _time_of_day_rank_bonus(minutes_since_open)
     score = (abs(float(composite or 0)) * 0.45) + (float(breakout_quality or 0) * 0.55)
-    return round(max(0.0, score + strategy_bonus - event_penalty), 4)
+    return round(max(0.0, score + strategy_bonus + time_bonus - event_penalty), 4)
 
 
 def _trade_setup_context(ticker: str, action: str, composite: float,
@@ -2014,6 +2201,7 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
     atr_data = signal_result.get("atr_data") or {}
     minutes_since_open = _minutes_since_regular_open()
     is_leveraged = _is_leveraged_etf(str(ticker or "").upper(), PROFILE)
+    time_of_day_bonus = _time_of_day_rank_bonus(minutes_since_open)
     return {
         "ticker": ticker,
         "action": action,
@@ -2023,8 +2211,10 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
         "market_regime": getattr(regime_state, "market_regime", None),
         "breakout_quality": breakout_quality,
         "candidate_rank_score": _candidate_rank_score(
-            composite, breakout_quality, strategy_family, bool(event_info)
+            composite, breakout_quality, strategy_family, bool(event_info),
+            minutes_since_open=minutes_since_open,
         ),
+        "time_of_day_bonus": time_of_day_bonus,
         "event_risk_active": bool(event_info),
         "event_risk_intraday_probe": event_probe,
         "event_risk_info": event_info,
@@ -3135,6 +3325,9 @@ def run_signal_cycle():
                     candidate.get("orb_score", 0.0),
                     effective_profile,
                 )
+                setup_grade = _vwap_1m_confirmation_downgrade(
+                    candidate, setup_grade, effective_profile
+                )
                 candidate["setup_grade"] = setup_grade
                 candidate["setup_context"]["setup_grade"] = setup_grade.grade
                 candidate["setup_context"]["sector_confirmation"] = setup_grade.sector_confirmation
@@ -3548,6 +3741,38 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         _record_blocked_opportunity(
             ticker, action_hint, composite, signals_snap, setup_context,
             ticker_regime, "exposure", reason,
+        )
+        return
+
+    late_chase_block = _late_chase_block(action_hint, signals_snap, atr_data, profile)
+    if late_chase_block:
+        log_event("INFO", "late_chase_block", {
+            "ticker": ticker,
+            "action": action_hint,
+            "composite": round(composite, 4),
+            **late_chase_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "entry_quality", late_chase_block["reason"],
+            reference_price=signal_result.get("current_price"),
+            block_detail=late_chase_block,
+        )
+        return
+
+    rvol_block = _rvol_block(signal_result, profile)
+    if rvol_block:
+        log_event("INFO", "rvol_gate_block", {
+            "ticker": ticker,
+            "action": action_hint,
+            "composite": round(composite, 4),
+            **rvol_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "entry_quality", rvol_block["reason"],
+            reference_price=signal_result.get("current_price"),
+            block_detail=rvol_block,
         )
         return
 
@@ -5775,6 +6000,12 @@ def _save_snapshot(portfolio_state, regime):
 def run_nightly_sweep():
     """Runs after US market close every weekday. Simulation on alpaca_paper, live on ibkr_live."""
     try:
+        try:
+            from backend.learning.gate_controller import run_b_shadow_promotion_controller
+            run_b_shadow_promotion_controller()
+        except Exception as e:
+            log_event("WARN", "b_shadow_promotion_controller_error", {"error": str(e)[:160]})
+
         if not _env_bool("SWEEP_ENABLED", False):
             log_event("INFO", "nightly_sweep_skipped", {"reason": "disabled"})
             return
@@ -5870,6 +6101,11 @@ def run_weekly_digest():
     daily_reviews = get_daily_reviews(limit=7)
     if not trades and not daily_reviews:
         return
+    try:
+        from backend.learning.gate_controller import run_gate_controller
+        run_gate_controller(days=7, limit=500)
+    except Exception as e:
+        log_event("WARN", "gate_controller_error", {"error": str(e)[:160]})
     insights = generate_weekly_insights(trades, daily_reviews=daily_reviews)
     from datetime import date
     save_learning(
