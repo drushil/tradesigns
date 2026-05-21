@@ -726,7 +726,15 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
     p.setdefault("ranging_probe_enabled", True)
     p.setdefault("ranging_probe_allowed_grades", "A+,A")
+    p.setdefault("ranging_probe_shadow_grades", "B")
     p.setdefault("ranging_probe_size_multiplier", 0.35)
+    p.setdefault("ranging_probe_grade_b_shadow_size_multiplier", 0.20)
+    p.setdefault("ranging_probe_grade_b_min_composite", 0.40)
+    p.setdefault("ranging_probe_grade_b_min_breakout_quality", 0.60)
+    p.setdefault("ranging_probe_grade_b_promote_min_samples", 8)
+    p.setdefault("ranging_probe_grade_b_promote_min_win_rate", 0.55)
+    p.setdefault("ranging_probe_grade_b_promote_requires_mfe_gt_mae", True)
+    p.setdefault("ranging_probe_grade_b_promote_size_multiplier", 0.20)
     p.setdefault("ranging_probe_min_ev_pct", 0.03)
     p.setdefault("ranging_probe_min_composite", 0.20)
     p.setdefault("ranging_probe_min_breakout_quality", 0.35)
@@ -806,10 +814,50 @@ def _apply_execution_overrides(profile: dict) -> dict:
             "RANGING_PROBE_ALLOWED_GRADES",
             str(p["ranging_probe_allowed_grades"]),
         )
+    if os.getenv("RANGING_PROBE_SHADOW_GRADES"):
+        p["ranging_probe_shadow_grades"] = _env_value(
+            "RANGING_PROBE_SHADOW_GRADES",
+            str(p["ranging_probe_shadow_grades"]),
+        )
     if os.getenv("RANGING_PROBE_SIZE_MULTIPLIER"):
         p["ranging_probe_size_multiplier"] = _env_float(
             "RANGING_PROBE_SIZE_MULTIPLIER",
             p["ranging_probe_size_multiplier"],
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_SHADOW_SIZE_MULTIPLIER"):
+        p["ranging_probe_grade_b_shadow_size_multiplier"] = _env_float(
+            "RANGING_PROBE_GRADE_B_SHADOW_SIZE_MULTIPLIER",
+            p["ranging_probe_grade_b_shadow_size_multiplier"],
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_MIN_COMPOSITE"):
+        p["ranging_probe_grade_b_min_composite"] = _env_float(
+            "RANGING_PROBE_GRADE_B_MIN_COMPOSITE",
+            p["ranging_probe_grade_b_min_composite"],
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_MIN_BREAKOUT_QUALITY"):
+        p["ranging_probe_grade_b_min_breakout_quality"] = _env_float(
+            "RANGING_PROBE_GRADE_B_MIN_BREAKOUT_QUALITY",
+            p["ranging_probe_grade_b_min_breakout_quality"],
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_PROMOTE_MIN_SAMPLES"):
+        p["ranging_probe_grade_b_promote_min_samples"] = _env_int(
+            "RANGING_PROBE_GRADE_B_PROMOTE_MIN_SAMPLES",
+            int(p["ranging_probe_grade_b_promote_min_samples"]),
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_PROMOTE_MIN_WIN_RATE"):
+        p["ranging_probe_grade_b_promote_min_win_rate"] = _env_float(
+            "RANGING_PROBE_GRADE_B_PROMOTE_MIN_WIN_RATE",
+            p["ranging_probe_grade_b_promote_min_win_rate"],
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_PROMOTE_REQUIRES_MFE_GT_MAE"):
+        p["ranging_probe_grade_b_promote_requires_mfe_gt_mae"] = _env_bool(
+            "RANGING_PROBE_GRADE_B_PROMOTE_REQUIRES_MFE_GT_MAE",
+            bool(p["ranging_probe_grade_b_promote_requires_mfe_gt_mae"]),
+        )
+    if os.getenv("RANGING_PROBE_GRADE_B_PROMOTE_SIZE_MULTIPLIER"):
+        p["ranging_probe_grade_b_promote_size_multiplier"] = _env_float(
+            "RANGING_PROBE_GRADE_B_PROMOTE_SIZE_MULTIPLIER",
+            p["ranging_probe_grade_b_promote_size_multiplier"],
         )
     if os.getenv("RANGING_PROBE_MIN_EV_PCT"):
         p["ranging_probe_min_ev_pct"] = _env_float("RANGING_PROBE_MIN_EV_PCT", p["ranging_probe_min_ev_pct"])
@@ -1561,6 +1609,8 @@ def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
     action = str(setup_context.get("action") or "BUY").upper()
     direction = 1 if action == "BUY" else -1
     allowed_grades = _csv_upper_set(profile.get("ranging_probe_allowed_grades", "A+,A"))
+    shadow_grades = _csv_upper_set(profile.get("ranging_probe_shadow_grades", "B"))
+    shadow_only = grade in shadow_grades and grade not in allowed_grades
     theme = str(setup_context.get("theme") or _ticker_theme(ticker)).lower()
     blocked_themes = {item.lower() for item in _csv_upper_set(profile.get("ranging_probe_blocked_themes", ""))}
 
@@ -1581,8 +1631,13 @@ def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
 
     if not bool(profile.get("ranging_probe_enabled", False)):
         return reject("ranging_probe_disabled", probe_eligible=False)
-    if grade not in allowed_grades:
-        return reject("grade_not_probe_allowed", allowed_grades=sorted(allowed_grades))
+    if grade not in allowed_grades and not shadow_only:
+        return reject(
+            "grade_not_probe_allowed",
+            probe_eligible=False,
+            allowed_grades=sorted(allowed_grades),
+            shadow_grades=sorted(shadow_grades),
+        )
     if block_reason not in {
         "ranging_regime_grade_veto",
         "ranging_regime_a_plus_quality_veto",
@@ -1602,11 +1657,21 @@ def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
 
     composite = abs(float(setup_context.get("composite") or 0))
     min_composite = float(profile.get("ranging_probe_min_composite", 0.20))
+    if shadow_only and grade == "B":
+        min_composite = max(
+            min_composite,
+            float(profile.get("ranging_probe_grade_b_min_composite", 0.40)),
+        )
     if composite < min_composite:
         return reject("composite_below_probe_min", composite=round(composite, 4), min_composite=min_composite)
 
     breakout_quality = float(setup_context.get("breakout_quality") or 0)
     min_breakout = float(profile.get("ranging_probe_min_breakout_quality", 0.35))
+    if shadow_only and grade == "B":
+        min_breakout = max(
+            min_breakout,
+            float(profile.get("ranging_probe_grade_b_min_breakout_quality", 0.60)),
+        )
     if breakout_quality < min_breakout:
         return reject(
             "breakout_quality_below_probe_min",
@@ -1655,6 +1720,38 @@ def _ranging_probe_decision(ticker: str, setup_context: dict, ev_result: dict,
         )
 
     size_multiplier = float(profile.get("ranging_probe_size_multiplier", 0.35))
+    if shadow_only:
+        shadow_size_multiplier = float(profile.get("ranging_probe_grade_b_shadow_size_multiplier", 0.20))
+        setup_context["probe_eligible"] = True
+        setup_context["reason_not_probed"] = "b_grade_shadow_only"
+        setup_context["ranging_probe_shadow"] = True
+        setup_context["ranging_probe_detail"] = {
+            "allowed": False,
+            "probe_eligible": True,
+            "reason_not_probed": "b_grade_shadow_only",
+            "grade": grade,
+            "block_reason": block_reason,
+            "aligned_signals": aligned,
+            "directional_scores": {k: round(v, 4) for k, v in directional.items()},
+            "net_ev_pct": net_ev,
+            "hypothetical_size_multiplier": shadow_size_multiplier,
+            "theme": theme,
+            "sector_relative_pct": relative_pct,
+            "composite": round(composite, 4),
+            "breakout_quality": round(breakout_quality, 4),
+            "promotion_gate": {
+                "min_samples": int(profile.get("ranging_probe_grade_b_promote_min_samples", 8)),
+                "min_win_rate": float(profile.get("ranging_probe_grade_b_promote_min_win_rate", 0.55)),
+                "requires_avg_mfe_gt_abs_avg_mae": bool(
+                    profile.get("ranging_probe_grade_b_promote_requires_mfe_gt_mae", True)
+                ),
+                "promote_size_multiplier": float(
+                    profile.get("ranging_probe_grade_b_promote_size_multiplier", 0.20)
+                ),
+            },
+        }
+        return setup_context["ranging_probe_detail"]
+
     current_multiplier = float(ev_result.get("size_multiplier") or 1.0)
     ev_result["size_multiplier"] = min(current_multiplier, size_multiplier)
     ev_result["ev_decision"] = "ranging_regime_probe"

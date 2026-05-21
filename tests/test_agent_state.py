@@ -451,6 +451,118 @@ def test_ranging_probe_rejects_weak_sector_relative_strength():
     assert setup_context["reason_not_probed"] == "sector_relative_strength_too_weak"
 
 
+def test_ranging_probe_marks_strong_b_grade_as_shadow_only():
+    import backend.agent as agent
+
+    ev_result = {"net_ev_pct": 0.14, "size_multiplier": 1.0}
+    setup_context = {
+        "action": "BUY",
+        "intraday_regime": "ranging",
+        "setup_grade": "B",
+        "composite": 0.44,
+        "breakout_quality": 0.67,
+        "theme": "tech",
+        "sector_momentum": {"relative_pct": 0.8},
+    }
+
+    block = agent._ranging_regime_block(
+        "ARM",
+        setup_context,
+        ev_result,
+        None,
+        {
+            "ranging_min_grade_required": "A+",
+            "ranging_probe_enabled": True,
+            "ranging_probe_allowed_grades": "A+,A",
+            "ranging_probe_shadow_grades": "B",
+            "ranging_probe_size_multiplier": 0.35,
+            "ranging_probe_grade_b_shadow_size_multiplier": 0.20,
+            "ranging_probe_grade_b_min_composite": 0.40,
+            "ranging_probe_grade_b_min_breakout_quality": 0.60,
+            "ranging_probe_grade_b_promote_min_samples": 8,
+            "ranging_probe_grade_b_promote_min_win_rate": 0.55,
+            "ranging_probe_grade_b_promote_requires_mfe_gt_mae": True,
+            "ranging_probe_grade_b_promote_size_multiplier": 0.20,
+            "ranging_probe_min_ev_pct": 0.03,
+            "ranging_probe_min_composite": 0.20,
+            "ranging_probe_min_breakout_quality": 0.35,
+            "ranging_probe_min_aligned_signals": 2,
+            "ranging_probe_min_macd": 0.10,
+            "ranging_probe_min_tape": 0.10,
+            "ranging_probe_min_relative_strength": 0.25,
+            "ranging_probe_max_tape_against": 0.05,
+            "ranging_probe_min_sector_relative_pct": -0.50,
+            "ranging_probe_blocked_themes": "",
+        },
+        signals_snap={
+            "macd_crossover": {"score": 0.18},
+            "tape_aggression": {"score": 0.31},
+            "relative_strength": {"score": 0.42},
+        },
+    )
+
+    assert block["reason"] == "ranging_regime_grade_veto"
+    assert block["probe"]["reason_not_probed"] == "b_grade_shadow_only"
+    assert block["probe"]["hypothetical_size_multiplier"] == pytest.approx(0.20)
+    assert block["probe"]["promotion_gate"] == {
+        "min_samples": 8,
+        "min_win_rate": 0.55,
+        "requires_avg_mfe_gt_abs_avg_mae": True,
+        "promote_size_multiplier": 0.20,
+    }
+    assert setup_context["probe_eligible"] is True
+    assert setup_context["ranging_probe_shadow"] is True
+    assert "ev_decision" not in ev_result
+
+
+def test_ranging_probe_rejects_b_shadow_below_extra_breakout_guard():
+    import backend.agent as agent
+
+    setup_context = {
+        "action": "BUY",
+        "intraday_regime": "ranging",
+        "setup_grade": "B",
+        "composite": 0.44,
+        "breakout_quality": 0.55,
+        "theme": "tech",
+        "sector_momentum": {"relative_pct": 0.8},
+    }
+
+    block = agent._ranging_regime_block(
+        "AMD",
+        setup_context,
+        {"net_ev_pct": 0.14, "size_multiplier": 1.0},
+        None,
+        {
+            "ranging_min_grade_required": "A+",
+            "ranging_probe_enabled": True,
+            "ranging_probe_allowed_grades": "A+,A",
+            "ranging_probe_shadow_grades": "B",
+            "ranging_probe_grade_b_min_composite": 0.40,
+            "ranging_probe_grade_b_min_breakout_quality": 0.60,
+            "ranging_probe_min_ev_pct": 0.03,
+            "ranging_probe_min_composite": 0.20,
+            "ranging_probe_min_breakout_quality": 0.35,
+            "ranging_probe_min_aligned_signals": 2,
+            "ranging_probe_min_macd": 0.10,
+            "ranging_probe_min_tape": 0.10,
+            "ranging_probe_min_relative_strength": 0.25,
+            "ranging_probe_max_tape_against": 0.05,
+            "ranging_probe_min_sector_relative_pct": -0.50,
+            "ranging_probe_blocked_themes": "",
+        },
+        signals_snap={
+            "macd_crossover": {"score": 0.18},
+            "tape_aggression": {"score": 0.31},
+            "relative_strength": {"score": 0.42},
+        },
+    )
+
+    assert block["reason"] == "ranging_regime_grade_veto"
+    assert block["probe"]["reason_not_probed"] == "breakout_quality_below_probe_min"
+    assert block["probe"]["min_breakout_quality"] == pytest.approx(0.60)
+
+
 def test_ranging_core_consensus_passes_with_two_core_signals():
     import backend.agent as agent
 
