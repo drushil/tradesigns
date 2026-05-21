@@ -3146,7 +3146,13 @@ def run_signal_cycle():
                 )
                 if ranging_block:
                     if ranging_block.get("probe"):
-                        log_event("INFO", "ranging_probe_rejected", ranging_block["probe"])
+                        _probe = ranging_block["probe"]
+                        _probe_event = (
+                            "ranging_probe_shadow_b_candidate"
+                            if _probe.get("reason_not_probed") == "b_grade_shadow_only"
+                            else "ranging_probe_rejected"
+                        )
+                        log_event("INFO", _probe_event, _probe)
                     log_event("INFO", "ranging_regime_candidate_block", {
                         "ticker": t,
                         "composite": round(float(candidate.get("composite") or 0), 4),
