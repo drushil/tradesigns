@@ -770,6 +770,10 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("theme_max_leveraged_candidates_per_cycle", 1)
     p.setdefault("dynamic_universe_shadow_enabled", True)
     p.setdefault("dynamic_universe_max_shadow_per_theme", 2)
+    # Phase 1: runner trail + breakeven promotion
+    p.setdefault("runner_active_trail_enabled", True)
+    p.setdefault("breakeven_promotion_enabled", True)
+    p.setdefault("breakeven_atr_mult", 0.6)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -979,6 +983,13 @@ def _apply_execution_overrides(profile: dict) -> dict:
     short_override = os.getenv("ALLOW_SHORT_SELLING")
     if short_override is not None and short_override.strip():
         p["allow_short_selling"] = short_override.strip().lower() == "true"
+    # Phase 1: runner trail + breakeven promotion env overrides
+    if os.getenv("RUNNER_ACTIVE_TRAIL_ENABLED") is not None:
+        p["runner_active_trail_enabled"] = _env_bool("RUNNER_ACTIVE_TRAIL_ENABLED", True)
+    if os.getenv("BREAKEVEN_PROMOTION_ENABLED") is not None:
+        p["breakeven_promotion_enabled"] = _env_bool("BREAKEVEN_PROMOTION_ENABLED", True)
+    if os.getenv("BREAKEVEN_ATR_MULT"):
+        p["breakeven_atr_mult"] = _env_float("BREAKEVEN_ATR_MULT", 0.6)
     return p
 
 
@@ -2612,6 +2623,10 @@ def _rehydrated_open_trade(record: dict) -> dict:
         "runner_atr_mult":          float(record.get("runner_atr_mult") or 0.8),
         "runner_stop_price":        float(record["runner_stop_price"]) if record.get("runner_stop_price") is not None else None,
         "vwap_thesis_strike_count": int(record.get("vwap_thesis_strike_count") or 0),
+        # Phase 1: runner trail + breakeven promotion
+        "breakeven_stop_set":           bool(record.get("breakeven_stop_set") or False),
+        "runner_trail_update_count":    int(record.get("runner_trail_update_count") or 0),
+        "runner_trail_last_update_at":  record.get("runner_trail_last_update_at"),
     }
 
 
@@ -4119,6 +4134,10 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "runner_stop_price":   None,
         # Thesis invalidation strike counter
         "vwap_thesis_strike_count": 0,
+        # Phase 1: runner trail + breakeven promotion
+        "breakeven_stop_set":           False,
+        "runner_trail_update_count":    0,
+        "runner_trail_last_update_at":  None,
     }
     save_open_trade(ticker, _open_trades[ticker])
 
@@ -4196,6 +4215,150 @@ def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
             _open_trades[ticker]["vwap_thesis_strike_count"] = 0
             save_open_trade(ticker, _open_trades[ticker])
     return None
+
+
+def _check_breakeven_promotion(ticker: str, trade: dict, current_price: float):
+    """
+    Once MFE reaches breakeven_atr_mult × atr_pct, move the in-memory stop to just
+    above (for longs) / below (for shorts) the entry price so a reversal cannot turn
+    a winner into a full loss.
+
+    For trades still on the original bracket: only the in-memory stop_price is updated;
+    the broker-side bracket leg remains as a catastrophic backstop.
+    For trades with a live protective_stop_order_id: we cancel+replace at breakeven.
+    One-shot: guarded by breakeven_stop_set to prevent re-firing.
+    """
+    if not _env_bool("BREAKEVEN_PROMOTION_ENABLED", True):
+        return
+    if trade.get("breakeven_stop_set") or trade.get("partial_exit_done"):
+        return
+
+    entry_price = float(trade.get("entry_price") or 0)
+    atr_pct = float(trade.get("atr_pct") or 0)
+    if entry_price <= 0 or atr_pct <= 0:
+        return
+
+    pnl_pct = _trade_pnl_pct(trade, current_price)
+    threshold_pct = atr_pct * _env_float("BREAKEVEN_ATR_MULT", 0.6)
+    if pnl_pct < threshold_pct:
+        return
+
+    side = trade.get("side", "BUY")
+    tick = entry_price * 0.001  # 0.1% buffer
+    if side == "BUY":
+        new_stop = entry_price + tick
+        old_stop = float(trade.get("stop_price") or 0)
+        if new_stop <= old_stop:
+            _open_trades[ticker]["breakeven_stop_set"] = True
+            save_open_trade(ticker, _open_trades[ticker])
+            return
+    else:
+        new_stop = entry_price - tick
+        old_stop = float(trade.get("stop_price") or 0)
+        if old_stop > 0 and new_stop >= old_stop:
+            _open_trades[ticker]["breakeven_stop_set"] = True
+            save_open_trade(ticker, _open_trades[ticker])
+            return
+
+    if trade.get("protective_stop_order_id"):
+        stop_order = _replace_protective_stop_order(ticker, _open_trades[ticker], new_stop)
+        if stop_order.get("error"):
+            log_event("WARN", "breakeven_promotion_failed", {
+                "ticker": ticker,
+                "error": stop_order["error"],
+                "new_stop": round(new_stop, 4),
+            })
+            return
+    else:
+        # Bracket still active — update in-memory stop only; broker bracket is the backstop
+        _open_trades[ticker]["stop_price"] = round(new_stop, 4)
+
+    _open_trades[ticker]["breakeven_stop_set"] = True
+    save_open_trade(ticker, _open_trades[ticker])
+
+    log_event("INFO", "breakeven_promoted", {
+        "ticker": ticker,
+        "side": side,
+        "entry_price": round(entry_price, 4),
+        "new_stop": round(new_stop, 4),
+        "old_stop": round(old_stop, 4),
+        "pnl_pct": round(pnl_pct, 4),
+        "threshold_pct": round(threshold_pct, 4),
+        "atr_pct": round(atr_pct, 4),
+        "has_protective_stop_order": bool(trade.get("protective_stop_order_id")),
+    })
+
+
+def _update_intraday_runner_stop(ticker: str, trade: dict, current_price: float):
+    """
+    Every cycle after partial exit is done, ratchet the runner stop upward using the
+    same chandelier mechanism that already works for promoted swing trades.
+    Calls _replace_protective_stop_order() (cancel + resubmit GTC stop) only when the
+    new candidate stop is strictly better than the current runner_stop_price.
+    """
+    if not _env_bool("RUNNER_ACTIVE_TRAIL_ENABLED", True):
+        return
+    if not trade.get("partial_exit_done"):
+        return
+    if not trade.get("runner_stop_price"):
+        return
+
+    side = trade.get("side", "BUY")
+    entry_price = float(trade.get("entry_price") or current_price)
+    prev_highest = float(trade.get("highest_price_since_entry") or entry_price)
+
+    if side == "BUY":
+        new_highest = max(current_price, prev_highest)
+    else:
+        new_highest = min(current_price, prev_highest) if prev_highest > 0 else current_price
+
+    _open_trades[ticker]["highest_price_since_entry"] = new_highest
+
+    runner_atr_mult = float(trade.get("runner_atr_mult") or 0.8)
+    try:
+        atr_info = compute_atr(ticker)
+        atr_raw = float(atr_info.get("atr_raw") or (current_price * 0.025))
+    except Exception:
+        atr_raw = current_price * 0.025
+
+    if side == "BUY":
+        candidate_stop = new_highest - atr_raw * runner_atr_mult
+        old_stop = float(trade.get("runner_stop_price") or 0)
+        should_trail = candidate_stop > old_stop
+    else:
+        candidate_stop = new_highest + atr_raw * runner_atr_mult
+        old_stop = float(trade.get("runner_stop_price") or 0)
+        should_trail = old_stop <= 0 or candidate_stop < old_stop
+
+    if not should_trail:
+        return
+
+    stop_order = _replace_protective_stop_order(ticker, _open_trades[ticker], candidate_stop)
+    if stop_order.get("error"):
+        log_event("WARN", "runner_stop_trail_failed", {
+            "ticker": ticker,
+            "error": stop_order["error"],
+            "candidate_stop": round(candidate_stop, 4),
+        })
+        return
+
+    trail_count = int(trade.get("runner_trail_update_count") or 0) + 1
+    _open_trades[ticker]["runner_stop_price"] = round(candidate_stop, 4)
+    _open_trades[ticker]["runner_trail_update_count"] = trail_count
+    _open_trades[ticker]["runner_trail_last_update_at"] = datetime.utcnow().isoformat()
+    save_open_trade(ticker, _open_trades[ticker])
+
+    log_event("INFO", "runner_stop_trailed", {
+        "ticker": ticker,
+        "side": side,
+        "old_stop": round(old_stop, 4),
+        "new_stop": round(candidate_stop, 4),
+        "highest_since_entry": round(new_highest, 4),
+        "current_price": round(current_price, 4),
+        "atr_raw": round(atr_raw, 4),
+        "runner_atr_mult": runner_atr_mult,
+        "trail_count": trail_count,
+    })
 
 
 def _check_partial_exit(ticker: str, trade: dict, current_price: float):
@@ -4388,16 +4551,23 @@ def _check_exits(portfolio_state, profile):
                 if exit_reason is None and int(trade.get("hold_extension_count") or 0) > 0:
                     exit_reason = _check_momentum_exit(ticker, trade, profile)
 
+                # Phase 1: Move stop to breakeven once MFE crosses breakeven_atr_mult × ATR
+                if exit_reason is None and not trade.get("partial_exit_done"):
+                    _check_breakeven_promotion(ticker, trade, current_price)
+
                 # Partial exit + runner check (before stop/TP — runner may have its own stop)
                 if exit_reason is None and not trade.get("partial_exit_done"):
                     _check_partial_exit(ticker, trade, current_price)
+
+                # Phase 1: Ratchet runner stop upward every cycle after partial exit fires
+                if exit_reason is None and trade.get("partial_exit_done"):
+                    _update_intraday_runner_stop(ticker, trade, current_price)
 
                 # Thesis invalidation: 2 consecutive VWAP-against closes
                 if exit_reason is None and not trade.get("mean_reversion_trade"):
                     exit_reason = _check_thesis_invalidation(ticker, trade)
 
-                # Stop-loss and take-profit always evaluated first
-                # If runner is active, use runner_stop_price in place of original stop
+                # Stop-loss and take-profit: runner_stop_price takes precedence once active
                 stop_price = float(trade.get("runner_stop_price") or 0) or trade["stop_price"]
                 take_profit_price = trade.get("take_profit_price")
 
@@ -4871,6 +5041,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "setup_grade":     trade.get("setup_grade"),
         "partial_exit_done": bool(trade.get("partial_exit_done")),
         "entry_tranche_count": int(trade.get("entry_tranche_count") or 1),
+        # Phase 1: runner trail + breakeven
+        "breakeven_stop_set":        bool(trade.get("breakeven_stop_set")),
+        "runner_trail_update_count": int(trade.get("runner_trail_update_count") or 0),
     }
 
     insert_trade(trade_record)
