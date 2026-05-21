@@ -650,6 +650,22 @@ def compute_position_size(ticker: str, total_capital: float, profile: dict,
     else:
         stop_multiplier = 1.5
     stop_distance_pct = max(0.001, atr_fraction * stop_multiplier)
+
+    # Cap stop width so it never violates the reward-risk gate downstream.
+    # e.g. ARM: ATR 1.3% × 2.5 = 3.25% stop, TP 4.5% / min_rr 1.5 → cap 3.0%.
+    # Without this cap the wider stop reaches _reward_risk_block() and blocks
+    # the trade entirely, turning "breathing room" into "no trade".
+    _tp_pct = float(profile.get("take_profit_pct", float(profile.get("stop_loss_pct", 2.0)) * 1.2))
+    _is_ranging = getattr(regime_state, "intraday_regime", "") == "ranging"
+    _min_rr = float(
+        profile.get("ranging_min_reward_risk_ratio", 2.0)
+        if _is_ranging
+        else profile.get("min_reward_risk_ratio", 1.5)
+    )
+    if _tp_pct > 0 and _min_rr > 0:
+        rr_cap = (_tp_pct / 100.0) / _min_rr
+        stop_distance_pct = min(stop_distance_pct, max(0.001, rr_cap))
+
     base_size_eur = target_risk_eur / stop_distance_pct
 
     conviction_scalar = 0.5 + max(0.0, min(float(conviction or 0), 1.0))
