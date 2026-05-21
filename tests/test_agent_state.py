@@ -12,6 +12,7 @@ Unit tests for the critical behavioral paths added in recent sessions:
 import math
 import pytest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 
@@ -630,6 +631,29 @@ def test_ranging_probe_macd_default_is_ranging_sized():
     profile = agent._apply_execution_overrides({})
 
     assert profile["ranging_probe_min_macd"] == pytest.approx(0.10)
+
+
+def test_trade_setup_context_carries_composite_for_ranging_gates(monkeypatch):
+    import backend.agent as agent
+
+    monkeypatch.setattr(agent, "_event_risk_active", lambda ticker: None)
+    monkeypatch.setattr(agent, "_minutes_since_regular_open", lambda: 90)
+
+    setup_context = agent._trade_setup_context(
+        "AMD",
+        "BUY",
+        0.42,
+        {
+            "macd_crossover": {"score": 0.4},
+            "tape_aggression": {"score": 0.2},
+            "relative_strength": {"score": 0.5},
+            "vwap_deviation": {"score": 0.1},
+        },
+        {"atr_data": {"atr_pct": 0.8, "volatility_regime": "normal"}},
+        SimpleNamespace(intraday_regime="ranging", market_regime="bull"),
+    )
+
+    assert setup_context["composite"] == pytest.approx(0.42)
 
 
 def test_ranging_stop_loss_cooldown_blocks_same_ticker_reentry():

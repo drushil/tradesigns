@@ -1979,6 +1979,7 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
     return {
         "ticker": ticker,
         "action": action,
+        "composite": float(composite or 0),
         "strategy_family": strategy_family,
         "intraday_regime": getattr(regime_state, "intraday_regime", None),
         "market_regime": getattr(regime_state, "market_regime", None),
