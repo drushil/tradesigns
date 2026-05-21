@@ -26,6 +26,13 @@ def test_rehydrated_open_trade_restores_runtime_fields():
         "highest_price_since_entry": 217.0,
         "vwap_thesis_strike_count": 2,
         "setup_grade": "A+",
+        "breakeven_stop_set": True,
+        "runner_trail_update_count": 3,
+        "runner_trail_last_update_at": "2026-05-13T14:05:00+00:00",
+        "hold_score_latest": 0.42,
+        "hold_score_min": -0.12,
+        "hold_score_max": 0.63,
+        "trim_done": True,
     })
 
     assert trade["entry_price"] == 210.5
@@ -37,6 +44,13 @@ def test_rehydrated_open_trade_restores_runtime_fields():
     assert trade["atr_pct"] == 1.4
     assert trade["stop_pct"] == 2.1
     assert trade["setup_grade"] == "A+"
+    assert trade["breakeven_stop_set"] is True
+    assert trade["runner_trail_update_count"] == 3
+    assert trade["runner_trail_last_update_at"] == "2026-05-13T14:05:00+00:00"
+    assert trade["hold_score_latest"] == 0.42
+    assert trade["hold_score_min"] == -0.12
+    assert trade["hold_score_max"] == 0.63
+    assert trade["trim_done"] is True
 
 
 def test_hydrate_open_trades_closes_stale_db_rows(monkeypatch):

@@ -4740,6 +4740,7 @@ def _check_exits(portfolio_state, profile):
                     exit_reason = _check_hold_score(
                         ticker, trade, current_price, hold_elapsed, hold_target, profile
                     )
+                    hold_target = _open_trades.get(ticker, {}).get("max_hold_minutes") or hold_target
 
                 # Thesis invalidation: 2 consecutive VWAP-against closes
                 if exit_reason is None and not trade.get("mean_reversion_trade"):
@@ -5222,7 +5223,9 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         # Phase 1: runner trail + breakeven
         "breakeven_stop_set":        bool(trade.get("breakeven_stop_set")),
         "runner_trail_update_count": int(trade.get("runner_trail_update_count") or 0),
+        "runner_trail_last_update_at": trade.get("runner_trail_last_update_at"),
         # Phase 2: hold score
+        "hold_score_latest": trade.get("hold_score_latest"),
         "hold_score_min":  trade.get("hold_score_min"),
         "hold_score_max":  trade.get("hold_score_max"),
         "trim_done":       bool(trade.get("trim_done")),

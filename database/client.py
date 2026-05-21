@@ -133,6 +133,13 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "runner_atr_mult": trade.get("runner_atr_mult"),
             "runner_stop_price": trade.get("runner_stop_price"),
             "vwap_thesis_strike_count": trade.get("vwap_thesis_strike_count"),
+            "breakeven_stop_set": trade.get("breakeven_stop_set"),
+            "runner_trail_update_count": trade.get("runner_trail_update_count"),
+            "runner_trail_last_update_at": trade.get("runner_trail_last_update_at"),
+            "hold_score_latest": trade.get("hold_score_latest"),
+            "hold_score_min": trade.get("hold_score_min"),
+            "hold_score_max": trade.get("hold_score_max"),
+            "trim_done": trade.get("trim_done"),
             "status": "open",
             "closed_at": None,
             "close_reason": None,
@@ -150,7 +157,10 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                              "intended_size_eur", "executed_size_eur", "executed_size_usd",
                              "sizing_json", "regime_debug_json", "percentile_rank",
                              "grade_reasons", "runner_atr_mult", "vwap_thesis_strike_count",
-                             "atr_pct", "atr_raw"}
+                             "atr_pct", "atr_raw", "breakeven_stop_set",
+                             "runner_trail_update_count", "runner_trail_last_update_at",
+                             "hold_score_latest", "hold_score_min", "hold_score_max",
+                             "trim_done"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}

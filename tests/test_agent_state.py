@@ -656,6 +656,129 @@ def test_trade_setup_context_carries_composite_for_ranging_gates(monkeypatch):
     assert setup_context["composite"] == pytest.approx(0.42)
 
 
+def test_hold_score_extends_target_and_tracks_min_max(monkeypatch):
+    import backend.agent as agent
+
+    ticker = "AMD"
+    agent._open_trades.clear()
+    agent._open_trades[ticker] = {
+        "ticker": ticker,
+        "side": "BUY",
+        "entry_price": 100.0,
+        "quantity": 2,
+        "hold_minutes": 30,
+        "max_hold_minutes": 30,
+        "hold_extension_count": 0,
+        "hold_score_min": 0.2,
+        "hold_score_max": 0.3,
+    }
+    agent._signal_cache[ticker] = (datetime.utcnow(), {"signals": {}})
+
+    saves = []
+    monkeypatch.setattr(agent, "save_open_trade", lambda _ticker, trade: saves.append(dict(trade)) or {})
+    monkeypatch.setattr(agent, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_trade_pnl_pct", lambda trade, current_price: 0.4)
+    monkeypatch.setattr(agent, "compute_hold_score", lambda **kwargs: {
+        "hold_score": 0.55,
+        "recommendation": "extend",
+        "confidence": 1.0,
+        "exhaustion_active": False,
+        "components": {},
+    })
+    monkeypatch.setenv("HOLD_SCORE_EXTEND_MINUTES", "20")
+
+    exit_reason = agent._check_hold_score(
+        ticker,
+        agent._open_trades[ticker],
+        current_price=101.0,
+        hold_elapsed=31,
+        hold_target=30,
+        profile={"hold_score_enabled": True},
+    )
+
+    assert exit_reason is None
+    assert agent._open_trades[ticker]["max_hold_minutes"] == 50
+    assert agent._open_trades[ticker]["hold_extension_count"] == 1
+    assert agent._open_trades[ticker]["hold_score_latest"] == pytest.approx(0.55)
+    assert agent._open_trades[ticker]["hold_score_min"] == pytest.approx(0.2)
+    assert agent._open_trades[ticker]["hold_score_max"] == pytest.approx(0.55)
+    assert saves
+
+
+def test_hold_score_trim_and_exit_disabled_by_default(monkeypatch):
+    import backend.agent as agent
+
+    ticker = "PLTR"
+    agent._open_trades.clear()
+    agent._open_trades[ticker] = {
+        "ticker": ticker,
+        "side": "BUY",
+        "entry_price": 100.0,
+        "quantity": 2,
+        "hold_minutes": 30,
+        "max_hold_minutes": 30,
+        "trim_done": False,
+    }
+    agent._signal_cache[ticker] = (datetime.utcnow(), {"signals": {}})
+
+    monkeypatch.delenv("HOLD_SCORE_TRIM_ENABLED", raising=False)
+    monkeypatch.delenv("HOLD_SCORE_EXIT_ENABLED", raising=False)
+    monkeypatch.setattr(agent, "save_open_trade", lambda *args, **kwargs: {})
+    monkeypatch.setattr(agent, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(agent, "_trade_pnl_pct", lambda trade, current_price: 0.7)
+    monkeypatch.setattr(agent, "_trim_position", lambda *args, **kwargs: pytest.fail("trim should be disabled"))
+    monkeypatch.setattr(agent, "compute_hold_score", lambda **kwargs: {
+        "hold_score": -0.75,
+        "recommendation": "exit",
+        "confidence": 1.0,
+        "exhaustion_active": True,
+        "components": {},
+    })
+
+    exit_reason = agent._check_hold_score(
+        ticker,
+        agent._open_trades[ticker],
+        current_price=101.0,
+        hold_elapsed=10,
+        hold_target=30,
+        profile={"hold_score_enabled": True},
+    )
+
+    assert exit_reason is None
+    assert agent._open_trades[ticker]["trim_done"] is False
+
+
+def test_high_atr_stop_is_capped_by_reward_risk():
+    from backend.broker.alpaca import compute_position_size
+
+    regime_state = SimpleNamespace(
+        intraday_regime="trending",
+        market_regime="bull",
+        vix=20,
+    )
+
+    sizing = compute_position_size(
+        "ARM",
+        total_capital=5000,
+        profile={
+            "risk_per_trade_pct": 2.0,
+            "max_position_pct": 30.0,
+            "take_profit_pct": 4.5,
+            "min_reward_risk_ratio": 1.5,
+            "ranging_min_reward_risk_ratio": 2.0,
+            "high_atr_stop_threshold_pct": 1.0,
+            "high_atr_stop_multiplier": 2.5,
+        },
+        conviction=0.8,
+        atr_data={"atr_pct": 1.3},
+        regime_state=regime_state,
+    )
+
+    assert sizing["stop_multiplier"] == pytest.approx(2.5)
+    assert sizing["stop_pct"] == pytest.approx(3.0)
+    assert sizing["size_eur"] <= 5000 * 0.30
+
+
 def test_ranging_stop_loss_cooldown_blocks_same_ticker_reentry():
     import backend.agent as agent
     now = datetime.utcnow()
