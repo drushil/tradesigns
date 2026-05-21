@@ -19,8 +19,8 @@ on:
     # Full US market hours (14:00–20:00 UTC). Previously 13-15,18-19 left a
     # 16:00–17:59 UTC gap (noon–2pm ET) that was only covered by cron-job.org.
     # Extended to 13-19 so GitHub Actions covers the full session.
-    # cron-job.org set to 15 min as backup only — GitHub cron is primary at 10 min.
-    - cron: '*/10 13-19 * * 1-5'
+    # cron-job.org set to 15 min as backup only — GitHub cron is primary at 5 min.
+    - cron: '*/5 13-19 * * 1-5'
   # Market-hours cycles triggered by cron-job.org via workflow_dispatch
   # (more reliable than GitHub's schedule — honours triggers within seconds)
   workflow_dispatch:
