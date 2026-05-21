@@ -50,7 +50,8 @@ from backend.broker.alpaca       import (get_account, get_positions, submit_mark
 from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_signals,
                                           compute_expected_value, get_effective_profile,
                                           generate_weekly_insights, llm_signal_decision,
-                                          build_weight_engine_from_trades)
+                                          build_weight_engine_from_trades,
+                                          compute_hold_score)
 from database.client             import (insert_trade, insert_signal, get_recent_trades,
                                           save_signal_weights, get_latest_weights,
                                           save_snapshot, save_learning, log_event, get_logs,
@@ -774,6 +775,13 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("runner_active_trail_enabled", True)
     p.setdefault("breakeven_promotion_enabled", True)
     p.setdefault("breakeven_atr_mult", 0.6)
+    # Phase 2: hold score
+    p.setdefault("hold_score_enabled", True)
+    p.setdefault("hold_score_extend_enabled", True)    # on: upside only, low risk
+    p.setdefault("hold_score_trim_enabled", False)     # off: enable after validation
+    p.setdefault("hold_score_exit_enabled", False)     # off: enable after validation
+    p.setdefault("hold_score_extend_minutes", 30)
+    p.setdefault("hold_score_trim_pct", 0.33)
     if IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -990,6 +998,19 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["breakeven_promotion_enabled"] = _env_bool("BREAKEVEN_PROMOTION_ENABLED", True)
     if os.getenv("BREAKEVEN_ATR_MULT"):
         p["breakeven_atr_mult"] = _env_float("BREAKEVEN_ATR_MULT", 0.6)
+    # Phase 2: hold score env overrides
+    if os.getenv("HOLD_SCORE_ENABLED") is not None:
+        p["hold_score_enabled"] = _env_bool("HOLD_SCORE_ENABLED", True)
+    if os.getenv("HOLD_SCORE_EXTEND_ENABLED") is not None:
+        p["hold_score_extend_enabled"] = _env_bool("HOLD_SCORE_EXTEND_ENABLED", True)
+    if os.getenv("HOLD_SCORE_TRIM_ENABLED") is not None:
+        p["hold_score_trim_enabled"] = _env_bool("HOLD_SCORE_TRIM_ENABLED", False)
+    if os.getenv("HOLD_SCORE_EXIT_ENABLED") is not None:
+        p["hold_score_exit_enabled"] = _env_bool("HOLD_SCORE_EXIT_ENABLED", False)
+    if os.getenv("HOLD_SCORE_EXTEND_MINUTES"):
+        p["hold_score_extend_minutes"] = _env_int("HOLD_SCORE_EXTEND_MINUTES", 30)
+    if os.getenv("HOLD_SCORE_TRIM_PCT"):
+        p["hold_score_trim_pct"] = _env_float("HOLD_SCORE_TRIM_PCT", 0.33)
     return p
 
 
@@ -2627,6 +2648,11 @@ def _rehydrated_open_trade(record: dict) -> dict:
         "breakeven_stop_set":           bool(record.get("breakeven_stop_set") or False),
         "runner_trail_update_count":    int(record.get("runner_trail_update_count") or 0),
         "runner_trail_last_update_at":  record.get("runner_trail_last_update_at"),
+        # Phase 2: hold score
+        "hold_score_latest":  record.get("hold_score_latest"),
+        "hold_score_min":     record.get("hold_score_min"),
+        "hold_score_max":     record.get("hold_score_max"),
+        "trim_done":          bool(record.get("trim_done") or False),
     }
 
 
@@ -4138,6 +4164,11 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "breakeven_stop_set":           False,
         "runner_trail_update_count":    0,
         "runner_trail_last_update_at":  None,
+        # Phase 2: hold score
+        "hold_score_latest":            None,
+        "hold_score_min":               None,
+        "hold_score_max":               None,
+        "trim_done":                    False,
     }
     save_open_trade(ticker, _open_trades[ticker])
 
@@ -4214,6 +4245,147 @@ def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
         if _open_trades[ticker].get("vwap_thesis_strike_count", 0) != 0:
             _open_trades[ticker]["vwap_thesis_strike_count"] = 0
             save_open_trade(ticker, _open_trades[ticker])
+    return None
+
+
+def _trim_position(ticker: str, trade: dict, current_price: float, trim_pct: float):
+    """
+    Reduce an open position by trim_pct when hold_score indicates degraded conviction
+    but the trade is still profitable. Distinct from the grade-driven partial exit:
+    - partial exit fires on a price target (take some profit)
+    - trim fires on conviction decay (reduce risk while still green)
+    One-shot per trade: guarded by trade["trim_done"].
+    """
+    total_qty = float(trade.get("quantity") or 0)
+    trim_qty  = round(total_qty * trim_pct, 6)
+    if trim_qty <= 0:
+        return
+
+    side       = trade.get("side", "BUY")
+    close_side = "sell" if side == "BUY" else "buy"
+    result     = close_partial_position(ticker, trim_qty, close_side)
+    if result.get("error"):
+        log_event("WARN", "hold_score_trim_failed", {
+            "ticker": ticker, "trim_qty": trim_qty, "error": result["error"],
+        })
+        return
+
+    remaining_qty = total_qty - trim_qty
+    _open_trades[ticker]["quantity"] = remaining_qty
+    _open_trades[ticker]["trim_done"] = True
+    save_open_trade(ticker, _open_trades[ticker])
+
+    log_event("TRADE", "hold_score_trim_executed", {
+        "ticker":        ticker,
+        "side":          side,
+        "trim_qty":      trim_qty,
+        "remaining_qty": remaining_qty,
+        "trim_pct":      trim_pct,
+        "current_price": round(current_price, 4),
+        "order_id":      result.get("order_id"),
+    })
+
+
+def _check_hold_score(
+    ticker: str,
+    trade: dict,
+    current_price: float,
+    hold_elapsed: float,
+    hold_target: float,
+    profile: dict,
+) -> Optional[str]:
+    """
+    Compute the hold score each cycle and update trade state.
+
+    Always computed and logged (observability from day 1).
+    Actions gated by separate env vars — start with extend only:
+    - HOLD_SCORE_EXTEND_ENABLED=true   extend hold on strong score
+    - HOLD_SCORE_TRIM_ENABLED=false    trim position on weak score (enable after validation)
+    - HOLD_SCORE_EXIT_ENABLED=false    force-exit on very weak score (enable after validation)
+
+    Returns an exit reason string if exit fires, otherwise None.
+    """
+    if not _env_bool("HOLD_SCORE_ENABLED", True):
+        return None
+
+    cached = _signal_cache.get(ticker)
+    if cached is None:
+        return None
+    current_signals = cached[1].get("signals", {})
+
+    result = compute_hold_score(
+        ticker=ticker,
+        trade=trade,
+        current_signals=current_signals,
+        hold_elapsed_minutes=hold_elapsed,
+    )
+
+    hold_score     = result["hold_score"]
+    recommendation = result["recommendation"]
+
+    # Update rolling min/max on the trade record
+    prev_min = trade.get("hold_score_min")
+    prev_max = trade.get("hold_score_max")
+    new_min  = hold_score if prev_min is None else min(prev_min, hold_score)
+    new_max  = hold_score if prev_max is None else max(prev_max, hold_score)
+
+    _open_trades[ticker]["hold_score_latest"] = hold_score
+    _open_trades[ticker]["hold_score_min"]    = new_min
+    _open_trades[ticker]["hold_score_max"]    = new_max
+    save_open_trade(ticker, _open_trades[ticker])
+
+    log_event("INFO", "hold_score_computed", {
+        "ticker":          ticker,
+        "hold_score":      hold_score,
+        "recommendation":  recommendation,
+        "confidence":      result["confidence"],
+        "exhaustion":      result["exhaustion_active"],
+        "hold_elapsed":    round(hold_elapsed, 1),
+        "components":      result["components"],
+    })
+
+    pnl_pct = _trade_pnl_pct(trade, current_price)
+
+    # Force exit — only when HOLD_SCORE_EXIT_ENABLED=true (default off)
+    if (
+        _env_bool("HOLD_SCORE_EXIT_ENABLED", False)
+        and recommendation == "exit"
+    ):
+        log_event("INFO", "hold_score_exit_triggered", {
+            "ticker": ticker, "hold_score": hold_score, "pnl_pct": round(pnl_pct, 4),
+        })
+        return "hold_score_collapsed"
+
+    # Trim — only when HOLD_SCORE_TRIM_ENABLED=true (default off) and trade is profitable
+    if (
+        _env_bool("HOLD_SCORE_TRIM_ENABLED", False)
+        and recommendation == "trim"
+        and pnl_pct > 0
+        and not trade.get("trim_done")
+        and not trade.get("partial_exit_done")
+    ):
+        trim_pct = _env_float("HOLD_SCORE_TRIM_PCT", 0.33)
+        _trim_position(ticker, trade, current_price, trim_pct)
+
+    # Extend — when HOLD_SCORE_EXTEND_ENABLED=true (default on) and not already extended
+    if (
+        _env_bool("HOLD_SCORE_EXTEND_ENABLED", True)
+        and recommendation == "extend"
+        and int(trade.get("hold_extension_count") or 0) == 0
+    ):
+        extend_minutes = _env_int("HOLD_SCORE_EXTEND_MINUTES", 30)
+        new_target = int(hold_target) + extend_minutes
+        _open_trades[ticker]["max_hold_minutes"] = new_target
+        _open_trades[ticker]["hold_extension_count"] = 1
+        save_open_trade(ticker, _open_trades[ticker])
+        log_event("INFO", "hold_score_extend_triggered", {
+            "ticker":          ticker,
+            "hold_score":      hold_score,
+            "old_target":      hold_target,
+            "new_target":      new_target,
+            "extend_minutes":  extend_minutes,
+        })
+
     return None
 
 
@@ -4562,6 +4734,12 @@ def _check_exits(portfolio_state, profile):
                 # Phase 1: Ratchet runner stop upward every cycle after partial exit fires
                 if exit_reason is None and trade.get("partial_exit_done"):
                     _update_intraday_runner_stop(ticker, trade, current_price)
+
+                # Phase 2: Compute hold score; optionally extend, trim, or exit
+                if exit_reason is None:
+                    exit_reason = _check_hold_score(
+                        ticker, trade, current_price, hold_elapsed, hold_target, profile
+                    )
 
                 # Thesis invalidation: 2 consecutive VWAP-against closes
                 if exit_reason is None and not trade.get("mean_reversion_trade"):
@@ -5044,6 +5222,10 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         # Phase 1: runner trail + breakeven
         "breakeven_stop_set":        bool(trade.get("breakeven_stop_set")),
         "runner_trail_update_count": int(trade.get("runner_trail_update_count") or 0),
+        # Phase 2: hold score
+        "hold_score_min":  trade.get("hold_score_min"),
+        "hold_score_max":  trade.get("hold_score_max"),
+        "trim_done":       bool(trade.get("trim_done")),
     }
 
     insert_trade(trade_record)

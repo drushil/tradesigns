@@ -470,6 +470,131 @@ def build_weekly_eod_evidence(daily_reviews: list) -> dict:
     }
 
 
+def compute_hold_score(
+    ticker: str,
+    trade: dict,
+    current_signals: dict,
+    hold_elapsed_minutes: float = 0.0,
+) -> dict:
+    """
+    Separate 'should we stay in?' score, decoupled from the entry composite.
+
+    Entry composite rewards acceleration at the moment of entry.
+    Hold score rewards persistence: are signals still aligned now that we're in?
+
+    Signal weights differ from entry composite:
+    - tape_aggression (0.30) — primary continuation signal
+    - relative_strength (0.25) — is this ticker still leading its sector?
+    - macd_crossover (0.20) — is momentum structure intact?
+    - vwap_structure (binary ±0.30) — is price on the right side of VWAP?
+    - rsi_divergence (0.10) — supporting
+    - news_sentiment (0.05) — drives entry, not continuation
+
+    Penalties subtracted from raw score:
+    - exhaustion_penalty: price stretched > 0.5 VWAP-score units from VWAP
+    - time_decay_penalty: mild drag in last 20% of the hold window
+
+    Returns a dict with hold_score [-1..1], recommendation, confidence, components.
+    """
+    def _sig(name: str) -> float:
+        v = (current_signals or {}).get(name) or {}
+        if isinstance(v, dict):
+            return float(v.get("score", 0) or 0)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    side             = str(trade.get("side") or "BUY").upper()
+    direction        = 1 if side == "BUY" else -1
+    is_mean_reversion = bool(trade.get("mean_reversion_trade"))
+
+    def _c(v: float) -> float:
+        return max(-1.0, min(1.0, v))
+
+    # Directional signal scores (positive = good for the trade direction)
+    tape    = _c(_sig("tape_aggression")    * direction)
+    rel_str = _c(_sig("relative_strength")  * direction)
+    macd    = _c(_sig("macd_crossover")     * direction)
+    rsi     = _c(_sig("rsi_divergence")     * direction)
+    news    = _c(_sig("news_sentiment")     * direction)
+    vwap_raw = _sig("vwap_deviation")  # not flipped — see below
+
+    # VWAP structure: binary ±0.30 based on which side of VWAP price is on.
+    # vwap_score > 0 = price BELOW VWAP; vwap_score < 0 = price ABOVE VWAP.
+    # Trend trade (BUY): want price ABOVE VWAP (vwap_raw < -0.1 = good).
+    # Mean-reversion trade (BUY): bought below VWAP, closing toward it = good.
+    if is_mean_reversion:
+        vwap_struct = max(0.0, 0.30 - abs(vwap_raw) * 1.5)
+    else:
+        if (direction == 1 and vwap_raw < -0.10) or (direction == -1 and vwap_raw > 0.10):
+            vwap_struct = 0.30
+        elif (direction == 1 and vwap_raw > 0.20) or (direction == -1 and vwap_raw < -0.20):
+            vwap_struct = -0.30
+        else:
+            vwap_struct = 0.0
+
+    tape_c    = tape    * 0.30
+    rel_c     = rel_str * 0.25
+    macd_c    = macd    * 0.20
+    rsi_c     = rsi     * 0.10
+    news_c    = news    * 0.05
+
+    raw_score = tape_c + rel_c + macd_c + rsi_c + news_c + vwap_struct
+
+    # Exhaustion penalty: price stretched far from VWAP
+    # vwap score magnitude > 0.5 ≈ >0.33% deviation. ATR-stretch proxy.
+    exhaustion_mag = abs(vwap_raw)
+    exhaustion_penalty = 0.0
+    exhaustion_active  = False
+    if exhaustion_mag > 0.50:
+        exhaustion_penalty = min(0.25, (exhaustion_mag - 0.50) * 0.50)
+        exhaustion_active  = True
+
+    # Time decay: mild drag in last 20% of hold window
+    time_decay_penalty = 0.0
+    hold_target = float(trade.get("max_hold_minutes") or trade.get("hold_minutes") or 30)
+    decay_start = hold_target * 0.80
+    if hold_elapsed_minutes > decay_start and hold_target > decay_start:
+        decay_ratio        = min(1.0, (hold_elapsed_minutes - decay_start) / max(hold_target * 0.20, 1))
+        time_decay_penalty = decay_ratio * 0.15
+
+    hold_score = max(-1.0, min(1.0, raw_score - exhaustion_penalty - time_decay_penalty))
+
+    # Recommendation thresholds (conservative defaults)
+    exit_thresh   = float(os.getenv("HOLD_SCORE_EXIT_THRESHOLD",   "-0.50"))
+    trim_thresh   = float(os.getenv("HOLD_SCORE_TRIM_THRESHOLD",   "0.10"))
+    extend_thresh = float(os.getenv("HOLD_SCORE_EXTEND_THRESHOLD", "0.45"))
+
+    if hold_score >= extend_thresh:
+        recommendation = "extend"
+    elif hold_score > trim_thresh:
+        recommendation = "hold"
+    elif hold_score > exit_thresh:
+        recommendation = "trim"
+    else:
+        recommendation = "exit"
+
+    confidence = min(1.0, abs(hold_score) * 2.0)
+
+    return {
+        "hold_score":        round(hold_score, 4),
+        "recommendation":    recommendation,
+        "confidence":        round(confidence, 3),
+        "exhaustion_active": exhaustion_active,
+        "components": {
+            "tape_contribution":              round(tape_c,     4),
+            "relative_strength_contribution": round(rel_c,      4),
+            "macd_contribution":              round(macd_c,     4),
+            "rsi_contribution":               round(rsi_c,      4),
+            "news_contribution":              round(news_c,     4),
+            "vwap_structure_contribution":    round(vwap_struct, 4),
+            "exhaustion_penalty":             round(-exhaustion_penalty,  4),
+            "time_decay_penalty":             round(-time_decay_penalty,  4),
+        },
+    }
+
+
 def generate_weekly_insights(trades: list, daily_reviews: list = None) -> list:
     """
     Sends the week's trades to Claude Sonnet for qualitative pattern extraction.
