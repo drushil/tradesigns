@@ -712,6 +712,8 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("leveraged_etf_stop_scalar", 1.35)
     p.setdefault("a_plus_full_size_max_atr_pct", 2.5)
     p.setdefault("a_plus_full_size_max_stop_pct", 5.0)
+    p.setdefault("high_atr_stop_threshold_pct", 1.0)
+    p.setdefault("high_atr_stop_multiplier", 2.5)
     p.setdefault("grade_ev_override_negative_min_samples", 10)
     p.setdefault("probe_floor_inflation_max_multiple", 1.25)
     p.setdefault("ranging_regime_size_multiplier", 0.35)
@@ -787,6 +789,10 @@ def _apply_execution_overrides(profile: dict) -> dict:
             "PROBE_FLOOR_INFLATION_MAX_MULTIPLE",
             p["probe_floor_inflation_max_multiple"],
         )
+    if os.getenv("HIGH_ATR_STOP_THRESHOLD_PCT"):
+        p["high_atr_stop_threshold_pct"] = _env_float("HIGH_ATR_STOP_THRESHOLD_PCT", p["high_atr_stop_threshold_pct"])
+    if os.getenv("HIGH_ATR_STOP_MULTIPLIER"):
+        p["high_atr_stop_multiplier"] = _env_float("HIGH_ATR_STOP_MULTIPLIER", p["high_atr_stop_multiplier"])
     if os.getenv("RANGING_MAX_TRADES_PER_DAY"):
         p["ranging_max_trades_per_day"] = _env_int("RANGING_MAX_TRADES_PER_DAY", int(p["ranging_max_trades_per_day"]))
     if os.getenv("RANGING_REGIME_SIZE_MULTIPLIER"):

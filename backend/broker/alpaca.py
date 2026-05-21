@@ -641,7 +641,14 @@ def compute_position_size(ticker: str, total_capital: float, profile: dict,
     else:
         atr_fraction = float(raw_atr_pct) / 100
 
-    stop_multiplier = 2.0 if getattr(regime_state, "intraday_regime", "") == "high_vol" else 1.5
+    high_atr_threshold = float(profile.get("high_atr_stop_threshold_pct", 1.0))
+    high_atr_multiplier = float(profile.get("high_atr_stop_multiplier", 2.5))
+    if getattr(regime_state, "intraday_regime", "") == "high_vol":
+        stop_multiplier = 2.0
+    elif raw_atr_pct is not None and float(raw_atr_pct) >= high_atr_threshold:
+        stop_multiplier = high_atr_multiplier
+    else:
+        stop_multiplier = 1.5
     stop_distance_pct = max(0.001, atr_fraction * stop_multiplier)
     base_size_eur = target_risk_eur / stop_distance_pct
 
