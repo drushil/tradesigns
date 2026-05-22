@@ -844,17 +844,20 @@ def test_a_plus_downgrades_when_1m_vwap_confirmation_fails(monkeypatch):
 
 
 def test_crypto_internal_alignment_penalizes_partial_cluster(monkeypatch):
-    import backend.agent as agent
+    import backend.market.sector as sector
+    import backend.runtime.state as state
 
-    monkeypatch.setattr(agent, "_return_pcts_from_bars", lambda symbols, period="5d", interval="1d": {
+    monkeypatch.setattr(sector, "_return_pcts_from_bars", lambda symbols, period="5d", interval="1d": {
         "SPY": 1.0,
         "IBIT": 1.2,
         "COIN": 1.4,
         "MSTR": 1.5,
     })
-    agent._cycle_composites = {"IBIT": 0.4, "COIN": 0.3, "MSTR": -0.3}
+    # Use update() so the aliased dict in state (and agent) sees the mutation
+    state._cycle_composites.clear()
+    state._cycle_composites.update({"IBIT": 0.4, "COIN": 0.3, "MSTR": -0.3})
 
-    snapshot = agent._sector_momentum_snapshot(
+    snapshot = sector._sector_momentum_snapshot(
         ["IBIT", "COIN", "MSTR"],
         {
             "sector_momentum_bonus_enabled": True,
@@ -863,6 +866,9 @@ def test_crypto_internal_alignment_penalizes_partial_cluster(monkeypatch):
             "crypto_internal_align_enabled": True,
         },
     )
+
+    # cleanup
+    state._cycle_composites.clear()
 
     assert snapshot["ticker_multipliers"]["IBIT"] == pytest.approx(0.7)
     assert snapshot["themes"]["crypto"]["internal_alignment"]["aligned_count"] == 2
@@ -910,7 +916,7 @@ def test_sector_momentum_applies_rank_bonus_inside_existing_universe():
 
 
 def test_sector_config_merge_preserves_base_lists_for_partial_override():
-    import backend.agent as agent
+    from backend.market.sector import _merge_sector_config
     base = {
         "defaults": {"core_tickers": ["SPY"]},
         "sectors": {
@@ -924,7 +930,7 @@ def test_sector_config_merge_preserves_base_lists_for_partial_override():
     }
     override = {"sectors": {"semis": {"max_live_per_cycle": 3}}}
 
-    merged = agent._merge_sector_config(base, override)
+    merged = _merge_sector_config(base, override)
 
     assert merged["sectors"]["semis"]["core"] == ["NVDA", "AMD"]
     assert merged["sectors"]["semis"]["shadow"] == ["TSM"]
