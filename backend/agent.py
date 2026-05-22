@@ -344,6 +344,32 @@ _cycle_composites: dict[str, float] = {}
 # Percentile baseline from DB — loaded once per cycle
 _cycle_db_percentiles: dict[str, dict] = {}
 
+# ── Sync runtime.state with agent.py's canonical containers ──────────────
+# Imported as a module (not destructured) so that sub-modules can do:
+#   import backend.runtime.state as state
+#   state._open_trades[ticker] = {...}
+# and see the same live dict that agent.py mutates via local names.
+# For mutable containers we point state's attribute at agent's dict object
+# so both names always refer to the same underlying object.
+# For scalars, future sub-modules should call `state.X` directly (and
+# agent.py must do `state.X = new_val` when re-binding them).
+import backend.runtime.state as _rt_state  # noqa: E402
+_rt_state.TICKERS           = TICKERS
+_rt_state.SWING_TICKERS     = SWING_TICKERS
+_rt_state.PROFILE           = PROFILE
+_rt_state.HORIZON           = HORIZON
+_rt_state.LLM_HOUR_LIMIT    = LLM_HOUR_LIMIT
+_rt_state.IS_PAPER_TRADING  = IS_PAPER_TRADING
+# Container aliasing — same dict/list objects, mutations propagate both ways
+_rt_state._open_trades          = _open_trades
+_rt_state._swing_trades         = _swing_trades
+_rt_state._signal_cache         = _signal_cache
+_rt_state._cycle_composites     = _cycle_composites
+_rt_state._cycle_db_percentiles = _cycle_db_percentiles
+_rt_state._day_trade_log        = _day_trade_log
+_rt_state._last_shock_result    = _last_shock_result
+
+
 def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
     first = date(year, month, 1)
     offset = (weekday - first.weekday()) % 7
