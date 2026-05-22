@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import math
+import re
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -186,10 +188,26 @@ def _round_price(price: float) -> float:
     return round(price, 2) if price >= 1 else round(price, 4)
 
 
+def _make_client_order_id(ticker: str, side: str, signal_id=None) -> str:
+    """
+    Deterministic client_order_id generated BEFORE hitting the broker.
+    Alpaca rejects duplicate submissions with the same id, preventing double-fills
+    when a network drop causes the agent to retry after a successful broker fill.
+
+    Format: ts-{signal_id}-{ticker}-{side}  (signal-tied, traceable)
+    Fallback: ts-{ms_timestamp}-{ticker}-{side}  (swing/dip orders without signal_id)
+    """
+    ticker_safe = re.sub(r"[^a-zA-Z0-9]", "", ticker)[:8].lower()
+    side_safe = "b" if str(side).lower().startswith("b") else "s"
+    ref = str(signal_id) if signal_id is not None else str(int(time.time() * 1000))
+    return f"ts-{ref}-{ticker_safe}-{side_safe}"
+
+
 def submit_market_order(ticker: str, side: str, qty: float,
                          stop_loss_pct: float = 2.0,
                          take_profit_pct: float = 2.0,
-                         current_price: float = None) -> dict:
+                         current_price: float = None,
+                         signal_id=None) -> dict:
     """
     Submits a market order with an immediate stop-loss bracket.
     side: 'buy' | 'sell'
@@ -207,6 +225,10 @@ def submit_market_order(ticker: str, side: str, qty: float,
         qty = math.floor(qty) if use_bracket else round(qty, 6)
         if qty <= 0:
             return {"error": "quantity below 1 share after bracket sizing", "ticker": ticker, "side": side}
+
+        # Generate before hitting the broker — Alpaca rejects duplicate ids,
+        # preventing double-fills when the agent retries after a dropped connection.
+        client_order_id = _make_client_order_id(ticker, side, signal_id)
 
         kwargs = {}
         if use_bracket:
@@ -227,22 +249,24 @@ def submit_market_order(ticker: str, side: str, qty: float,
             }
 
         req = MarketOrderRequest(
-            symbol       = ticker,
-            qty          = qty,
-            side         = order_side,
-            time_in_force= TimeInForce.DAY,
+            symbol           = ticker,
+            qty              = qty,
+            side             = order_side,
+            time_in_force    = TimeInForce.DAY,
+            client_order_id  = client_order_id,
             **kwargs,
         )
         order = client.submit_order(req)
 
         return {
-            "order_id":   str(order.id),
-            "ticker":     ticker,
-            "side":       side,
-            "qty":        float(order.qty or qty),
-            "status":     str(order.status),
-            "order_class": "bracket" if use_bracket else "market",
-            "submitted_at": datetime.utcnow().isoformat(),
+            "order_id":        str(order.id),
+            "client_order_id": client_order_id,
+            "ticker":          ticker,
+            "side":            side,
+            "qty":             float(order.qty or qty),
+            "status":          str(order.status),
+            "order_class":     "bracket" if use_bracket else "market",
+            "submitted_at":    datetime.utcnow().isoformat(),
         }
     except Exception as e:
         return {"error": str(e), "ticker": ticker, "side": side}

@@ -1500,3 +1500,37 @@ class TestCycleStalenessGuard:
         cycle_age = 90   # seconds — well within 180s threshold
         threshold = 180
         assert cycle_age <= threshold  # guard would not fire
+
+
+# ── Order idempotency: _make_client_order_id ──────────────────────────────────
+
+def test_client_order_id_is_signal_tied_when_signal_id_provided():
+    from backend.broker.alpaca import _make_client_order_id
+    oid = _make_client_order_id("NVDA", "buy", 12345)
+    assert oid == "ts-12345-nvda-b"
+    # Same inputs always produce the same id (true idempotency)
+    assert _make_client_order_id("NVDA", "buy", 12345) == oid
+
+
+def test_client_order_id_sanitises_eu_ticker_dots():
+    from backend.broker.alpaca import _make_client_order_id
+    oid = _make_client_order_id("ASML.AS", "sell", 99)
+    assert "." not in oid
+    assert oid == "ts-99-asmlas-s"
+
+
+def test_client_order_id_fallback_differs_by_ticker():
+    from backend.broker.alpaca import _make_client_order_id
+    # Without signal_id, ids for different tickers must differ
+    id_spy = _make_client_order_id("SPY", "buy", None)
+    id_qqq = _make_client_order_id("QQQ", "buy", None)
+    assert id_spy != id_qqq
+
+
+def test_client_order_id_alphanumeric_hyphens_only():
+    import re
+    from backend.broker.alpaca import _make_client_order_id
+    for ticker, side, sig in [("NVDA", "buy", 1), ("TSLA", "sell", None), ("ASML.AS", "buy", 42)]:
+        oid = _make_client_order_id(ticker, side, sig)
+        assert re.match(r'^[a-z0-9\-]+$', oid), f"invalid chars in: {oid}"
+        assert len(oid) <= 48

@@ -4286,16 +4286,18 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     sizing["reward_risk_ratio"] = round(take_profit_pct / max(float(stop_loss_pct or 0), 0.0001), 4)
 
     order = submit_market_order(
-        ticker       = ticker,
-        side         = action.lower(),
-        qty          = round(qty, 6),
-        stop_loss_pct= stop_loss_pct,
-        take_profit_pct= take_profit_pct,
-        current_price= current_price,
+        ticker          = ticker,
+        side            = action.lower(),
+        qty             = round(qty, 6),
+        stop_loss_pct   = stop_loss_pct,
+        take_profit_pct = take_profit_pct,
+        current_price   = current_price,
+        signal_id       = candidate.get("signal_id"),
     )
 
     if "error" in order:
-        log_event("ERROR", "order_failed", {"ticker": ticker, "error": order["error"]})
+        log_event("ERROR", "order_failed", {"ticker": ticker, "error": order["error"],
+                                             "client_order_id": order.get("client_order_id")})
         return
 
     submitted_qty = float(order.get("qty") or floor_qty or round(qty, 6))
@@ -5526,6 +5528,7 @@ def _submit_horizon_order(
     regime_state = None,
     atr_data: dict = None,
     sizing_json: dict = None,
+    signal_id=None,
 ) -> dict:
     capital_base = _trading_capital(portfolio_state["equity"])
     regime_state = regime_state or detect_regime()
@@ -5575,18 +5578,20 @@ def _submit_horizon_order(
         return {"error": "bracket_floor_would_waste_trade", "ticker": ticker}
     take_profit_pct = profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2)
     order = submit_market_order(
-        ticker=ticker,
-        side=side.lower(),
-        qty=round(qty, 6),
-        stop_loss_pct=stop_loss_pct,
-        take_profit_pct=take_profit_pct,
-        current_price=current_price,
+        ticker          = ticker,
+        side            = side.lower(),
+        qty             = round(qty, 6),
+        stop_loss_pct   = stop_loss_pct,
+        take_profit_pct = take_profit_pct,
+        current_price   = current_price,
+        signal_id       = signal_id,
     )
     if "error" in order:
         log_event("ERROR", "order_failed", {
             "ticker": ticker,
             "horizon": horizon,
             "error": order["error"],
+            "client_order_id": order.get("client_order_id"),
         })
         return order
 
