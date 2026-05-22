@@ -1527,6 +1527,13 @@ def test_client_order_id_fallback_differs_by_ticker():
     assert id_spy != id_qqq
 
 
+def test_client_order_id_uses_deterministic_order_ref_without_signal_id():
+    from backend.broker.alpaca import _make_client_order_id
+    oid = _make_client_order_id("SPY", "buy", None, "swing-SPY-BUY-2026-05-22")
+    assert oid == "ts-swingspybuy20260522-spy-b"
+    assert _make_client_order_id("SPY", "buy", None, "swing-SPY-BUY-2026-05-22") == oid
+
+
 def test_client_order_id_alphanumeric_hyphens_only():
     import re
     from backend.broker.alpaca import _make_client_order_id

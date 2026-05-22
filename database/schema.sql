@@ -57,6 +57,7 @@ create table if not exists trades (
     llm_rationale   text,
     signals_json    jsonb,
     order_id        text,
+    client_order_id text,
     close_order_id  text,
     close_error     text,
     commission_eur  numeric(8,4) default 0,
@@ -91,6 +92,9 @@ alter table if exists trades
     add column if not exists hold_score_max numeric(6,4),
     add column if not exists trim_done boolean default false;
 
+alter table if exists trades
+    add column if not exists client_order_id text;
+
 -- 2. OPEN_TRADES
 create table if not exists open_trades (
     id                  bigint generated always as identity primary key,
@@ -116,6 +120,7 @@ create table if not exists open_trades (
     executed_size_usd   numeric(10,2),
     bracket_floor_qty_loss_pct numeric(8,4),
     order_id            text,
+    client_order_id     text,
     status              text not null default 'open' check (status in ('open','closed')),
     close_reason        text,
     regime              text,
@@ -165,6 +170,9 @@ alter table if exists open_trades
     add column if not exists hold_score_min numeric(6,4),
     add column if not exists hold_score_max numeric(6,4),
     add column if not exists trim_done boolean default false;
+
+alter table if exists open_trades
+    add column if not exists client_order_id text;
 
 -- 3. SIGNALS
 create table if not exists signals (

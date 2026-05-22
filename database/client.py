@@ -93,6 +93,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
             "atr_pct": trade.get("atr_pct"),
             "atr_raw": trade.get("atr_raw"),
             "order_id": trade.get("order_id"),
+            "client_order_id": trade.get("client_order_id"),
             "regime": trade.get("regime"),
             "macro_regime": trade.get("macro_regime"),
             "macro_multiplier": trade.get("macro_multiplier"),
@@ -160,7 +161,7 @@ def save_open_trade(ticker: str, trade: dict) -> dict:
                              "atr_pct", "atr_raw", "breakeven_stop_set",
                              "runner_trail_update_count", "runner_trail_last_update_at",
                              "hold_score_latest", "hold_score_min", "hold_score_max",
-                             "trim_done"}
+                             "trim_done", "client_order_id"}
             }
             result = db.table("open_trades").upsert(fallback, on_conflict="ticker").execute()
         return result.data[0] if result.data else {}

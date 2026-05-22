@@ -8,6 +8,7 @@ import os
 import time
 import asyncio
 import math
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1113,6 +1114,15 @@ def _trading_capital(equity: float) -> float:
 
 def _deterministic_action(composite: float) -> str:
     return "BUY" if composite > 0 else "SELL"
+
+
+def _make_order_ref(*parts) -> str:
+    cleaned = [
+        re.sub(r"[^a-zA-Z0-9]", "", str(part))[:16].lower()
+        for part in parts
+        if part is not None and str(part) != ""
+    ]
+    return "-".join(cleaned)[:48] or str(int(time.time() * 1000))
 
 
 def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> float:
@@ -2824,6 +2834,7 @@ def _rehydrated_open_trade(record: dict) -> dict:
         "llm_conviction": float(record.get("llm_conviction") or 0),
         "llm_rationale": record.get("llm_rationale") or "",
         "order_id": record.get("order_id"),
+        "client_order_id": record.get("client_order_id"),
         # Grading / partial-exit fields (added in migration v3)
         "setup_grade":              record.get("setup_grade"),
         "sector_confirmation":      record.get("sector_confirmation"),
@@ -4373,6 +4384,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "llm_conviction": conviction,
         "llm_rationale": llm_result.get("rationale", ""),
         "order_id":      order.get("order_id"),
+        "client_order_id": order.get("client_order_id"),
         # Grade metadata
         "setup_grade":   setup_grade.grade if setup_grade else None,
         "sector_confirmation": setup_grade.sector_confirmation if setup_grade else None,
@@ -4408,6 +4420,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         "bracket_floor_qty_loss_pct": bracket_floor_qty_loss_pct,
         "conviction": conviction,
         "composite": composite, "order_class": order.get("order_class"),
+        "client_order_id": order.get("client_order_id"),
         "rationale": llm_result.get("rationale"),
         "sizing": sizing,
         "mean_reversion_trade": mean_reversion_trade,
@@ -5434,6 +5447,7 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
         "hold_decision_json": trade.get("hold_decision_json"),
         "protective_stop_order_id": trade.get("protective_stop_order_id"),
         "order_id":        trade.get("order_id"),
+        "client_order_id": trade.get("client_order_id"),
         "close_order_id":  result.get("order_id"),
         "close_error":     close_error,
         "commission_eur":  0.0,
@@ -5529,6 +5543,7 @@ def _submit_horizon_order(
     atr_data: dict = None,
     sizing_json: dict = None,
     signal_id=None,
+    order_ref=None,
 ) -> dict:
     capital_base = _trading_capital(portfolio_state["equity"])
     regime_state = regime_state or detect_regime()
@@ -5585,6 +5600,7 @@ def _submit_horizon_order(
         take_profit_pct = take_profit_pct,
         current_price   = current_price,
         signal_id       = signal_id,
+        order_ref       = order_ref,
     )
     if "error" in order:
         log_event("ERROR", "order_failed", {
@@ -5656,6 +5672,7 @@ def _submit_horizon_order(
         "llm_conviction": conviction,
         "llm_rationale": rationale,
         "order_id": order.get("order_id"),
+        "client_order_id": order.get("client_order_id"),
     }
     _open_trades[ticker] = record
     save_open_trade(ticker, record)
@@ -5672,6 +5689,7 @@ def _submit_horizon_order(
         "conviction": conviction,
         "composite": composite_score,
         "order_class": order.get("order_class"),
+        "client_order_id": order.get("client_order_id"),
         "rationale": rationale,
         "dip_type": dip_type,
         "sizing": sizing,
@@ -5724,6 +5742,7 @@ def _run_dip_buy_scan(tickers: list[str], portfolio_state: dict, macro_regime: s
             dip_type=opp.get("type"),
             regime_state=regime_state,
             atr_data=atr_data,
+            order_ref=_make_order_ref("dip", ticker, opp.get("type"), date.today().isoformat()),
         )
         if "error" not in order:
             open_tickers.add(ticker)
@@ -5944,6 +5963,7 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
             macro_multiplier=1.0,
             regime_state=regime_state,
             atr_data=atr_data,
+            order_ref=_make_order_ref("swing", ticker, action, date.today().isoformat()),
         )
 
 

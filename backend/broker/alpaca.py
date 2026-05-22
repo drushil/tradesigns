@@ -188,18 +188,22 @@ def _round_price(price: float) -> float:
     return round(price, 2) if price >= 1 else round(price, 4)
 
 
-def _make_client_order_id(ticker: str, side: str, signal_id=None) -> str:
+def _make_client_order_id(ticker: str, side: str, signal_id=None, order_ref=None) -> str:
     """
     Deterministic client_order_id generated BEFORE hitting the broker.
     Alpaca rejects duplicate submissions with the same id, preventing double-fills
     when a network drop causes the agent to retry after a successful broker fill.
 
     Format: ts-{signal_id}-{ticker}-{side}  (signal-tied, traceable)
-    Fallback: ts-{ms_timestamp}-{ticker}-{side}  (swing/dip orders without signal_id)
+    Fallback: ts-{order_ref}-{ticker}-{side} when a deterministic setup ref exists,
+    otherwise ts-{ms_timestamp}-{ticker}-{side}.
     """
     ticker_safe = re.sub(r"[^a-zA-Z0-9]", "", ticker)[:8].lower()
     side_safe = "b" if str(side).lower().startswith("b") else "s"
-    ref = str(signal_id) if signal_id is not None else str(int(time.time() * 1000))
+    raw_ref = signal_id if signal_id is not None else order_ref
+    if raw_ref is None:
+        raw_ref = int(time.time() * 1000)
+    ref = re.sub(r"[^a-zA-Z0-9]", "", str(raw_ref))[:28].lower()
     return f"ts-{ref}-{ticker_safe}-{side_safe}"
 
 
@@ -207,11 +211,13 @@ def submit_market_order(ticker: str, side: str, qty: float,
                          stop_loss_pct: float = 2.0,
                          take_profit_pct: float = 2.0,
                          current_price: float = None,
-                         signal_id=None) -> dict:
+                         signal_id=None,
+                         order_ref=None) -> dict:
     """
     Submits a market order with an immediate stop-loss bracket.
     side: 'buy' | 'sell'
     """
+    client_order_id = None
     try:
         from alpaca.trading.requests import (
             MarketOrderRequest, TakeProfitRequest, StopLossRequest
@@ -228,7 +234,7 @@ def submit_market_order(ticker: str, side: str, qty: float,
 
         # Generate before hitting the broker — Alpaca rejects duplicate ids,
         # preventing double-fills when the agent retries after a dropped connection.
-        client_order_id = _make_client_order_id(ticker, side, signal_id)
+        client_order_id = _make_client_order_id(ticker, side, signal_id, order_ref)
 
         kwargs = {}
         if use_bracket:
@@ -269,7 +275,7 @@ def submit_market_order(ticker: str, side: str, qty: float,
             "submitted_at":    datetime.utcnow().isoformat(),
         }
     except Exception as e:
-        return {"error": str(e), "ticker": ticker, "side": side}
+        return {"error": str(e), "ticker": ticker, "side": side, "client_order_id": client_order_id}
 
 
 def submit_stop_order(ticker: str, side: str, qty: float,
