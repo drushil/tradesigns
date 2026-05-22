@@ -23,6 +23,7 @@ from backend.execution.common import (
     _trading_capital, _cap_short_notional,
     _strategy_family, _regime_debug_payload,
 )
+from backend.execution.evidence import enrich_setup_context
 from backend.market.sector import _exposure_direction
 from database.client import save_open_trade, log_event
 
@@ -173,6 +174,19 @@ def _submit_horizon_order(
         ticker, side, regime, signal_context,
         horizon=horizon, mean_reversion_trade=False,
     )
+    setup_context = enrich_setup_context(ticker, side, signals_json or {}, {
+        "atr_data": atr_data or {},
+        "computed_at": datetime.utcnow().isoformat() + "Z",
+    }, {
+        "ticker": ticker,
+        "action": side.upper(),
+        "composite": float(composite_score or 0),
+        "strategy_family": strategy_family,
+        "intraday_regime": regime,
+        "market_regime": getattr(regime_state, "market_regime", None),
+        "horizon": horizon,
+    })
+    sizing["setup_context"] = setup_context
     record = {
         "entry_time": datetime.utcnow(),
         "entry_price": current_price,
@@ -199,6 +213,17 @@ def _submit_horizon_order(
         "regime": regime,
         "exposure_direction": exposure_direction,
         "strategy_family": strategy_family,
+        "playbook": setup_context.get("playbook"),
+        "playbook_lifecycle": setup_context.get("playbook_lifecycle"),
+        "session_window": setup_context.get("session_window"),
+        "primary_factor": setup_context.get("primary_factor"),
+        "factor_bucket": setup_context.get("factor_bucket"),
+        "regime_key": setup_context.get("regime_key"),
+        "data_quality_state": setup_context.get("data_quality_state"),
+        "data_quality_json": setup_context.get("data_quality") or {},
+        "cost_estimate_json": setup_context.get("cost_estimate") or {},
+        "estimated_spread_pct": setup_context.get("estimated_spread_pct"),
+        "estimated_total_cost_pct": setup_context.get("estimated_total_cost_pct"),
         "regime_debug_json": _regime_debug_payload(regime_state, signal_context),
         "macro_regime": macro_regime,
         "macro_multiplier": macro_multiplier,
@@ -233,5 +258,11 @@ def _submit_horizon_order(
         "sizing": sizing,
         "exposure_direction": exposure_direction,
         "strategy_family": strategy_family,
+        "playbook": setup_context.get("playbook"),
+        "playbook_lifecycle": setup_context.get("playbook_lifecycle"),
+        "session_window": setup_context.get("session_window"),
+        "primary_factor": setup_context.get("primary_factor"),
+        "data_quality_state": setup_context.get("data_quality_state"),
+        "estimated_total_cost_pct": setup_context.get("estimated_total_cost_pct"),
     })
     return order

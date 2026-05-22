@@ -15,6 +15,7 @@ import backend.runtime.state as state
 from backend.execution.common import (_signal_score, _directional_score, _parse_dt,
                                        _trade_pnl_pct, _is_probe_ev_decision,
                                        _strategy_family)
+from backend.execution.evidence import enrich_setup_context
 from backend.market.sector import (_INDEX_OR_ETF_TICKERS, _INVERSE_ETFS,
                                     _ticker_theme, _is_leveraged_etf,
                                     _sector_default_tickers)
@@ -713,7 +714,7 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
     minutes_since_open = _minutes_since_regular_open()
     is_leveraged = _is_leveraged_etf(str(ticker or "").upper(), state.PROFILE)
     time_of_day_bonus = _time_of_day_rank_bonus(minutes_since_open)
-    return {
+    context = {
         "ticker": ticker,
         "action": action,
         "composite": float(composite or 0),
@@ -734,6 +735,7 @@ def _trade_setup_context(ticker: str, action: str, composite: float,
         "volatility_regime": atr_data.get("volatility_regime"),
         "is_leveraged_etf": is_leveraged,
     }
+    return enrich_setup_context(ticker, action, signals, signal_result, context)
 
 
 def _record_blocked_opportunity(ticker: str, action: str, composite: float,
@@ -759,6 +761,17 @@ def _record_blocked_opportunity(ticker: str, action: str, composite: float,
             "regime": regime,
             "market_regime": (setup_context or {}).get("market_regime"),
             "strategy_family": (setup_context or {}).get("strategy_family"),
+            "playbook": (setup_context or {}).get("playbook"),
+            "playbook_lifecycle": (setup_context or {}).get("playbook_lifecycle"),
+            "session_window": (setup_context or {}).get("session_window"),
+            "primary_factor": (setup_context or {}).get("primary_factor"),
+            "factor_bucket": (setup_context or {}).get("factor_bucket"),
+            "regime_key": (setup_context or {}).get("regime_key"),
+            "data_quality_state": (setup_context or {}).get("data_quality_state"),
+            "data_quality_json": (setup_context or {}).get("data_quality") or {},
+            "cost_estimate_json": (setup_context or {}).get("cost_estimate") or {},
+            "estimated_spread_pct": (setup_context or {}).get("estimated_spread_pct"),
+            "estimated_total_cost_pct": (setup_context or {}).get("estimated_total_cost_pct"),
             "event_risk_active": bool((setup_context or {}).get("event_risk_active")),
             "reference_price": reference_price,
             "setup_grade": (setup_context or {}).get("setup_grade"),
