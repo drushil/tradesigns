@@ -87,6 +87,11 @@ from backend.market.timing       import (NY_TZ, _nth_weekday, _to_new_york_time,
                                           _is_new_intraday_entry_too_late,
                                           _leveraged_etf_max_hold_window,
                                           _allows_intraday, _allows_swing)
+from backend.execution.common    import (_trading_capital, _deterministic_action,
+                                          _make_order_ref, _cap_short_notional,
+                                          _regime_debug_payload, _strategy_family,
+                                          _signal_score, _is_probe_ev_decision,
+                                          _directional_score, _parse_dt, _trade_pnl_pct)
 from backend.market.sector       import (_normalize_ticker_list, _sector_data,
                                           _sector_setting, _sector_default_tickers,
                                           _sector_members, _default_ticker_universe,
@@ -766,86 +771,6 @@ def _apply_learned_hold_extension(
         "vix": round(vix, 2),
         "source": "learning_longer_holds_all_tickers",
     }
-
-
-def _trading_capital(equity: float) -> float:
-    raw = os.getenv("TRADING_CAPITAL_EUR") or os.getenv("STARTING_CAPITAL_EUR")
-    if raw and raw.strip():
-        try:
-            return min(float(raw), equity)
-        except ValueError:
-            pass
-    return equity
-
-
-def _deterministic_action(composite: float) -> str:
-    return "BUY" if composite > 0 else "SELL"
-
-
-def _make_order_ref(*parts) -> str:
-    cleaned = [
-        re.sub(r"[^a-zA-Z0-9]", "", str(part))[:16].lower()
-        for part in parts
-        if part is not None and str(part) != ""
-    ]
-    return "-".join(cleaned)[:48] or str(int(time.time() * 1000))
-
-
-def _cap_short_notional(size_eur: float, capital_base: float, profile: dict) -> float:
-    short_cap_pct = profile.get("max_short_position_pct")
-    if short_cap_pct is None:
-        short_cap_pct = profile.get("max_position_pct", 0)
-    return min(size_eur, capital_base * float(short_cap_pct) / 100)
-
-
-def _regime_debug_payload(regime_state, signal_result: dict = None) -> dict:
-    signal_result = signal_result or {}
-    payload = regime_state.to_dict() if hasattr(regime_state, "to_dict") else {}
-    payload.update({
-        "macro_regime": signal_result.get("macro_regime"),
-        "macro_multiplier": signal_result.get("macro_multiplier", 1.0),
-        "regime_bull_bear": signal_result.get("regime_bull_bear"),
-        "shock_detected": signal_result.get("shock_detected", False),
-        "shock_classification": signal_result.get("shock_classification"),
-    })
-    return payload
-
-
-def _strategy_family(ticker: str, side: str, regime: str, signal_result: dict,
-                     horizon: str = "short", mean_reversion_trade: bool = False) -> str:
-    ticker = str(ticker or "").upper()
-    side = str(side or "").upper()
-    regime = str(regime or "")
-    horizon = str(horizon or "short")
-    signal_result = signal_result or {}
-    signals = signal_result.get("signals", {}) or {}
-
-    if mean_reversion_trade or signal_result.get("mean_reversion_signal"):
-        return "mean_reversion"
-    if horizon == "swing":
-        return "swing"
-    if ticker in _INVERSE_ETFS:
-        return "inverse_etf"
-    if side == "SELL":
-        return "direct_short"
-
-    macd = signals.get("macd_crossover", {}).get("score", 0)
-    rel_strength = signals.get("relative_strength", {}).get("score", 0)
-    tape = signals.get("tape_aggression", {}).get("score", 0)
-    if regime == "trending" or max(macd, rel_strength, tape) >= 0.35:
-        return "trend_following"
-    return "signal_composite"
-
-
-def _signal_score(signals: dict, name: str) -> float:
-    try:
-        return float((signals or {}).get(name, {}).get("score", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _is_probe_ev_decision(ev_decision: str) -> bool:
-    return str(ev_decision or "") in _PROBE_EV_DECISIONS
 
 
 def _alignment_veto(ticker: str, action: str, signals: dict, profile: dict) -> Optional[dict]:
@@ -1942,31 +1867,6 @@ def _log_short_candidate(event_name: str, ticker: str, composite: float,
     if extra:
         payload.update(extra)
     log_event("INFO", event_name, payload)
-
-
-def _parse_dt(value):
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
-    if not value:
-        return datetime.utcnow()
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
-    except ValueError:
-        return datetime.utcnow()
-
-
-def _trade_pnl_pct(trade: dict, current_price: float) -> float:
-    entry_price = float(trade.get("entry_price") or 0)
-    if entry_price <= 0:
-        return 0.0
-    pnl_pct = (current_price - entry_price) / entry_price * 100
-    if trade.get("side") == "SELL":
-        pnl_pct = -pnl_pct
-    return pnl_pct
-
-
-def _directional_score(side: str, composite: float) -> float:
-    return float(composite) if side == "BUY" else -float(composite)
 
 
 def _time_exit_cooldown_active(ticker: str, recent_trades: list, profile: dict) -> Optional[dict]:
