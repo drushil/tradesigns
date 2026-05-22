@@ -75,37 +75,8 @@ from backend.grading.engine      import (grade_setup, compute_sector_confirmatio
 from backend.sweep.agent         import (compute_sweep_plan, execute_sweep,
                                           recall_sweep, has_active_sweep)
 from backend.dividends.scanner   import (scan_dividend_calendar, log_dividend_opportunity)
-
-def _env_value(key: str, default: str) -> str:
-    value = os.getenv(key)
-    if value is None or not value.strip():
-        return default
-    return value.strip()
-
-
-def _env_int(key: str, default: int) -> int:
-    try:
-        return int(_env_value(key, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_float(key: str, default: float) -> float:
-    try:
-        return float(_env_value(key, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_bool(key: str, default: bool = True) -> bool:
-    raw = os.getenv(key)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"false", "0", "no"}
-
-
-def _eurusd_rate() -> float:
-    return _env_float("EURUSD_RATE", 1.08)
+from backend.runtime.env         import (_env_value, _env_int, _env_float, _env_bool,
+                                          _eurusd_rate, _eur_to_usd)
 
 
 def _get_cached_signals(ticker: str, weights: dict, regime_state) -> dict:
@@ -124,10 +95,6 @@ def _get_cached_signals(ticker: str, weights: dict, regime_state) -> dict:
     result = compute_all_signals(ticker, weights, regime_state=regime_state)
     _signal_cache[ticker] = (now, result)
     return result
-
-
-def _eur_to_usd(amount_eur: float) -> float:
-    return float(amount_eur or 0) * _eurusd_rate()
 
 
 _DEFAULT_SECTOR_UNIVERSE = {
