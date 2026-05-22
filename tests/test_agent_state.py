@@ -674,11 +674,12 @@ def test_hold_score_extends_target_and_tracks_min_max(monkeypatch):
     }
     agent._signal_cache[ticker] = (datetime.utcnow(), {"signals": {}})
 
+    import backend.execution.exit as exit_mod
     saves = []
-    monkeypatch.setattr(agent, "save_open_trade", lambda _ticker, trade: saves.append(dict(trade)) or {})
-    monkeypatch.setattr(agent, "log_event", lambda *args, **kwargs: None)
-    monkeypatch.setattr(agent, "_trade_pnl_pct", lambda trade, current_price: 0.4)
-    monkeypatch.setattr(agent, "compute_hold_score", lambda **kwargs: {
+    monkeypatch.setattr(exit_mod, "save_open_trade", lambda _ticker, trade: saves.append(dict(trade)) or {})
+    monkeypatch.setattr(exit_mod, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(exit_mod, "_trade_pnl_pct", lambda trade, current_price: 0.4)
+    monkeypatch.setattr(exit_mod, "compute_hold_score", lambda **kwargs: {
         "hold_score": 0.55,
         "recommendation": "extend",
         "confidence": 1.0,
@@ -1244,6 +1245,7 @@ class TestVwapStrikePersistence:
 
     def _run_invalidation(self, ticker, trade, vwap_score, tape_score=0.0):
         import backend.agent as agent
+        import backend.execution.exit as exit_mod
         agent._open_trades.clear()
         agent._open_trades[ticker] = dict(trade)
         agent._signal_cache[ticker] = (
@@ -1254,9 +1256,9 @@ class TestVwapStrikePersistence:
             }},
         )
         saved = []
-        with patch.object(agent, "save_open_trade",
+        with patch.object(exit_mod, "save_open_trade",
                           side_effect=lambda t, d: saved.append(dict(d)) or {}) as mock_save, \
-             patch.object(agent, "log_event"):
+             patch.object(exit_mod, "log_event"):
             result = agent._check_thesis_invalidation(ticker, agent._open_trades[ticker])
         return result, agent._open_trades[ticker], saved, mock_save
 
@@ -1328,8 +1330,9 @@ class TestVwapStrikePersistence:
             "horizon": "short", "size_eur": 400.0, "size_usd": 432.0,
         }
 
+        import backend.execution.exit as exit_mod
         agent._open_trades.clear()
-        with patch.object(agent, "get_open_trade_records", return_value=[db_record]):
+        with patch.object(exit_mod, "get_open_trade_records", return_value=[db_record]):
             agent._hydrate_open_trades()
 
         assert agent._open_trades["NVDA"]["vwap_thesis_strike_count"] == 1
@@ -1352,17 +1355,18 @@ class TestPartialExitSaveFailure:
         agent._open_trades.clear()
         agent._open_trades[ticker] = dict(trade)
 
+        import backend.execution.exit as exit_mod
         log_calls = []
 
-        with patch.object(agent, "close_partial_position",
+        with patch.object(exit_mod, "close_partial_position",
                           return_value={"order_id": "ord-1", "qty": 2.0}), \
-             patch.object(agent, "submit_stop_order",
+             patch.object(exit_mod, "submit_stop_order",
                           return_value={"order_id": "stop-1"}), \
-             patch.object(agent, "_cancel_bracket_orders_for_manual_exit",
+             patch.object(exit_mod, "_cancel_bracket_orders_for_manual_exit",
                           return_value=[]), \
-             patch.object(agent, "save_open_trade",
+             patch.object(exit_mod, "save_open_trade",
                           return_value={"error": "connection timeout"}), \
-             patch.object(agent, "log_event",
+             patch.object(exit_mod, "log_event",
                           side_effect=lambda lvl, ev, d=None: log_calls.append((lvl, ev))):
             agent._check_partial_exit(ticker, agent._open_trades[ticker], 206.0)
 
@@ -1382,15 +1386,16 @@ class TestPartialExitSaveFailure:
         agent._open_trades.clear()
         agent._open_trades[ticker] = dict(trade)
 
+        import backend.execution.exit as exit_mod
         log_calls = []
-        with patch.object(agent, "close_partial_position",
+        with patch.object(exit_mod, "close_partial_position",
                           return_value={"order_id": "ord-1", "qty": 2.0}), \
-             patch.object(agent, "submit_stop_order",
+             patch.object(exit_mod, "submit_stop_order",
                           return_value={"order_id": "stop-1"}), \
-             patch.object(agent, "_cancel_bracket_orders_for_manual_exit",
+             patch.object(exit_mod, "_cancel_bracket_orders_for_manual_exit",
                           return_value=[]), \
-             patch.object(agent, "save_open_trade", return_value={}), \
-             patch.object(agent, "log_event",
+             patch.object(exit_mod, "save_open_trade", return_value={}), \
+             patch.object(exit_mod, "log_event",
                           side_effect=lambda lvl, ev, d=None: log_calls.append((lvl, ev))):
             agent._check_partial_exit(ticker, agent._open_trades[ticker], 206.0)
 

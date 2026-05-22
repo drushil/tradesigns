@@ -62,9 +62,10 @@ def test_hydrate_open_trades_closes_stale_db_rows(monkeypatch):
     closed = []
     logs = []
 
-    monkeypatch.setattr(agent, "get_open_trade_records", lambda: records)
-    monkeypatch.setattr(agent, "close_open_trade_record", lambda ticker, reason=None: closed.append((ticker, reason)))
-    monkeypatch.setattr(agent, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
+    import backend.execution.exit as exit_mod
+    monkeypatch.setattr(exit_mod, "get_open_trade_records", lambda: records)
+    monkeypatch.setattr(exit_mod, "close_open_trade_record", lambda ticker, reason=None: closed.append((ticker, reason)))
+    monkeypatch.setattr(exit_mod, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
 
     agent._open_trades.clear()
     agent._open_trades["OLD"] = {"entry_price": 1}
@@ -101,19 +102,21 @@ def test_hydrate_open_trades_records_recovered_broker_side_close(monkeypatch):
     closed = []
     logs = []
 
-    monkeypatch.setattr(agent, "get_open_trade_records", lambda: [record])
-    monkeypatch.setattr(agent, "close_position", lambda ticker: {"error": "position not found"})
-    monkeypatch.setattr(agent, "_cancel_bracket_orders_for_manual_exit", lambda ticker, trade: [])
-    monkeypatch.setattr(agent, "_recover_protective_stop_fill", lambda trade: None)
-    monkeypatch.setattr(agent, "_recover_bracket_fill", lambda trade: {
+    import backend.execution.exit as exit_mod
+    import backend.runtime.state as rt_state
+    monkeypatch.setattr(exit_mod, "get_open_trade_records", lambda: [record])
+    monkeypatch.setattr(exit_mod, "close_position", lambda ticker: {"error": "position not found"})
+    monkeypatch.setattr(exit_mod, "_cancel_bracket_orders_for_manual_exit", lambda ticker, trade: [])
+    monkeypatch.setattr(exit_mod, "_recover_protective_stop_fill", lambda trade: None)
+    monkeypatch.setattr(exit_mod, "_recover_bracket_fill", lambda trade: {
         "exit_price": 182.36,
         "exit_reason": "stop_loss",
         "close_order_id": "stop-leg",
     })
-    monkeypatch.setattr(agent, "insert_trade", lambda trade: inserted.append(trade) or {})
-    monkeypatch.setattr(agent, "close_open_trade_record", lambda ticker, reason=None: closed.append((ticker, reason)))
-    monkeypatch.setattr(agent, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
-    monkeypatch.setattr(agent, "_learning_engine", None)
+    monkeypatch.setattr(exit_mod, "insert_trade", lambda trade: inserted.append(trade) or {})
+    monkeypatch.setattr(exit_mod, "close_open_trade_record", lambda ticker, reason=None: closed.append((ticker, reason)))
+    monkeypatch.setattr(exit_mod, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
+    rt_state._learning_engine = None
 
     agent._open_trades.clear()
     agent._hydrate_open_trades([])
