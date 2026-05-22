@@ -1022,6 +1022,8 @@ class TestTryPromoteToSwing:
     def _run(self, ticker, trade, current_price, profile, open_trades=None,
              swing_detected=True):
         import backend.agent as agent
+        import backend.execution.swing as swing_mod
+        import backend.runtime.state as rt_state
         agent._open_trades.clear()
         agent._open_trades[ticker] = dict(trade)
         if open_trades:
@@ -1030,17 +1032,17 @@ class TestTryPromoteToSwing:
 
         swing_check = _patch_swing_deps(swing_detected=swing_detected)
 
-        with patch.object(agent, "SWING_TICKERS", [ticker]), \
-             patch.object(agent, "_overnight_event_risk_active", return_value={}), \
-             patch.object(agent, "_is_leveraged_etf", return_value=False), \
+        with patch.object(rt_state, "SWING_TICKERS", [ticker]), \
+             patch.object(swing_mod, "_overnight_event_risk_active", return_value={}), \
+             patch.object(swing_mod, "_is_leveraged_etf", return_value=False), \
              patch.object(agent, "_get_cached_signals", return_value={}), \
              patch.object(agent, "detect_momentum_swing", return_value=swing_check), \
              patch.object(agent, "detect_regime", return_value=MagicMock()), \
-             patch.object(agent, "_cancel_bracket_orders_for_manual_exit", return_value=[]), \
-             patch.object(agent, "submit_stop_order",
+             patch.object(swing_mod, "_cancel_bracket_orders_for_manual_exit", return_value=[]), \
+             patch.object(swing_mod, "submit_stop_order",
                           return_value={"order_id": "stop-123"}), \
-             patch.object(agent, "save_open_trade", return_value={}), \
-             patch.object(agent, "log_event"), \
+             patch.object(swing_mod, "save_open_trade", return_value={}), \
+             patch.object(swing_mod, "log_event"), \
              patch.object(agent, "_send_discord_alert"):
             result = agent._try_promote_to_swing(ticker, trade, current_price, profile)
 
@@ -1077,12 +1079,13 @@ class TestTryPromoteToSwing:
 
     def test_non_swing_ticker_blocked(self):
         import backend.agent as agent
+        import backend.runtime.state as rt_state
         trade = _make_trade(entry_price=200.0)
         profile = _make_profile()
         agent._open_trades.clear()
         agent._open_trades["NVDA"] = dict(trade)
 
-        with patch.object(agent, "SWING_TICKERS", []):  # NVDA not in list
+        with patch.object(rt_state, "SWING_TICKERS", []):  # NVDA not in list
             result = agent._try_promote_to_swing("NVDA", trade, 210.0, profile)
         assert result is False
 
@@ -1106,15 +1109,17 @@ class TestTryPromoteToSwing:
 
     def test_event_risk_blocks(self):
         import backend.agent as agent
+        import backend.execution.swing as swing_mod
+        import backend.runtime.state as rt_state
         agent._open_trades.clear()
         agent._open_trades["NVDA"] = _make_trade(entry_price=200.0)
         trade = _make_trade(entry_price=200.0)
 
-        with patch.object(agent, "SWING_TICKERS", ["NVDA"]), \
-             patch.object(agent, "_overnight_event_risk_active",
+        with patch.object(rt_state, "SWING_TICKERS", ["NVDA"]), \
+             patch.object(swing_mod, "_overnight_event_risk_active",
                           return_value={"blocked": True, "days_to_filing": 1}), \
-             patch.object(agent, "_is_leveraged_etf", return_value=False), \
-             patch.object(agent, "log_event"):
+             patch.object(swing_mod, "_is_leveraged_etf", return_value=False), \
+             patch.object(swing_mod, "log_event"):
             result = agent._try_promote_to_swing("NVDA", trade, 210.0, _make_profile())
         assert result is False
 
@@ -1141,16 +1146,18 @@ class TestTryPromoteToSwing:
         def capture_log(level, event, data=None):
             logged[event] = data or {}
 
-        with patch.object(agent, "SWING_TICKERS", ["NVDA"]), \
-             patch.object(agent, "_overnight_event_risk_active", return_value={}), \
-             patch.object(agent, "_is_leveraged_etf", return_value=False), \
+        import backend.execution.swing as swing_mod
+        import backend.runtime.state as rt_state
+        with patch.object(rt_state, "SWING_TICKERS", ["NVDA"]), \
+             patch.object(swing_mod, "_overnight_event_risk_active", return_value={}), \
+             patch.object(swing_mod, "_is_leveraged_etf", return_value=False), \
              patch.object(agent, "_get_cached_signals", return_value={}), \
              patch.object(agent, "detect_momentum_swing", return_value=swing_check), \
              patch.object(agent, "detect_regime", return_value=MagicMock()), \
-             patch.object(agent, "_cancel_bracket_orders_for_manual_exit", return_value=[]), \
-             patch.object(agent, "submit_stop_order", return_value={"order_id": "x"}), \
-             patch.object(agent, "save_open_trade", return_value={}), \
-             patch.object(agent, "log_event", side_effect=capture_log), \
+             patch.object(swing_mod, "_cancel_bracket_orders_for_manual_exit", return_value=[]), \
+             patch.object(swing_mod, "submit_stop_order", return_value={"order_id": "x"}), \
+             patch.object(swing_mod, "save_open_trade", return_value={}), \
+             patch.object(swing_mod, "log_event", side_effect=capture_log), \
              patch.object(agent, "_send_discord_alert"):
             # Losing trade: current_price < entry
             agent._try_promote_to_swing("NVDA", trade, 198.5, _make_profile())
