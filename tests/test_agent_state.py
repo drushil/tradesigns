@@ -818,9 +818,10 @@ def test_time_of_day_bonus_affects_candidate_rank():
 
 def test_a_plus_downgrades_when_1m_vwap_confirmation_fails(monkeypatch):
     import backend.agent as agent
+    import backend.execution.gates as gates
 
     logs = []
-    monkeypatch.setattr(agent, "log_event", lambda level, event, detail=None: logs.append(event))
+    monkeypatch.setattr(gates, "log_event", lambda level, event, detail=None: logs.append(event))
     grade = agent.SetupGrade("A+", 1.5, 0.25, 1.5, True, ["pct_97"], 4, 1.0, 97, False)
     candidate = {
         "ticker": "AMD",
@@ -834,7 +835,7 @@ def test_a_plus_downgrades_when_1m_vwap_confirmation_fails(monkeypatch):
         "setup_context": {},
     }
 
-    downgraded = agent._vwap_1m_confirmation_downgrade(
+    downgraded = gates._vwap_1m_confirmation_downgrade(
         candidate, grade, {"vwap_1m_confirm_enabled": True}
     )
 
