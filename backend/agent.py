@@ -143,6 +143,7 @@ from backend.market.sector       import (_normalize_ticker_list, _sector_data,
                                           _sector_setting, _sector_default_tickers,
                                           _sector_members, _default_ticker_universe,
                                           _SECTOR_UNIVERSE, _ACTIVE_SECTORS,
+                                          _SECTOR_CONFIG_WARNINGS,
                                           _THEME_MAP, _THEME_PROXIES,
                                           _THEME_PROXY_BASKETS, _DYNAMIC_CANDIDATE_POOL,
                                           _DEFAULT_CORE_TICKERS, _CONFIG_LEVERAGED_TICKERS,
@@ -212,6 +213,7 @@ _cycle_composites: dict[str, float] = {}
 
 # Percentile baseline from DB — loaded once per cycle
 _cycle_db_percentiles: dict[str, dict] = {}
+_logged_sector_config_warnings = False
 
 # ── Sync runtime.state with agent.py's canonical containers ──────────────
 # Imported as a module (not destructured) so that sub-modules can do:
