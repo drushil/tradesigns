@@ -14,6 +14,27 @@ def _get_env(key: str) -> Optional[str]:
     return os.environ.get(key)
 
 
+def _json_safe(value):
+    """Convert pandas/numpy/date values into PostgREST JSON-serializable data."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    if hasattr(value, "tolist") and callable(getattr(value, "tolist")):
+        try:
+            return _json_safe(value.tolist())
+        except Exception:
+            pass
+    return value
+
+
 def get_client(write: bool = False) -> Client:
     """
     write=False → anon key  (dashboard reads — respects RLS)
@@ -663,8 +684,8 @@ def upsert_news_cache(ticker: str, score: float, meta: dict, headlines: list) ->
         record = {
             "ticker": ticker.upper(),
             "sentiment_score": round(float(score), 4),
-            "meta_json": meta or {},
-            "headlines_json": headlines or [],
+            "meta_json": _json_safe(meta or {}),
+            "headlines_json": _json_safe(headlines or []),
             "fetched_at": datetime.utcnow().isoformat() + "Z",
         }
         result = db.table("news_cache").upsert(record, on_conflict="ticker").execute()
