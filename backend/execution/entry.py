@@ -762,7 +762,20 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         )
         sizing["event_risk_intraday_only"] = True
 
-    take_profit_pct = float(profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2))
+    profile_tp_pct = float(profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2))
+    min_rr         = float(profile.get("min_reward_risk_ratio", 1.5))
+    dynamic_tp_pct = round(stop_loss_pct * min_rr, 4)
+    take_profit_pct = max(profile_tp_pct, dynamic_tp_pct)
+    if take_profit_pct > profile_tp_pct:
+        # ATR-derived stop exceeded the profile default — TP scaled up to preserve R:R
+        log_event("INFO", "take_profit_dynamic_enforcement", {
+            "ticker":         ticker,
+            "stop_loss_pct":  round(stop_loss_pct, 4),
+            "profile_tp_pct": round(profile_tp_pct, 4),
+            "dynamic_tp_pct": round(dynamic_tp_pct, 4),
+            "applied_tp_pct": round(take_profit_pct, 4),
+            "min_rr":         min_rr,
+        })
     rr_block = _reward_risk_block(stop_loss_pct, take_profit_pct, ticker_regime, profile)
     if rr_block:
         log_event("INFO", "reward_risk_veto", {
