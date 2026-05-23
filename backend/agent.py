@@ -78,6 +78,9 @@ from backend.dividends.scanner   import (scan_dividend_calendar, log_dividend_op
 from backend.runtime.env         import (_env_value, _env_int, _env_float, _env_bool,
                                           _eurusd_rate, _eur_to_usd)
 from backend.runtime.overrides   import _apply_execution_overrides
+from backend.runtime.lifecycle   import (run_nightly_sweep, run_post_market_analytics,
+                                          run_daily_eod_review, run_portfolio_review,
+                                          run_weekly_digest)
 from backend.market.timing       import (NY_TZ, _nth_weekday, _to_new_york_time,
                                           is_regular_us_market_hours,
                                           _should_run_swing_recheck,
@@ -945,127 +948,16 @@ def _save_snapshot(portfolio_state, regime):
 
 # ── Nightly sweep (after US market close) ────────────────────────────────────
 
-def run_nightly_sweep():
-    """Runs after US market close every weekday. Simulation on alpaca_paper, live on ibkr_live."""
-    try:
-        try:
-            from backend.learning.gate_controller import run_b_shadow_promotion_controller
-            run_b_shadow_promotion_controller()
-        except Exception as e:
-            log_event("WARN", "b_shadow_promotion_controller_error", {"error": str(e)[:160]})
 
-        if not _env_bool("SWEEP_ENABLED", False):
-            log_event("INFO", "nightly_sweep_skipped", {"reason": "disabled"})
-            return
+# run_nightly_sweep → moved to backend/runtime/lifecycle.py
 
-        account = get_account()
-        if "error" in account:
-            log_event("ERROR", "nightly_sweep_account_error", {"error": account["error"]})
-            return
+# run_post_market_analytics → moved to backend/runtime/lifecycle.py
 
-        fx_rate = _env_float("EURUSD_RATE", 1.08)
-        positions = get_positions()
-        portfolio_state = {
-            "equity_eur":      round(account.get("portfolio_value", 0) / fx_rate, 2),
-            "cash_eur":        round(account.get("cash", 0) / fx_rate, 2),
-            "open_positions":  len(positions),
-            "pending_signals": 0,
-        }
+# run_daily_eod_review → moved to backend/runtime/lifecycle.py
 
-        plan   = compute_sweep_plan(portfolio_state)
-        result = execute_sweep(plan)
+# run_portfolio_review → moved to backend/runtime/lifecycle.py
 
-        log_event("INFO", "nightly_sweep", result)
-
-        if result.get("mode") == "simulation" and result.get("should_sweep"):
-            _send_discord_alert(
-                f"💰 Sweep simulation: Would park "
-                f"€{plan['sweepable_eur']:.0f} in {plan['sweep_ticker']}. "
-                f"Est. daily yield: €{plan['est_daily_yield']:.2f}"
-            )
-    except Exception as e:
-        log_event("ERROR", "nightly_sweep_failed", {"error": str(e)[:100]})
-
-
-# ── Post-market analytics (runs after market close, Mon–Fri) ─────────────────
-
-def run_post_market_analytics():
-    """
-    Runs after US market close (21:05 UTC / 5:05 PM ET).
-    Replays blocked opportunities and closed trade exits against post-event
-    price action. Kept out of the signal cycle to avoid I/O overhead.
-    """
-    try:
-        log_event("INFO", "post_market_analytics_start", {})
-        _replay_blocked_opportunities()
-        _replay_closed_trade_exits()
-        log_event("INFO", "post_market_analytics_complete", {})
-    except Exception as e:
-        log_event("ERROR", "post_market_analytics_failed", {"error": str(e)[:160]})
-
-
-def run_daily_eod_review():
-    """Run read-only daily post-market synthesis and recommendations."""
-    try:
-        from backend.daily_review import run_daily_eod_review as _review
-        return _review()
-    except Exception as e:
-        log_event("ERROR", "daily_eod_review_failed", {"error": str(e)[:160]})
-        return {"error": str(e)}
-
-
-# ── Weekly portfolio review (advisory, observation only) ─────────────────────
-
-def run_portfolio_review():
-    """
-    Advisory portfolio review — observation and recommendation only.
-    Scores every open position and writes hold/trim/add/exit recommendations
-    to portfolio_reviews. No trades are placed.
-    Called weekly (Sunday 17:00 UTC), one hour before the weekly digest.
-    Execution authority is granted only after 8-10 weeks of validated recommendations.
-    """
-    from backend.portfolio.advisor import run_portfolio_review as _review
-    try:
-        result = _review()
-        if result.get("skipped"):
-            log_event("INFO", "portfolio_review_skipped", result)
-        else:
-            log_event("LEARNING", "portfolio_review_ok", {
-                "positions": result.get("position_count", 0),
-                "summary":   result.get("summary", {}),
-                "alerts":    len(result.get("alerts", [])),
-            })
-        return result
-    except Exception as e:
-        log_event("ERROR", "portfolio_review_error", {"error": str(e)[:200]})
-        return {}
-
-
-# ── Weekly digest (called by scheduler) ──────────────────────────────────────
-
-def run_weekly_digest():
-    from database.client import get_recent_trades, get_daily_reviews, save_learning
-    trades = get_recent_trades(days=7)
-    daily_reviews = get_daily_reviews(limit=7)
-    if not trades and not daily_reviews:
-        return
-    try:
-        from backend.learning.gate_controller import run_gate_controller
-        run_gate_controller(days=7, limit=500)
-    except Exception as e:
-        log_event("WARN", "gate_controller_error", {"error": str(e)[:160]})
-    insights = generate_weekly_insights(trades, daily_reviews=daily_reviews)
-    from datetime import date
-    save_learning(
-        week_start      = date.today(),
-        insights        = insights,
-        trades_analysed = len(trades)
-    )
-    log_event("LEARNING", "weekly_digest", {"insights": len(insights)})
-    return insights
-
-
-# ── Scheduler entry point ─────────────────────────────────────────────────────
+# run_weekly_digest → moved to backend/runtime/lifecycle.py
 
 def start_scheduler():
     from apscheduler.schedulers.blocking import BlockingScheduler
