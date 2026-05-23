@@ -107,6 +107,18 @@ def _context_quality_decision(setup_context: dict, profile: dict) -> dict:
     }
 
 
+def _candidate_reference_price(signal_result: dict, atr_data: dict = None) -> Optional[float]:
+    """Best-effort price captured during signal computation for blocked-opportunity replay."""
+    for source in (signal_result or {}, atr_data or {}):
+        try:
+            price = float(source.get("current_price"))
+        except (TypeError, ValueError):
+            price = 0.0
+        if price > 0:
+            return price
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker evaluation
 # ---------------------------------------------------------------------------
@@ -443,6 +455,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     setup_context = candidate["setup_context"]
     ev_result = candidate["ev_result"]
     capital_base = candidate["capital_base"]
+    reference_price = _candidate_reference_price(signal_result, atr_data)
     context_quality = _context_quality_decision(setup_context, profile)
     if not context_quality.get("allowed", True):
         log_event("INFO", "context_quality_entry_block", {
@@ -489,6 +502,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             _record_blocked_opportunity(
                 ticker, candidate.get("action_hint"), composite, signals_snap, setup_context,
                 ticker_regime, "llm", "llm_limit_hit", ev_result=ev_result,
+                reference_price=reference_price,
             )
             return
 
@@ -543,6 +557,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 ticker_regime, "llm",
                 llm_result.get("rationale", "llm_hold_veto"),
                 ev_result=ev_result,
+                reference_price=reference_price,
             )
             if action == "SELL":
                 _log_short_candidate(
@@ -564,6 +579,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             ticker_regime, "llm",
             llm_result.get("rationale", "llm_direction_conflict"),
             ev_result=ev_result,
+            reference_price=reference_price,
         )
         if action == "SELL":
             _log_short_candidate(
@@ -585,6 +601,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             ticker_regime, "llm",
             llm_result.get("rationale", "llm_rationale_conflict_veto"),
             ev_result=ev_result,
+            reference_price=reference_price,
         )
         return
 

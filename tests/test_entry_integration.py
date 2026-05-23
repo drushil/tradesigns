@@ -80,6 +80,68 @@ def test_context_quality_blocks_opening_noise():
     assert decision["reason"] == "session_window_opening_noise_blocked"
 
 
+def test_llm_block_records_reference_price_for_replay():
+    """LLM vetoes should be replayable against the price known at signal time."""
+    import backend.execution.entry as entry
+
+    fake_regime_state = SimpleNamespace(
+        intraday_regime="trending",
+        market_regime="bull",
+        vix=18.0,
+    )
+    setup_context = {
+        "session_window": "morning_trend",
+        "data_quality_state": "executable",
+        "playbook": "morning_vwap_reclaim",
+    }
+    candidate = {
+        "ticker": "AAPL",
+        "ticker_regime": "trending",
+        "ticker_regime_state": fake_regime_state,
+        "signal_result": {
+            "composite_score": 0.38,
+            "signals": {"tape_aggression": {"score": 0.3}},
+            "atr_data": {"atr_pct": 0.8, "atr_raw": 1.2, "current_price": 151.25},
+            "current_price": 151.25,
+        },
+        "composite": 0.38,
+        "signals_snap": {"tape_aggression": {"score": 0.3}},
+        "atr_data": {"atr_pct": 0.8, "atr_raw": 1.2, "current_price": 151.25},
+        "regime_debug": {},
+        "news_headline": "",
+        "setup_context": setup_context,
+        "ev_result": {"decision": "allow", "ev_decision": "full_size", "size_multiplier": 1.0},
+        "capital_base": 5000.0,
+        "action_hint": "BUY",
+        "setup_grade": None,
+    }
+    profile = {
+        "min_conviction": 0.30,
+        "stop_loss_pct": 2.0,
+        "take_profit_pct": 4.0,
+        "allow_a_plus_llm_hold_override": False,
+    }
+    llm_result = {
+        "action": "HOLD",
+        "conviction": 0.72,
+        "hold_minutes": 30,
+        "stop_loss_pct": 2.0,
+        "rationale": "wait for cleaner confirmation",
+    }
+
+    with patch("backend.agent._can_call_llm", return_value=True), \
+         patch("backend.agent._record_llm_call"), \
+         patch("backend.execution.entry.llm_signal_decision", return_value=llm_result), \
+         patch("backend.execution.entry.log_event"), \
+         patch("backend.execution.entry._record_blocked_opportunity") as record_block:
+
+        entry._execute_trade_candidate(candidate, profile, {"vix": 18.0})
+
+    assert record_block.call_count == 1
+    assert record_block.call_args.kwargs["reference_price"] == pytest.approx(151.25)
+    assert record_block.call_args.args[6] == "llm"
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — state bridge is alias
 # ---------------------------------------------------------------------------
