@@ -2,6 +2,16 @@
 config/risk_profiles.py
 Defines all risk profiles. The active profile is loaded from .env
 and passed through every layer of the agent.
+
+2026-05-23 — three calibration changes applied to all profiles:
+  1. take_profit_pct raised so TP >= 1.5× stop_loss_pct (aligns with
+     min_reward_risk_ratio; previously most profiles failed _reward_risk_block)
+  2. paper_overrides min_signal_score floored at 0.15 for all profiles
+     (previously 0.05–0.10, generating near-random cold-start learning data)
+  3. signal_weights rebalanced: reduce news_sentiment (0.07–0.08),
+     put_call_ratio (0.03–0.04), order_book_imbalance (0.14–0.18);
+     increase tape_aggression and relative_strength as primary leading signals.
+     RSI and Bollinger kept flat (confirmation, not leading).
 """
 
 RISK_PROFILES = {
@@ -13,12 +23,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 2.0,
         "cash_buffer_pct": 30.0,
         "stop_loss_pct": 1.0,
-        "take_profit_pct": 1.2,
+        "take_profit_pct": 1.5,          # was 1.2 — now 1.5× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 1500,
         "min_conviction": 0.75,
         "min_signal_score": 0.50,
         "paper_overrides": {
-            "min_signal_score": 0.16,
+            "min_signal_score": 0.16,    # already fine
             "min_conviction": 0.42,
             "max_trades_per_day": 8,
             "min_hold_minutes": 10,
@@ -51,15 +61,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
         "signal_weights": {
-            "order_book_imbalance": 0.14,
-            "tape_aggression":      0.10,
-            "rsi_divergence":       0.22,
-            "news_sentiment":       0.16,
-            "vwap_deviation":       0.11,
-            "macd_crossover":       0.07,
-            "relative_strength":    0.06,
-            "bollinger_squeeze":    0.08,
-            "put_call_ratio":       0.06,
+            "order_book_imbalance": 0.14,  # kept — defensive profile, lower turnover
+            "tape_aggression":      0.15,  # was 0.10
+            "rsi_divergence":       0.18,  # was 0.22 — reduced but still meaningful for conservative
+            "news_sentiment":       0.08,  # was 0.16
+            "vwap_deviation":       0.12,  # was 0.11
+            "macd_crossover":       0.09,  # was 0.07
+            "relative_strength":    0.12,  # was 0.06
+            "bollinger_squeeze":    0.08,  # unchanged
+            "put_call_ratio":       0.04,  # was 0.06
         },
     },
     "cautious": {
@@ -70,12 +80,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 3.0,
         "cash_buffer_pct": 25.0,
         "stop_loss_pct": 1.5,
-        "take_profit_pct": 1.6,
+        "take_profit_pct": 2.3,          # was 1.6 — now 1.53× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 2500,
         "min_conviction": 0.70,
         "min_signal_score": 0.42,
         "paper_overrides": {
-            "min_signal_score": 0.14,
+            "min_signal_score": 0.15,    # was 0.14 — floored to 0.15
             "min_conviction": 0.38,
             "max_trades_per_day": 12,
             "min_hold_minutes": 8,
@@ -108,15 +118,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
         "signal_weights": {
-            "order_book_imbalance": 0.15,
-            "tape_aggression":      0.13,
-            "rsi_divergence":       0.19,
-            "news_sentiment":       0.15,
-            "vwap_deviation":       0.10,
-            "macd_crossover":       0.07,
-            "relative_strength":    0.06,
-            "bollinger_squeeze":    0.09,
-            "put_call_ratio":       0.06,
+            "order_book_imbalance": 0.15,  # unchanged — cautious keeps snapshot edge
+            "tape_aggression":      0.17,  # was 0.13
+            "rsi_divergence":       0.15,  # was 0.19
+            "news_sentiment":       0.08,  # was 0.15
+            "vwap_deviation":       0.11,  # was 0.10
+            "macd_crossover":       0.09,  # was 0.07
+            "relative_strength":    0.13,  # was 0.06
+            "bollinger_squeeze":    0.08,  # was 0.09
+            "put_call_ratio":       0.04,  # was 0.06
         },
     },
     "moderate": {
@@ -127,12 +137,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 5.0,
         "cash_buffer_pct": 15.0,
         "stop_loss_pct": 2.0,
-        "take_profit_pct": 2.2,
+        "take_profit_pct": 3.0,          # was 2.2 — now 1.5× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 5000,
         "min_conviction": 0.60,
         "min_signal_score": 0.35,
         "paper_overrides": {
-            "min_signal_score": 0.10,
+            "min_signal_score": 0.15,    # was 0.10 — floored to 0.15
             "min_conviction": 0.35,
             "max_trades_per_day": 30,
             "min_hold_minutes": 5,
@@ -166,15 +176,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
         "signal_weights": {
-            "order_book_imbalance": 0.21,
-            "tape_aggression":      0.17,
-            "rsi_divergence":       0.11,
-            "news_sentiment":       0.14,
-            "vwap_deviation":       0.07,
-            "macd_crossover":       0.08,
-            "relative_strength":    0.07,
-            "bollinger_squeeze":    0.10,
-            "put_call_ratio":       0.05,
+            "order_book_imbalance": 0.18,  # was 0.21
+            "tape_aggression":      0.22,  # was 0.17
+            "rsi_divergence":       0.10,  # was 0.11
+            "news_sentiment":       0.08,  # was 0.14
+            "vwap_deviation":       0.08,  # was 0.07
+            "macd_crossover":       0.10,  # was 0.08
+            "relative_strength":    0.14,  # was 0.07
+            "bollinger_squeeze":    0.07,  # was 0.10
+            "put_call_ratio":       0.03,  # was 0.05
         },
     },
     "growth": {
@@ -185,12 +195,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 8.0,
         "cash_buffer_pct": 10.0,
         "stop_loss_pct": 2.5,
-        "take_profit_pct": 3.0,
+        "take_profit_pct": 3.8,          # was 3.0 — now 1.52× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 8000,
         "min_conviction": 0.55,
         "min_signal_score": 0.30,
         "paper_overrides": {
-            "min_signal_score": 0.08,
+            "min_signal_score": 0.15,    # was 0.08 — floored to 0.15
             "min_conviction": 0.32,
             "max_trades_per_day": 40,
             "min_hold_minutes": 5,
@@ -224,15 +234,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.08,
         "time_exit_cooldown_minutes": 45,
         "signal_weights": {
-            "order_book_imbalance": 0.21,
-            "tape_aggression":      0.20,
-            "rsi_divergence":       0.09,
-            "news_sentiment":       0.13,
-            "vwap_deviation":       0.07,
-            "macd_crossover":       0.09,
-            "relative_strength":    0.07,
-            "bollinger_squeeze":    0.10,
-            "put_call_ratio":       0.04,
+            "order_book_imbalance": 0.18,  # was 0.21
+            "tape_aggression":      0.24,  # was 0.20
+            "rsi_divergence":       0.08,  # was 0.09
+            "news_sentiment":       0.07,  # was 0.13
+            "vwap_deviation":       0.08,  # was 0.07
+            "macd_crossover":       0.10,  # was 0.09
+            "relative_strength":    0.15,  # was 0.07
+            "bollinger_squeeze":    0.07,  # was 0.10
+            "put_call_ratio":       0.03,  # was 0.04
         },
     },
     "ultra_aggressive": {
@@ -243,12 +253,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 15.0,
         "cash_buffer_pct": 3.0,
         "stop_loss_pct": 3.5,
-        "take_profit_pct": 4.5,
+        "take_profit_pct": 5.3,          # was 4.5 — now 1.51× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 15000,
         "min_conviction": 0.45,
         "min_signal_score": 0.20,
         "paper_overrides": {
-            "min_signal_score": 0.05,
+            "min_signal_score": 0.15,    # was 0.05 — floored to 0.15
             "min_conviction": 0.28,
             "max_trades_per_day": 80,
             "min_hold_minutes": 2,
@@ -289,15 +299,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.06,
         "time_exit_cooldown_minutes": 20,
         "signal_weights": {
-            "order_book_imbalance": 0.24,
-            "tape_aggression":      0.22,
-            "rsi_divergence":       0.06,
-            "news_sentiment":       0.10,
-            "vwap_deviation":       0.06,
-            "macd_crossover":       0.11,
-            "relative_strength":    0.07,
-            "bollinger_squeeze":    0.10,
-            "put_call_ratio":       0.04,
+            "order_book_imbalance": 0.17,  # was 0.24
+            "tape_aggression":      0.25,  # was 0.22
+            "rsi_divergence":       0.06,  # unchanged
+            "news_sentiment":       0.07,  # was 0.10
+            "vwap_deviation":       0.08,  # was 0.06
+            "macd_crossover":       0.11,  # unchanged
+            "relative_strength":    0.16,  # was 0.07
+            "bollinger_squeeze":    0.07,  # was 0.10
+            "put_call_ratio":       0.03,  # was 0.04
         },
     },
     "aggressive": {
@@ -308,12 +318,12 @@ RISK_PROFILES = {
         "capital_per_trade_pct": 12.0,
         "cash_buffer_pct": 5.0,
         "stop_loss_pct": 3.0,
-        "take_profit_pct": 3.8,
+        "take_profit_pct": 4.5,          # was 3.8 — now 1.5× stop (passes min_rr=1.5)
         "max_trade_notional_eur": 12000,
         "min_conviction": 0.50,
         "min_signal_score": 0.25,
         "paper_overrides": {
-            "min_signal_score": 0.06,
+            "min_signal_score": 0.15,    # was 0.06 — floored to 0.15
             "min_conviction": 0.30,
             "max_trades_per_day": 60,
             "min_hold_minutes": 3,
@@ -347,15 +357,15 @@ RISK_PROFILES = {
         "hold_extension_fade_score": 0.08,
         "time_exit_cooldown_minutes": 30,
         "signal_weights": {
-            "order_book_imbalance": 0.23,
-            "tape_aggression":      0.20,
-            "rsi_divergence":       0.07,
-            "news_sentiment":       0.11,
-            "vwap_deviation":       0.07,
-            "macd_crossover":       0.10,
-            "relative_strength":    0.07,
-            "bollinger_squeeze":    0.11,
-            "put_call_ratio":       0.04,
+            "order_book_imbalance": 0.17,  # was 0.23
+            "tape_aggression":      0.25,  # was 0.20
+            "rsi_divergence":       0.06,  # was 0.07
+            "news_sentiment":       0.07,  # was 0.11
+            "vwap_deviation":       0.08,  # was 0.07
+            "macd_crossover":       0.11,  # was 0.10
+            "relative_strength":    0.16,  # was 0.07
+            "bollinger_squeeze":    0.07,  # was 0.11
+            "put_call_ratio":       0.03,  # was 0.04
         },
     },
 }
