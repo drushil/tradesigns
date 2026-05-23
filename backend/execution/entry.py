@@ -58,6 +58,56 @@ from database.client import insert_signal, save_open_trade, log_event
 
 
 # ---------------------------------------------------------------------------
+# Context quality sizing
+# ---------------------------------------------------------------------------
+
+def _context_quality_decision(setup_context: dict, profile: dict) -> dict:
+    """Translate evidence-layer context into a live execution multiplier."""
+    setup_context = setup_context or {}
+    profile = profile or {}
+    if not bool(profile.get("context_quality_enabled", True)):
+        return {"allowed": True, "multiplier": 1.0, "reason": "context_quality_disabled"}
+
+    data_quality = str(setup_context.get("data_quality_state") or "unknown").lower()
+    if data_quality == "shadow_only" and bool(profile.get("context_quality_block_shadow_only", True)):
+        return {
+            "allowed": False,
+            "multiplier": 0.0,
+            "reason": "data_quality_shadow_only",
+            "data_quality_state": data_quality,
+        }
+
+    window = str(setup_context.get("session_window") or "unknown").lower()
+    multipliers = {
+        "opening_noise": float(profile.get("context_quality_opening_noise_multiplier", 0.0)),
+        "opening_drive": float(profile.get("context_quality_opening_drive_multiplier", 1.0)),
+        "morning_trend": float(profile.get("context_quality_morning_trend_multiplier", 1.0)),
+        "midday": float(profile.get("context_quality_midday_multiplier", 0.35)),
+        "afternoon_momentum": float(profile.get("context_quality_afternoon_momentum_multiplier", 1.0)),
+        "pre_close": float(profile.get("context_quality_pre_close_multiplier", 0.55)),
+        "after_close": float(profile.get("context_quality_after_close_multiplier", 0.0)),
+        "outside_regular_hours": float(profile.get("context_quality_outside_hours_multiplier", 0.0)),
+        "unknown": float(profile.get("context_quality_unknown_multiplier", 0.50)),
+    }
+    multiplier = max(0.0, min(1.0, multipliers.get(window, multipliers["unknown"])))
+    if multiplier <= 0:
+        return {
+            "allowed": False,
+            "multiplier": 0.0,
+            "reason": f"session_window_{window}_blocked",
+            "session_window": window,
+            "data_quality_state": data_quality,
+        }
+    return {
+        "allowed": True,
+        "multiplier": multiplier,
+        "reason": f"session_window_{window}_multiplier",
+        "session_window": window,
+        "data_quality_state": data_quality,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-ticker evaluation
 # ---------------------------------------------------------------------------
 
@@ -393,6 +443,21 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     setup_context = candidate["setup_context"]
     ev_result = candidate["ev_result"]
     capital_base = candidate["capital_base"]
+    context_quality = _context_quality_decision(setup_context, profile)
+    if not context_quality.get("allowed", True):
+        log_event("INFO", "context_quality_entry_block", {
+            "ticker": ticker,
+            "action": candidate.get("action_hint"),
+            "composite": round(float(composite or 0), 4),
+            **context_quality,
+        })
+        _record_blocked_opportunity(
+            ticker, candidate.get("action_hint"), composite, signals_snap, setup_context,
+            ticker_regime, "entry_quality", context_quality.get("reason", "context_quality_block"),
+            ev_result=ev_result,
+            block_detail=context_quality,
+        )
+        return
 
     # ── A+ setup grade — override soft LLM blocks ────────────────────────────
     setup_grade: Optional[SetupGrade] = candidate.get("setup_grade")
@@ -599,6 +664,18 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             "ticker": ticker,
             "scalar": round(ranging_scalar, 3),
             "combined_size_multiplier": round(combined_mult, 3),
+        })
+    context_multiplier = float(context_quality.get("multiplier", 1.0))
+    combined_mult *= context_multiplier
+    sizing["context_quality_multiplier"] = round(context_multiplier, 3)
+    sizing["context_quality_reason"] = context_quality.get("reason")
+    sizing["context_quality_detail"] = context_quality
+    if context_multiplier < 1.0:
+        log_event("INFO", "context_quality_size_reduced", {
+            "ticker": ticker,
+            "multiplier": round(context_multiplier, 3),
+            "combined_size_multiplier": round(combined_mult, 3),
+            **context_quality,
         })
     final_size *= combined_mult
     if action == "SELL":

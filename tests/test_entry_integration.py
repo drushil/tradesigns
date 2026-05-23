@@ -35,6 +35,52 @@ from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
+# Context quality decision
+# ---------------------------------------------------------------------------
+
+def test_context_quality_blocks_shadow_only_data():
+    """Shadow-only evidence can be collected, but it must not execute live."""
+    import backend.execution.entry as entry
+
+    decision = entry._context_quality_decision(
+        {"data_quality_state": "shadow_only", "session_window": "morning_trend"},
+        {},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["multiplier"] == pytest.approx(0.0)
+    assert decision["reason"] == "data_quality_shadow_only"
+
+
+def test_context_quality_scales_midday_to_probe_size():
+    """Midday is allowed, but only at reduced context size."""
+    import backend.execution.entry as entry
+
+    decision = entry._context_quality_decision(
+        {"data_quality_state": "executable", "session_window": "midday"},
+        {},
+    )
+
+    assert decision["allowed"] is True
+    assert decision["multiplier"] == pytest.approx(0.35)
+    assert decision["reason"] == "session_window_midday_multiplier"
+
+
+def test_context_quality_blocks_opening_noise():
+    """The first minutes after open remain shadow/evidence time, not live execution."""
+    import backend.execution.entry as entry
+
+    decision = entry._context_quality_decision(
+        {"data_quality_state": "executable", "session_window": "opening_noise"},
+        {},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["multiplier"] == pytest.approx(0.0)
+    assert decision["reason"] == "session_window_opening_noise_blocked"
+
+
+# ---------------------------------------------------------------------------
 # Test 1 — state bridge is alias
 # ---------------------------------------------------------------------------
 
@@ -207,6 +253,9 @@ def test_execute_trade_candidate_populates_open_trades():
     assert trade["data_quality_state"] == "executable",          "data_quality_state missing"
     assert trade["estimated_total_cost_pct"] == pytest.approx(0.16), \
         "estimated_total_cost_pct missing"
+    assert trade["sizing_json"]["context_quality_multiplier"] == pytest.approx(1.0)
+    assert trade["sizing_json"]["context_quality_reason"] == \
+        "session_window_morning_trend_multiplier"
 
     # Cleanup
     state._open_trades.clear()

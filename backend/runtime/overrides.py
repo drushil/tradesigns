@@ -119,6 +119,18 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("crypto_internal_align_enabled", True)
     p.setdefault("gate_controller_enabled", True)
     p.setdefault("b_shadow_promote_enabled", True)
+    # Context quality: evidence-layer execution sizing
+    p.setdefault("context_quality_enabled", True)
+    p.setdefault("context_quality_block_shadow_only", True)
+    p.setdefault("context_quality_opening_noise_multiplier", 0.0)
+    p.setdefault("context_quality_opening_drive_multiplier", 1.0)
+    p.setdefault("context_quality_morning_trend_multiplier", 1.0)
+    p.setdefault("context_quality_midday_multiplier", 0.35)
+    p.setdefault("context_quality_afternoon_momentum_multiplier", 1.0)
+    p.setdefault("context_quality_pre_close_multiplier", 0.55)
+    p.setdefault("context_quality_after_close_multiplier", 0.0)
+    p.setdefault("context_quality_outside_hours_multiplier", 0.0)
+    p.setdefault("context_quality_unknown_multiplier", 0.50)
     if state.IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -364,4 +376,53 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["gate_controller_enabled"] = _env_bool("GATE_CONTROLLER_ENABLED", True)
     if os.getenv("B_SHADOW_PROMOTE_ENABLED") is not None:
         p["b_shadow_promote_enabled"] = _env_bool("B_SHADOW_PROMOTE_ENABLED", True)
+    if os.getenv("CONTEXT_QUALITY_ENABLED") is not None:
+        p["context_quality_enabled"] = _env_bool("CONTEXT_QUALITY_ENABLED", True)
+    if os.getenv("CONTEXT_QUALITY_BLOCK_SHADOW_ONLY") is not None:
+        p["context_quality_block_shadow_only"] = _env_bool("CONTEXT_QUALITY_BLOCK_SHADOW_ONLY", True)
+    if os.getenv("CONTEXT_QUALITY_OPENING_NOISE_MULTIPLIER"):
+        p["context_quality_opening_noise_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_OPENING_NOISE_MULTIPLIER",
+            p["context_quality_opening_noise_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_OPENING_DRIVE_MULTIPLIER"):
+        p["context_quality_opening_drive_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_OPENING_DRIVE_MULTIPLIER",
+            p["context_quality_opening_drive_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_MORNING_TREND_MULTIPLIER"):
+        p["context_quality_morning_trend_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_MORNING_TREND_MULTIPLIER",
+            p["context_quality_morning_trend_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_MIDDAY_MULTIPLIER"):
+        p["context_quality_midday_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_MIDDAY_MULTIPLIER",
+            p["context_quality_midday_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_AFTERNOON_MOMENTUM_MULTIPLIER"):
+        p["context_quality_afternoon_momentum_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_AFTERNOON_MOMENTUM_MULTIPLIER",
+            p["context_quality_afternoon_momentum_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_PRE_CLOSE_MULTIPLIER"):
+        p["context_quality_pre_close_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_PRE_CLOSE_MULTIPLIER",
+            p["context_quality_pre_close_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_AFTER_CLOSE_MULTIPLIER"):
+        p["context_quality_after_close_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_AFTER_CLOSE_MULTIPLIER",
+            p["context_quality_after_close_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_OUTSIDE_HOURS_MULTIPLIER"):
+        p["context_quality_outside_hours_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_OUTSIDE_HOURS_MULTIPLIER",
+            p["context_quality_outside_hours_multiplier"],
+        )
+    if os.getenv("CONTEXT_QUALITY_UNKNOWN_MULTIPLIER"):
+        p["context_quality_unknown_multiplier"] = _env_float(
+            "CONTEXT_QUALITY_UNKNOWN_MULTIPLIER",
+            p["context_quality_unknown_multiplier"],
+        )
     return p
