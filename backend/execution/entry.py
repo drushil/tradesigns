@@ -610,6 +610,34 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
     # 6. Size and submit order
     sizing = compute_position_size(ticker, capital_base, profile, conviction, atr_data, ticker_regime_state)
     base_stop_pct = float(sizing.get("stop_pct") or profile.get("stop_loss_pct", 2.0))
+
+    # Ranging regime: widen the stop to an ATR-based floor so intraday noise doesn't
+    # prematurely hit the bracket before time-exit drift can develop.
+    # EUR risk is preserved by proportionally shrinking position size (same notional risk,
+    # more price room).  Profile key: ranging_atr_stop_multiple (default 1.5).
+    if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging":
+        _raw_atr = (atr_data or {}).get("atr_pct")
+        _atr_stop_mult = float(profile.get("ranging_atr_stop_multiple", 1.5))
+        if _raw_atr and _atr_stop_mult > 0:
+            _atr_floor_stop = round(float(_raw_atr) * _atr_stop_mult, 3)
+            if _atr_floor_stop > base_stop_pct:
+                _risk_scale = base_stop_pct / _atr_floor_stop
+                sizing["size_eur"] = round(float(sizing["size_eur"]) * _risk_scale, 2)
+                sizing["stop_pct"] = round(_atr_floor_stop, 3)
+                sizing["ranging_atr_stop_widened"] = True
+                sizing["ranging_atr_stop_detail"] = {
+                    "original_stop_pct": round(base_stop_pct, 3),
+                    "atr_pct":           round(float(_raw_atr), 3),
+                    "atr_stop_multiple": _atr_stop_mult,
+                    "widened_stop_pct":  round(_atr_floor_stop, 3),
+                    "size_scale":        round(_risk_scale, 4),
+                }
+                base_stop_pct = _atr_floor_stop
+                log_event("INFO", "ranging_atr_stop_widened", {
+                    "ticker": ticker,
+                    **sizing["ranging_atr_stop_detail"],
+                })
+
     stop_scalar = _leveraged_etf_stop_scalar(ticker, profile)
     if stop_scalar > 1.0:
         adjusted_stop_pct = min(12.0, max(base_stop_pct, base_stop_pct * stop_scalar))
@@ -653,6 +681,19 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 "ticker": ticker,
                 **sizing["a_plus_size_cap_reason"],
             })
+        # A+ grade boost (1.5×) is not warranted in ranging — the extra confirmation
+        # signals don't overcome ranging noise.  Cap to EV-only sizing, identical to A.
+        if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging" \
+                and combined_mult > ev_size_multiplier:
+            sizing["a_plus_ranging_size_capped"] = True
+            log_event("INFO", "a_plus_ranging_grade_boost_suppressed", {
+                "ticker":               ticker,
+                "grade":                "A+",
+                "uncapped_combined_mult": round(combined_mult, 3),
+                "capped_to_ev_mult":    round(ev_size_multiplier, 3),
+                "reason":               "grade_boost_not_applicable_in_ranging",
+            })
+            combined_mult = ev_size_multiplier
     if str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging":
         ranging_scalar = max(0.0, min(1.0, float(profile.get("ranging_regime_size_multiplier", 0.35))))
         combined_mult *= ranging_scalar

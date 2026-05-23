@@ -46,6 +46,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("probe_floor_inflation_max_multiple", 1.25)
     p.setdefault("ranging_regime_size_multiplier", 0.35)
     p.setdefault("ranging_max_trades_per_day", 6)
+    p.setdefault("ranging_atr_stop_multiple", 1.5)      # widen stop to ATR×1.5 in ranging
     p.setdefault("ranging_min_grade_required", "A+")
     p.setdefault("ranging_a_grade_min_breakout_quality", 0.80)
     p.setdefault("ranging_a_grade_min_ev_pct", 0.25)
@@ -156,6 +157,8 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["high_atr_stop_multiplier"] = _env_float("HIGH_ATR_STOP_MULTIPLIER", p["high_atr_stop_multiplier"])
     if os.getenv("RANGING_MAX_TRADES_PER_DAY"):
         p["ranging_max_trades_per_day"] = _env_int("RANGING_MAX_TRADES_PER_DAY", int(p["ranging_max_trades_per_day"]))
+    if os.getenv("RANGING_ATR_STOP_MULTIPLE"):
+        p["ranging_atr_stop_multiple"] = _env_float("RANGING_ATR_STOP_MULTIPLE", p["ranging_atr_stop_multiple"])
     if os.getenv("RANGING_REGIME_SIZE_MULTIPLIER"):
         p["ranging_regime_size_multiplier"] = _env_float("RANGING_REGIME_SIZE_MULTIPLIER", p["ranging_regime_size_multiplier"])
     if os.getenv("RANGING_A_PLUS_MIN_COMPOSITE"):

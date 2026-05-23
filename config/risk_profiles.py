@@ -12,6 +12,17 @@ and passed through every layer of the agent.
      put_call_ratio (0.03–0.04), order_book_imbalance (0.14–0.18);
      increase tape_aggression and relative_strength as primary leading signals.
      RSI and Bollinger kept flat (confirmation, not leading).
+
+2026-05-23 (exit/sizing cycle) — three further changes applied to all profiles:
+  4. min_grade_required set to "A" across all profiles — B grade is shadow-only
+     until post-May-22 evidence confirms it has positive edge (1/8 win rate,
+     -€11.75 net from Apr-30 to May-21 is not a tuning problem).
+  5. allow_b_grade_exploration set to False — no tiny B exploration trades;
+     _record_blocked_opportunity handles shadow tracking automatically.
+  6. ranging_atr_stop_multiple added (1.5) — in ranging regime the stop is
+     widened to max(profile_stop, ATR × 1.5) with proportional size reduction,
+     giving trades room to reach the time-exit positive drift zone rather than
+     being stopped out by intraday noise (37 stop-outs = -€196.92 Apr-May).
 """
 
 RISK_PROFILES = {
@@ -60,6 +71,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.20,
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
+        "min_grade_required": "A",          # B grade shadow-only — 1/8 win rate, -€11.75 net
+        "allow_b_grade_exploration": False, # no tiny exploration trades; shadow tracked automatically
+        "ranging_atr_stop_multiple": 1.5,   # widen ranging stop to ATR×1.5; proportional size cut
         "signal_weights": {
             "order_book_imbalance": 0.14,  # kept — defensive profile, lower turnover
             "tape_aggression":      0.15,  # was 0.10
@@ -117,6 +131,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.20,
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
+        "min_grade_required": "A",
+        "allow_b_grade_exploration": False,
+        "ranging_atr_stop_multiple": 1.5,
         "signal_weights": {
             "order_book_imbalance": 0.15,  # unchanged — cautious keeps snapshot edge
             "tape_aggression":      0.17,  # was 0.13
@@ -175,6 +192,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.20,
         "hold_extension_fade_score": 0.10,
         "time_exit_cooldown_minutes": 60,
+        "min_grade_required": "A",
+        "allow_b_grade_exploration": False,
+        "ranging_atr_stop_multiple": 1.5,
         "signal_weights": {
             "order_book_imbalance": 0.18,  # was 0.21
             "tape_aggression":      0.22,  # was 0.17
@@ -233,6 +253,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.18,
         "hold_extension_fade_score": 0.08,
         "time_exit_cooldown_minutes": 45,
+        "min_grade_required": "A",
+        "allow_b_grade_exploration": False,
+        "ranging_atr_stop_multiple": 1.5,
         "signal_weights": {
             "order_book_imbalance": 0.18,  # was 0.21
             "tape_aggression":      0.24,  # was 0.20
@@ -298,6 +321,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.14,
         "hold_extension_fade_score": 0.06,
         "time_exit_cooldown_minutes": 20,
+        "min_grade_required": "A",
+        "allow_b_grade_exploration": False,
+        "ranging_atr_stop_multiple": 1.5,
         "signal_weights": {
             "order_book_imbalance": 0.17,  # was 0.24
             "tape_aggression":      0.25,  # was 0.22
@@ -356,6 +382,9 @@ RISK_PROFILES = {
         "hold_extension_min_signal_score": 0.16,
         "hold_extension_fade_score": 0.08,
         "time_exit_cooldown_minutes": 30,
+        "min_grade_required": "A",
+        "allow_b_grade_exploration": False,
+        "ranging_atr_stop_multiple": 1.5,
         "signal_weights": {
             "order_book_imbalance": 0.17,  # was 0.23
             "tape_aggression":      0.25,  # was 0.20
