@@ -881,11 +881,18 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         sizing["event_risk_intraday_only"] = True
 
     profile_tp_pct = float(profile.get("take_profit_pct", profile["stop_loss_pct"] * 1.2))
-    min_rr         = float(profile.get("min_reward_risk_ratio", 1.5))
+    # Use the same R:R threshold that _reward_risk_block will apply so TP is always
+    # pre-scaled to satisfy the veto — not just the non-ranging 1.5× default.
+    _tp_is_ranging = str(getattr(ticker_regime_state, "intraday_regime", "")).lower() == "ranging"
+    min_rr = float(profile.get(
+        "ranging_min_reward_risk_ratio" if _tp_is_ranging else "min_reward_risk_ratio",
+        2.0 if _tp_is_ranging else 1.5,
+    ))
     dynamic_tp_pct = round(stop_loss_pct * min_rr, 4)
     take_profit_pct = max(profile_tp_pct, dynamic_tp_pct)
     if take_profit_pct > profile_tp_pct:
-        # ATR-derived stop exceeded the profile default — TP scaled up to preserve R:R
+        # Stop (ATR-derived or profile) exceeded the profile TP default — scale up TP
+        # to satisfy the ranging/non-ranging R:R threshold applied by _reward_risk_block.
         log_event("INFO", "take_profit_dynamic_enforcement", {
             "ticker":         ticker,
             "stop_loss_pct":  round(stop_loss_pct, 4),
@@ -893,6 +900,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             "dynamic_tp_pct": round(dynamic_tp_pct, 4),
             "applied_tp_pct": round(take_profit_pct, 4),
             "min_rr":         min_rr,
+            "is_ranging":     _tp_is_ranging,
         })
     rr_block = _reward_risk_block(stop_loss_pct, take_profit_pct, ticker_regime, profile)
     if rr_block:
