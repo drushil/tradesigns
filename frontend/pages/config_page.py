@@ -88,7 +88,7 @@ def render():
                 "Type": ticker_profile.get("type", "Unknown"),
                 "Agent context": ticker_profile.get("agent_role", "No summary configured"),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True, column_config=column_config(rows[0].keys()))
+        st.dataframe(rows, width="stretch", hide_index=True, column_config=column_config(rows[0].keys()))
 
         with st.expander("Ticker summaries", expanded=False):
             for ticker in ticker_list:

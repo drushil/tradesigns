@@ -122,7 +122,7 @@ def render():
             xaxis_title=None,
             yaxis_title="€",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.info("Simulated yield data will appear after the first nightly sweep run.")
 
@@ -171,7 +171,7 @@ def render():
         div_display = pd.DataFrame(rows_display)
         st.dataframe(
             div_display,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config=column_config(div_display.columns),
         )

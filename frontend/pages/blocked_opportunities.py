@@ -195,7 +195,7 @@ def _dataframe(df: pd.DataFrame, *, styled: bool = False):
         return
     st.dataframe(
         _style_severity(df) if styled else df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config=column_config(df.columns),
     )
@@ -295,7 +295,7 @@ def _render_stage_breakdown(df: pd.DataFrame):
         ))
         apply_plotly_theme(fig, height=max(280, 28 * len(stage_df)))
         fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with col_table:
         _dataframe(stage_df)
 
@@ -338,7 +338,7 @@ def _render_eod_gate_activity():
         ))
         apply_plotly_theme(fig, height=max(260, 30 * len(ordered)))
         fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with col_table:
         event_df = pd.DataFrame([{"event": k, "count": v} for k, v in ordered])
         _dataframe(event_df)
@@ -413,7 +413,7 @@ def _render_near_threshold(df: pd.DataFrame):
             ))
         apply_plotly_theme(fig, height=270)
         fig.update_layout(barmode="stack")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     cols = [
         "created_local",
@@ -495,7 +495,7 @@ def _render_most_vetoed(df: pd.DataFrame):
         ))
         apply_plotly_theme(fig, height=320)
         fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with col_table:
         display = grouped.head(30).copy()
         for col in ["avg_mfe", "avg_close"]:

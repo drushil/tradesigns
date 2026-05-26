@@ -62,7 +62,7 @@ def _render_table(rows: list[dict], columns: list[str], empty: str):
         st.info(empty)
         return
     df = _flatten_rows(rows, columns)
-    st.dataframe(df, use_container_width=True, hide_index=True, column_config=column_config(df.columns))
+    st.dataframe(df, width="stretch", hide_index=True, column_config=column_config(df.columns))
 
 
 def _review_recommendations(review: dict, row: dict) -> list[dict]:
@@ -164,7 +164,7 @@ def render():
             xaxis=dict(gridcolor="#1a1a1a"),
             yaxis=dict(gridcolor="#1a1a1a", autorange="reversed"),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     else:
         st.info("No gate activity was captured for this review.")
 
@@ -251,4 +251,4 @@ def render():
             "summary": item_review.get("summary"),
         })
     history = pd.DataFrame(rows)
-    st.dataframe(history, use_container_width=True, hide_index=True, column_config=column_config(history.columns))
+    st.dataframe(history, width="stretch", hide_index=True, column_config=column_config(history.columns))

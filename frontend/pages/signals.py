@@ -101,7 +101,7 @@ def render():
 
     col_r, col_info = st.columns([1, 4])
     with col_r:
-        run_now = button("🔄 Compute Signals Now", use_container_width=True)
+        run_now = button("🔄 Compute Signals Now", width="stretch")
     with col_info:
         st.info("Auto-refreshes every 5 min during market hours. Click to compute now.")
 
@@ -311,7 +311,7 @@ def _render_live_cards(results: dict, weights: dict):
                 ))
                 fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", font_color="#888",
                                   height=190, margin=dict(l=8, r=8, t=16, b=8))
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 if e_mult > 1.0:
                     st.markdown(

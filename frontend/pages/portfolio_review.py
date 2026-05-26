@@ -100,7 +100,7 @@ def render():
             margin=dict(t=10, b=10, l=10, r=10),
             height=260,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # ── Position detail table ─────────────────────────────────────────────────
     with col_table:
@@ -157,7 +157,7 @@ def render():
             height=280,
             margin=dict(t=20, b=20),
         )
-        st.plotly_chart(sec_fig, use_container_width=True)
+        st.plotly_chart(sec_fig, width="stretch")
     else:
         st.info("No sector exposure data.")
 
@@ -198,4 +198,4 @@ def render():
             margin=dict(t=20, b=20),
             legend=dict(orientation="h", y=-0.2),
         )
-        st.plotly_chart(h_fig, use_container_width=True)
+        st.plotly_chart(h_fig, width="stretch")

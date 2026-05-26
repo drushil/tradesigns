@@ -155,7 +155,7 @@ def render():
                 xaxis=dict(title=""), yaxis=dict(title="signals", gridcolor="#1a1a1a"),
                 showlegend=False,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         else:
             st.info("No graded signals yet — agent will populate this once running.")
 
@@ -187,7 +187,7 @@ def render():
                     xaxis=dict(title=""), yaxis=dict(title="avg net P&L %", gridcolor="#1a1a1a"),
                     showlegend=False,
                 )
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
             else:
                 st.info("No closed graded trades yet.")
         else:
@@ -217,7 +217,7 @@ def render():
                     xaxis=dict(title=""), yaxis=dict(title="count", gridcolor="#1a1a1a"),
                     legend=dict(orientation="h", y=1.1),
                 )
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig3, width="stretch")
             else:
                 st.info("No A+/A setups yet in this window.")
         else:
@@ -255,7 +255,7 @@ def render():
                     yaxis=dict(title=""),
                     showlegend=False,
                 )
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, width="stretch")
             else:
                 st.info("No A+/A signals in this window.")
         else:
@@ -288,7 +288,7 @@ def render():
 
         st.dataframe(
             display_pdf.style.apply(_row_style, axis=1),
-            use_container_width=True, hide_index=True, height=220,
+            width="stretch", hide_index=True, height=220,
             column_config=column_config(display_pdf.columns),
         )
         st.caption("Grey rows: < 20 samples — cold-start mode (uses fixed threshold instead of percentile).")
@@ -337,7 +337,7 @@ def render():
                         "block_stage": "Stage", "total": "Blocks",
                         "profitable": "Profitable", "hit_rate": "Hit rate", "avg_fav": "Avg fav move",
                     }),
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                     column_config=column_config(["Stage", "Blocks", "Profitable", "Hit rate", "Avg fav move"]),
                 )
 
@@ -360,7 +360,7 @@ def render():
                     yaxis=dict(title="count", gridcolor="#1a1a1a"),
                     legend=dict(orientation="h", y=1.1, font=dict(size=11)),
                 )
-                st.plotly_chart(fig5, use_container_width=True)
+                st.plotly_chart(fig5, width="stretch")
 
             # Top missed opportunities table
             st.markdown(f"**{info_label('Top missed opportunities', 'Blocked candidates with the largest later favorable move.')}**", unsafe_allow_html=True)
@@ -384,7 +384,7 @@ def render():
                 })
                 st.dataframe(
                     missed_display,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config=column_config(missed_display.columns),
                 )
@@ -410,7 +410,7 @@ def render():
             })
             st.dataframe(
                 partial_display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config=column_config(partial_display.columns),
             )

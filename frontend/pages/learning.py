@@ -97,7 +97,7 @@ def render():
         xaxis=dict(tickformat=".0%", range=[0, 0.6], gridcolor="#1a1a1a"),
         yaxis=dict(gridcolor="rgba(0,0,0,0)"),
     )
-    st.plotly_chart(fig_w, use_container_width=True)
+    st.plotly_chart(fig_w, width="stretch")
 
     # ── Weight evolution chart ─────────────────────────────────────────────
     if len(weight_history) > 3:
@@ -124,7 +124,7 @@ def render():
             xaxis=dict(gridcolor="#1a1a1a"),
             legend=dict(orientation="h", y=-0.2),
         )
-        st.plotly_chart(fig_evo, use_container_width=True)
+        st.plotly_chart(fig_evo, width="stretch")
 
     st.markdown("---")
 
@@ -180,7 +180,7 @@ def render():
 
     col_gen, _ = st.columns([1, 3])
     with col_gen:
-        if button("🧠 Generate Insights Now", use_container_width=True):
+        if button("🧠 Generate Insights Now", width="stretch"):
             if trades and len(trades) >= 5:
                 with st.spinner("Claude Sonnet is analysing your trade history..."):
                     from backend.learning.engine import generate_weekly_insights
@@ -307,7 +307,7 @@ def render():
                                          plot_bgcolor="rgba(0,0,0,0)", height=260,
                                          margin=dict(l=0, r=0, t=10, b=0),
                                          showlegend=False)
-                    st.plotly_chart(fig_bo, use_container_width=True)
+                    st.plotly_chart(fig_bo, width="stretch")
                 with col_bo2:
                     display_stage = by_stage.rename(columns={
                         "block_stage": "Stage",
@@ -320,7 +320,7 @@ def render():
                         display_stage[pct_col] = display_stage[pct_col].map(lambda v: f"{v:+.2f}%" if pd.notna(v) else "—")
                     st.dataframe(
                         display_stage,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config=column_config(display_stage.columns),
                     )
@@ -335,7 +335,7 @@ def render():
                 section_title("Recent Replayed Blocks", help_key="Most recent blocked candidates after replay analysis added future MFE, MAE, and close-after values.")
                 st.dataframe(
                     recent,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config=column_config(recent.columns),
                 )
