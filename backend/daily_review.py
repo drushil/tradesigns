@@ -49,6 +49,13 @@ def _parse_dt(value) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _save_succeeded(record: dict) -> bool:
+    if not isinstance(record, dict) or not record:
+        return False
+    error = record.get("error")
+    return error in {None, ""}
+
+
 def _review_day_bounds(review_date: date) -> tuple[datetime, datetime]:
     start = datetime(review_date.year, review_date.month, review_date.day, tzinfo=timezone.utc)
     return start, start + timedelta(days=1)
@@ -436,7 +443,7 @@ def _snapshot_payload(review_date: date, metrics: dict, review: dict, saved: dic
         "broker_account_snapshot": metrics.get("broker_account_snapshot") or {},
         "broker_rejections": metrics.get("broker_rejections") or {},
         "data_source": {
-            "supabase_saved": "error" not in (saved or {}),
+            "supabase_saved": _save_succeeded(saved),
             "local_snapshot_saved": False,
             "discord_sent": discord_sent,
         },
@@ -804,7 +811,7 @@ def run_daily_eod_review(review_date: date = None, send_discord: bool = True) ->
         "error": review.get("error"),
     })
     if recommendations:
-        review_id = saved.get("id") if isinstance(saved, dict) and "error" not in saved else None
+        review_id = saved.get("id") if _save_succeeded(saved) else None
         insert_config_change_recommendations(review_id, review_date.isoformat(), recommendations)
     discord_sent = _send_discord(discord_message) if send_discord else False
     snapshot = save_local_daily_review_snapshot(
@@ -814,7 +821,7 @@ def run_daily_eod_review(review_date: date = None, send_discord: bool = True) ->
         "review_date": review_date.isoformat(),
         "trade_count": metrics.get("trade_summary", {}).get("total_trades", 0),
         "recommendations": len(recommendations),
-        "saved": "error" not in (saved or {}),
+        "saved": _save_succeeded(saved),
         "snapshot_saved": bool(snapshot.get("ok")),
     })
     return {

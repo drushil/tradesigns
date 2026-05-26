@@ -249,3 +249,10 @@ def test_save_local_daily_review_snapshot_writes_latest_and_dated(tmp_path, monk
     assert payload["data_source"]["local_snapshot_saved"] is True
     assert payload["broker_account_snapshot"]["daytrade_count"] == 2
     assert payload["broker_rejections"]["count"] == 1
+
+
+def test_save_succeeded_accepts_null_error_column():
+    assert daily_review._save_succeeded({"id": 3, "error": None}) is True
+    assert daily_review._save_succeeded({"id": 3, "error": ""}) is True
+    assert daily_review._save_succeeded({"error": "boom"}) is False
+    assert daily_review._save_succeeded({}) is False
