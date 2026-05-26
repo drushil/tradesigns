@@ -468,8 +468,6 @@ def save_local_daily_review_snapshot(review_date: date, metrics: dict, review: d
     dated_path = _SNAPSHOT_DIR / f"{review_date.isoformat()}.json"
     latest_path = _SNAPSHOT_DIR / "latest.json"
     try:
-        _write_json_atomic(dated_path, payload)
-        _write_json_atomic(latest_path, payload)
         payload["data_source"]["local_snapshot_saved"] = True
         _write_json_atomic(dated_path, payload)
         _write_json_atomic(latest_path, payload)
