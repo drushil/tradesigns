@@ -211,41 +211,46 @@ def test_eu_mirror_universe_is_metadata_tagged():
     assert abs(sum(advisory.EU_MIRROR_WEIGHTS.values()) - 1.0) < 0.001
 
 
+def _make_fake_bars(n_rows, volume):
+    """Build a MagicMock that satisfies all _data_quality access patterns."""
+    from unittest.mock import MagicMock
+    bars = MagicMock()
+    bars.empty = False
+    bars.__len__.return_value = n_rows
+    # bars.index[-1].to_pydatetime() → a recent tz-aware datetime
+    ts = MagicMock()
+    ts.to_pydatetime.return_value = datetime.now(timezone.utc) - timedelta(minutes=2)
+    bars.index.__getitem__.return_value = ts
+    # bars.tail(20): "Volume" in tail → True; tail["Volume"].mean() → float
+    recent = MagicMock()
+    recent.__contains__.return_value = True
+    recent.__getitem__.return_value.mean.return_value = float(volume)
+    bars.tail.return_value = recent
+    # bars["Close"].squeeze().iloc[-1] → 100.0
+    bars.__getitem__.return_value.squeeze.return_value.iloc.__getitem__.return_value = 100.0
+    return bars
+
+
 def test_eu_mirror_data_quality_uses_relaxed_rows_but_volume_floor(monkeypatch):
-    class FakeYf:
-        @staticmethod
-        def download(*args, **kwargs):
-            idx = pd.date_range(
-                datetime.now(timezone.utc) - timedelta(minutes=24),
-                periods=25,
-                freq="min",
-                tz=timezone.utc,
-            )
-            return pd.DataFrame({"Close": [100.0] * 25, "Volume": [500] * 25}, index=idx)
+    import sys
+    # Patch .download on the existing yfinance stub rather than replacing the
+    # whole module entry.  Replacing with a class causes pd.DataFrame() to treat
+    # the data dict as the MagicMock `spec`, which has no `.empty` attribute.
+    yf_mod = sys.modules["yfinance"]
+    monkeypatch.setattr(yf_mod, "download", lambda *a, **kw: _make_fake_bars(25, 500))
 
-    monkeypatch.setitem(__import__("sys").modules, "yfinance", FakeYf)
-
-    native = advisory._data_quality("SAP.DE", "EU")
-    mirror = advisory._data_quality("NVD.DE", "EU", listing_type="eu_us_mirror")
+    native = advisory._data_quality("SAP.DE", "EU")               # 25 rows < 45 → too_few_bars
+    mirror = advisory._data_quality("NVD.DE", "EU", listing_type="eu_us_mirror")  # 25 rows >= 20, vol=500 → ok
 
     assert native["reason"] == "too_few_bars"
     assert mirror["ok"] is True
-    assert mirror["avg_recent_volume"] == pytest.approx(500)
+    assert mirror["avg_recent_volume"] == pytest.approx(500.0)
 
 
 def test_eu_mirror_data_quality_blocks_thin_volume(monkeypatch):
-    class FakeYf:
-        @staticmethod
-        def download(*args, **kwargs):
-            idx = pd.date_range(
-                datetime.now(timezone.utc) - timedelta(minutes=24),
-                periods=25,
-                freq="min",
-                tz=timezone.utc,
-            )
-            return pd.DataFrame({"Close": [100.0] * 25, "Volume": [250] * 25}, index=idx)
-
-    monkeypatch.setitem(__import__("sys").modules, "yfinance", FakeYf)
+    import sys
+    yf_mod = sys.modules["yfinance"]
+    monkeypatch.setattr(yf_mod, "download", lambda *a, **kw: _make_fake_bars(25, 250))
 
     result = advisory._data_quality("NVD.DE", "EU", listing_type="eu_us_mirror")
 
