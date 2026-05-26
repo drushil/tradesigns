@@ -1,21 +1,21 @@
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 import scripts.check_latest_review_snapshot as snapshot_script
 
 
 def test_expected_latest_review_date_before_cutoff_uses_previous_business_day():
-    now = datetime(2026, 5, 27, 20, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 27, 20, 0, tzinfo=timezone.utc)
     assert snapshot_script._expected_latest_review_date(now).isoformat() == "2026-05-26"
 
 
 def test_expected_latest_review_date_after_cutoff_uses_same_day():
-    now = datetime(2026, 5, 27, 22, 0, tzinfo=UTC)
+    now = datetime(2026, 5, 27, 22, 0, tzinfo=timezone.utc)
     assert snapshot_script._expected_latest_review_date(now).isoformat() == "2026-05-27"
 
 
 def test_expected_latest_review_date_weekend_uses_previous_friday():
-    now = datetime(2026, 5, 30, 12, 0, tzinfo=UTC)  # Saturday
+    now = datetime(2026, 5, 30, 12, 0, tzinfo=timezone.utc)  # Saturday
     assert snapshot_script._expected_latest_review_date(now).isoformat() == "2026-05-29"
 
 

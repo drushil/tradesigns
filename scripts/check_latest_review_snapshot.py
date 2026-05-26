@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -18,13 +18,13 @@ def _parse_review_date(value: str | None) -> date | None:
 
 
 def _utc_now() -> datetime:
-    override = os.getenv("REVIEW_NOW_UTC", "").strip()
+    override = os.getenv("REVIEW_NOW_timezone.utc", "").strip()
     if override:
         try:
-            return datetime.fromisoformat(override.replace("Z", "+00:00")).astimezone(UTC)
+            return datetime.fromisoformat(override.replace("Z", "+00:00")).astimezone(timezone.utc)
         except ValueError:
             pass
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def _previous_business_day(day: date) -> date:
