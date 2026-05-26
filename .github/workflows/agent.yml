@@ -51,12 +51,21 @@ jobs:
     steps:
       - name: Checkout code
         run: |
-          curl -sL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github+json" \
-            -o repo.tar.gz
-          tar -xzf repo.tar.gz --strip-components=1
-          rm repo.tar.gz
+          for attempt in 1 2 3; do
+            echo "Checkout attempt $attempt..."
+            curl -fsSL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -o repo.tar.gz && \
+            file repo.tar.gz | grep -q "gzip" && \
+            tar -xzf repo.tar.gz --strip-components=1 && \
+            rm repo.tar.gz && \
+            echo "Checkout succeeded on attempt $attempt" && break
+            echo "Attempt $attempt failed, retrying in 15s..."
+            rm -f repo.tar.gz
+            sleep 15
+          done
+          [ -f requirements-agent.txt ] || { echo "Checkout failed after 3 attempts"; exit 1; }
 
       - uses: actions/setup-python@v5
         with:
