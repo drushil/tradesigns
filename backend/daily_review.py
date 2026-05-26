@@ -11,10 +11,12 @@ import json
 import os
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
 
+from backend.broker.alpaca import get_account
 from database.client import (
     get_recent_trades,
     get_blocked_opportunities,
@@ -29,6 +31,7 @@ from database.client import (
 
 
 MODEL = os.getenv("DAILY_REVIEW_MODEL", "llama-3.3-70b-versatile")
+_SNAPSHOT_DIR = Path(os.getenv("DAILY_REVIEW_SNAPSHOT_DIR", "artifacts/daily_reviews"))
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -369,6 +372,118 @@ def _gate_activity_from_logs(review_date: date) -> dict:
     }
 
 
+def _broker_rejections_from_logs(review_date: date) -> dict:
+    rows = _rows_for_date(get_logs(limit=1500), review_date, "logged_at", "created_at")
+    order_failed = [row for row in rows if row.get("event") == "order_failed"]
+    grouped_by_error = Counter()
+    grouped_by_ticker = Counter()
+    examples = []
+    for row in order_failed:
+        detail = row.get("detail") or {}
+        ticker = str(detail.get("ticker") or "unknown").upper()
+        error = str(detail.get("error") or "unknown")
+        grouped_by_error[error] += 1
+        grouped_by_ticker[ticker] += 1
+        if len(examples) < 10:
+            examples.append({
+                "logged_at": row.get("logged_at") or row.get("created_at"),
+                "ticker": ticker,
+                "error": error,
+                "client_order_id": detail.get("client_order_id"),
+            })
+    return {
+        "count": len(order_failed),
+        "grouped_by_error": dict(grouped_by_error),
+        "grouped_by_ticker": dict(grouped_by_ticker),
+        "recent_examples": examples,
+    }
+
+
+def _broker_account_snapshot() -> dict:
+    try:
+        account = get_account() or {}
+        return {
+            "ok": "error" not in account,
+            "equity": account.get("equity"),
+            "cash": account.get("cash"),
+            "buying_power": account.get("buying_power"),
+            "daytrade_count": account.get("daytrade_count"),
+            "pattern_day_trader": account.get("pattern_day_trader"),
+            "trading_blocked": account.get("trading_blocked"),
+            "account_blocked": account.get("account_blocked"),
+            "status": account.get("status"),
+            "error": account.get("error"),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:160]}
+
+
+def _snapshot_payload(review_date: date, metrics: dict, review: dict, saved: dict,
+                      recommendations: list[dict], discord_message: str,
+                      discord_sent: bool) -> dict:
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "review_date": review_date.isoformat(),
+        "daily_review": {
+            "summary": review.get("summary"),
+            "confidence": review.get("confidence"),
+            "worked_well": review.get("worked_well") or [],
+            "did_not_work": review.get("did_not_work") or [],
+            "recommendations": recommendations,
+            "do_not_change": review.get("do_not_change") or [],
+        },
+        "metrics": metrics,
+        "broker_account_snapshot": metrics.get("broker_account_snapshot") or {},
+        "broker_rejections": metrics.get("broker_rejections") or {},
+        "data_source": {
+            "supabase_saved": "error" not in (saved or {}),
+            "local_snapshot_saved": False,
+            "discord_sent": discord_sent,
+        },
+        "discord_message": discord_message,
+        "saved": saved,
+    }
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def save_local_daily_review_snapshot(review_date: date, metrics: dict, review: dict, saved: dict,
+                                     recommendations: list[dict], discord_message: str,
+                                     discord_sent: bool) -> dict:
+    payload = _snapshot_payload(
+        review_date, metrics, review, saved, recommendations, discord_message, discord_sent
+    )
+    dated_path = _SNAPSHOT_DIR / f"{review_date.isoformat()}.json"
+    latest_path = _SNAPSHOT_DIR / "latest.json"
+    try:
+        _write_json_atomic(dated_path, payload)
+        _write_json_atomic(latest_path, payload)
+        payload["data_source"]["local_snapshot_saved"] = True
+        _write_json_atomic(dated_path, payload)
+        _write_json_atomic(latest_path, payload)
+        return {
+            "ok": True,
+            "dated_path": str(dated_path),
+            "latest_path": str(latest_path),
+        }
+    except Exception as exc:
+        log_event("ERROR", "daily_review_snapshot_failed", {
+            "review_date": review_date.isoformat(),
+            "error": str(exc)[:160],
+        })
+        return {
+            "ok": False,
+            "error": str(exc)[:160],
+            "dated_path": str(dated_path),
+            "latest_path": str(latest_path),
+        }
+
+
 def _config_recommendations_from_metrics(metrics: dict) -> list[dict]:
     recs = []
     for item in metrics.get("shadow_universe", []):
@@ -448,6 +563,8 @@ def collect_daily_metrics(review_date: date = None) -> dict:
         "direction_error_candidates": _direction_error_candidates(blocked, signals),
         "gate_activity": _gate_activity_from_logs(review_date),
         "shadow_universe": _shadow_repeats_from_logs(review_date),
+        "broker_rejections": _broker_rejections_from_logs(review_date),
+        "broker_account_snapshot": _broker_account_snapshot(),
         "advisory": {
             "total": len(advisory),
             "live": sum(1 for a in advisory if a.get("mode") == "live"),
@@ -689,18 +806,22 @@ def run_daily_eod_review(review_date: date = None, send_discord: bool = True) ->
     if recommendations:
         review_id = saved.get("id") if isinstance(saved, dict) and "error" not in saved else None
         insert_config_change_recommendations(review_id, review_date.isoformat(), recommendations)
-    if send_discord:
-        _send_discord(discord_message)
+    discord_sent = _send_discord(discord_message) if send_discord else False
+    snapshot = save_local_daily_review_snapshot(
+        review_date, metrics, review, saved, recommendations, discord_message, discord_sent
+    )
     log_event("INFO", "daily_eod_review_complete", {
         "review_date": review_date.isoformat(),
         "trade_count": metrics.get("trade_summary", {}).get("total_trades", 0),
         "recommendations": len(recommendations),
         "saved": "error" not in (saved or {}),
+        "snapshot_saved": bool(snapshot.get("ok")),
     })
     return {
         "review_date": review_date.isoformat(),
         "metrics": metrics,
         "review": review,
         "saved": saved,
+        "snapshot": snapshot,
         "discord_message": discord_message,
     }

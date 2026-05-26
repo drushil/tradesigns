@@ -13,6 +13,7 @@ build/
 venv/
 env/
 *.log
+artifacts/daily_reviews/
 
 # OS
 .DS_Store

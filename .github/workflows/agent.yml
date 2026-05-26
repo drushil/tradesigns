@@ -227,6 +227,7 @@ jobs:
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
           DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
+          EVENT_SCHEDULE:       "${{ github.event.schedule }}"
         run: |
           python <<'PY'
           import os
@@ -252,6 +253,7 @@ jobs:
 
           # Manual override via workflow_dispatch input or repository_dispatch payload takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
+          event_schedule = os.getenv("EVENT_SCHEDULE", "").strip()
           action_ran = False
           send_cycle_summary = True
           if dispatch_mode == "portfolio_review":
@@ -283,6 +285,25 @@ jobs:
               print("Running advisory cycle (manual trigger)...")
               run_advisory_cycle()
               action_ran = True
+          elif event_schedule == "0 17 * * 0":
+              print("Running weekly portfolio review (scheduled trigger)...")
+              run_portfolio_review()
+              action_ran = True
+          elif event_schedule == "0 18 * * 0":
+              print("Running weekly digest (scheduled trigger)...")
+              run_weekly_digest()
+              action_ran = True
+          elif event_schedule == "5 21 * * 1-5":
+              print("Running nightly sweep (scheduled trigger)...")
+              run_nightly_sweep()
+              print("Running post-market analytics (scheduled trigger)...")
+              run_post_market_analytics()
+              action_ran = True
+          elif event_schedule == "25 21 * * 1-5":
+              print("Running daily EOD review (scheduled trigger)...")
+              run_daily_eod_review()
+              action_ran = True
+              send_cycle_summary = False
           else:
               now = datetime.now(timezone.utc)
               if now.weekday() == 6 and now.hour == 17:

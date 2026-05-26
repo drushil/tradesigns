@@ -1,4 +1,6 @@
+import json
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -98,6 +100,16 @@ def test_collect_daily_metrics_tracks_bad_avoids_and_shadow_repeats(monkeypatch)
         {"market": "EU", "mode": "shadow", "status": "shadow_logged", "created_at": "2026-05-19T08:00:00+00:00"}
     ])
     monkeypatch.setattr(daily_review, "get_open_trade_records", lambda: [{"ticker": "TLT", "side": "BUY"}])
+    monkeypatch.setattr(daily_review, "get_account", lambda: {
+        "equity": 5400.0,
+        "cash": 1100.0,
+        "buying_power": 2200.0,
+        "daytrade_count": 3,
+        "pattern_day_trader": False,
+        "trading_blocked": False,
+        "account_blocked": False,
+        "status": "ACTIVE",
+    })
     monkeypatch.setattr(daily_review, "get_logs", lambda level="INFO", limit=500: [
         {
             "event": "dynamic_universe_shadow_recommendations",
@@ -129,6 +141,15 @@ def test_collect_daily_metrics_tracks_bad_avoids_and_shadow_repeats(monkeypatch)
             "logged_at": "2026-05-19T14:27:00+00:00",
             "detail": {"spy_trend_score": 0.2, "spy_trend_threshold": 0.8, "intraday_regimes": {"ranging": 2}},
         },
+        {
+            "event": "order_failed",
+            "logged_at": "2026-05-19T14:28:00+00:00",
+            "detail": {
+                "ticker": "IBIT",
+                "error": "40310100 PDT protection",
+                "client_order_id": "ts-ibit-1",
+            },
+        },
     ])
     monkeypatch.setenv("TICKER_UNIVERSE", "SPY,QQQ")
 
@@ -147,6 +168,9 @@ def test_collect_daily_metrics_tracks_bad_avoids_and_shadow_repeats(monkeypatch)
     assert metrics["shadow_universe"][0]["review_candidate"] is True
     assert metrics["gate_activity"]["event_counts"]["signal_consensus_veto"] == 1
     assert metrics["gate_activity"]["ranging_block_reasons"]["ranging_regime_grade_veto"] == 1
+    assert metrics["broker_rejections"]["count"] == 1
+    assert metrics["broker_rejections"]["grouped_by_ticker"]["IBIT"] == 1
+    assert metrics["broker_account_snapshot"]["daytrade_count"] == 3
     assert metrics["deterministic_recommendations"][0]["variable"] == "TICKER_UNIVERSE"
     assert metrics["deterministic_recommendations"][0]["category"] == "universe_watch"
     assert metrics["deterministic_recommendations"][0]["command_text"] is None
@@ -194,3 +218,34 @@ def test_format_discord_review_is_compact_and_explicitly_read_only():
     assert "Near-miss watch: 2/2 checked, 1 runners" in text
     assert "Direction diagnostics: SMH SELL (-2.40%)" in text
     assert "No config changes were auto-applied" in text
+
+
+def test_save_local_daily_review_snapshot_writes_latest_and_dated(tmp_path, monkeypatch):
+    monkeypatch.setattr(daily_review, "_SNAPSHOT_DIR", tmp_path / "daily_reviews")
+    review_day = date(2026, 5, 19)
+
+    result = daily_review.save_local_daily_review_snapshot(
+        review_day,
+        {
+            "trade_summary": {"total_trades": 0},
+            "broker_account_snapshot": {"daytrade_count": 2},
+            "broker_rejections": {"count": 1},
+        },
+        {"summary": "Quiet session", "confidence": 0.7, "worked_well": [], "did_not_work": []},
+        {"id": 1},
+        [{"category": "instrumentation", "reason": "Track rejects"}],
+        "discord text",
+        True,
+    )
+
+    assert result["ok"] is True
+    latest = tmp_path / "daily_reviews" / "latest.json"
+    dated = tmp_path / "daily_reviews" / "2026-05-19.json"
+    assert latest.exists()
+    assert dated.exists()
+
+    payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert payload["review_date"] == "2026-05-19"
+    assert payload["data_source"]["local_snapshot_saved"] is True
+    assert payload["broker_account_snapshot"]["daytrade_count"] == 2
+    assert payload["broker_rejections"]["count"] == 1
