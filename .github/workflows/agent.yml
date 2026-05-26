@@ -49,10 +49,14 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ''
-          persist-credentials: false
+      - name: Checkout code
+        run: |
+          curl -sL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            -o repo.tar.gz
+          tar -xzf repo.tar.gz --strip-components=1
+          rm repo.tar.gz
 
       - uses: actions/setup-python@v5
         with:
