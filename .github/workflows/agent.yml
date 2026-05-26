@@ -29,6 +29,10 @@ on:
         description: 'Override agent mode (leave blank for auto-detect by time)'
         required: false
         default: ''
+  # Fallback external trigger for cron-job.org when the workflow_dispatch API path
+  # is degraded. Use POST /repos/{owner}/{repo}/dispatches with event_type below.
+  repository_dispatch:
+    types: [agent-signal-cycle]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -204,7 +208,7 @@ jobs:
           ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
-          DISPATCH_MODE:        "${{ github.event.inputs.mode }}"
+          DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
         run: |
           python <<'PY'
           import os
@@ -228,7 +232,7 @@ jobs:
                   return default
               return raw in {"1", "true", "yes", "on"}
 
-          # Manual override via workflow_dispatch input takes priority
+          # Manual override via workflow_dispatch input or repository_dispatch payload takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
           action_ran = False
           send_cycle_summary = True
