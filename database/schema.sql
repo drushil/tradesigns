@@ -758,3 +758,21 @@ alter table if exists trades
         'thesis_invalidated','partial_runner_stop','a_plus_override',
         'stale_no_position','leveraged_etf_time_exit'
     ));
+
+-- ============================================================
+-- MIGRATION v4 - Advisory EU-listed US mirror metadata
+-- Run in Supabase SQL Editor after advisory_signals exists.
+-- ============================================================
+
+alter table if exists advisory_signals
+    add column if not exists listing_type   text,
+    add column if not exists primary_symbol text,
+    add column if not exists origin_market  text;
+
+do $$ begin
+  if to_regclass('public.advisory_signals') is not null then
+    execute 'create index if not exists idx_advisory_signals_listing_type
+      on advisory_signals (listing_type, created_at desc)
+      where listing_type is not null';
+  end if;
+end $$;

@@ -44,6 +44,26 @@ ADVISORY_UNIVERSE = {
         {"data_symbol": "ALV.DE", "broker_display_name": "Allianz", "exchange": "Xetra", "currency": "EUR"},
         {"data_symbol": "DTE.DE", "broker_display_name": "Deutsche Telekom", "exchange": "Xetra", "currency": "EUR"},
         {"data_symbol": "IFX.DE", "broker_display_name": "Infineon", "exchange": "Xetra", "currency": "EUR"},
+        {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "AMD.DE", "broker_display_name": "AMD (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMD", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "APC.DE", "broker_display_name": "Apple (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AAPL", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "MSF.DE", "broker_display_name": "Microsoft (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MSFT", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "AMZ.DE", "broker_display_name": "Amazon (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMZN", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "TL0.DE", "broker_display_name": "Tesla (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "TSLA", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "FB2A.DE", "broker_display_name": "Meta (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "META", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "ABEA.DE", "broker_display_name": "Alphabet A (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "GOOGL", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "PTX.DE", "broker_display_name": "Palantir (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "PLTR", "mirror_only_windows": ["eu_open"]},
+        {"data_symbol": "NFC.DE", "broker_display_name": "Netflix (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NFLX", "mirror_only_windows": ["eu_open"]},
     ],
 }
 
@@ -56,6 +76,18 @@ EU_WEIGHTS = {
     "macd_crossover": 0.18,
     "relative_strength": 0.14,
     "bollinger_squeeze": 0.07,
+    "put_call_ratio": 0.00,
+}
+
+EU_MIRROR_WEIGHTS = {
+    "order_book_imbalance": 0.00,
+    "tape_aggression": 0.10,
+    "rsi_divergence": 0.08,
+    "news_sentiment": 0.18,
+    "vwap_deviation": 0.14,
+    "macd_crossover": 0.25,
+    "relative_strength": 0.20,
+    "bollinger_squeeze": 0.05,
     "put_call_ratio": 0.00,
 }
 
@@ -299,7 +331,7 @@ def _meets_min_grade(grade: str, min_grade: str) -> bool:
     return _grade_rank(grade) >= _grade_rank(min_grade)
 
 
-def _data_quality(symbol: str, market: str) -> dict:
+def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
     try:
         import yfinance as yf
         bars = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
@@ -316,13 +348,25 @@ def _data_quality(symbol: str, market: str) -> dict:
             age_min = 0
         recent = bars.tail(20)
         avg_volume = float(recent["Volume"].mean()) if "Volume" in recent else 0.0
-        min_rows = 45 if market == "EU" else 30
+        if listing_type == "eu_us_mirror":
+            min_rows = 20
+        elif market == "EU":
+            min_rows = 45
+        else:
+            min_rows = 30
         if rows < min_rows:
             return {"ok": False, "reason": "too_few_bars", "rows": rows}
         if age_min > 20:
             return {"ok": False, "reason": "stale_bars", "age_minutes": round(age_min, 1), "rows": rows}
         if avg_volume <= 0:
             return {"ok": False, "reason": "zero_recent_volume", "rows": rows}
+        if listing_type == "eu_us_mirror" and avg_volume < 300:
+            return {
+                "ok": False,
+                "reason": "eu_mirror_thin_volume",
+                "avg_recent_volume": round(avg_volume, 2),
+                "rows": rows,
+            }
         close = float(bars["Close"].squeeze().iloc[-1])
         return {
             "ok": True,
@@ -445,10 +489,16 @@ def _format_trade_card(signal: dict) -> str:
         "This is shadow mode: log/watch only until EU advisory is promoted live.\n"
         if is_shadow else ""
     )
+    mirror_note = (
+        f"Pre-Nasdaq mirror of {signal.get('primary_symbol')} - "
+        f"EU-hours early read on US momentum. Execute on US listing after open.\n"
+        if signal.get("listing_type") == "eu_us_mirror" else ""
+    )
     return (
         f"{first_line}\n"
         f"**{headline}**\n"
         f"{shadow_note}"
+        f"{mirror_note}"
         f"{quick_label}: LIMIT {signal['side']} {sym} "
         f"{cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}; "
         f"do not chase > {cur}{signal['do_not_chase_price']:.2f}; valid until {valid}.\n"
@@ -478,7 +528,9 @@ def _market_context(market: str) -> dict:
     return context
 
 
-def _weights_for_market(market: str) -> dict:
+def _weights_for_market(market: str, listing_type: str = None) -> dict:
+    if listing_type == "eu_us_mirror":
+        return EU_MIRROR_WEIGHTS
     if market == "EU":
         return EU_WEIGHTS
     return get_profile(_env_value("RISK_PROFILE", "moderate")).get("signal_weights", {})
@@ -518,19 +570,37 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     window = _window_name(market, now_cet)
     if not window:
         return None
-    quality = _data_quality(symbol, market)
+    mirror_only_windows = item.get("mirror_only_windows")
+    if mirror_only_windows and window not in mirror_only_windows:
+        return None
+    listing_type = item.get("listing_type")
+    primary_symbol = item.get("primary_symbol")
+    quality = _data_quality(symbol, market, listing_type=listing_type)
     if not quality.get("ok"):
         return {
             "market": market, "mode": mode, "status": "blocked_data_quality",
             "data_symbol": symbol, "broker_display_name": item.get("broker_display_name"),
             "exchange": item.get("exchange"), "currency": item.get("currency"),
+            "listing_type": listing_type, "primary_symbol": primary_symbol,
+            "origin_market": item.get("origin_market"),
             "side": "BUY", "data_quality_json": quality,
             "rationale": f"Data quality blocked: {quality.get('reason')}",
         }
 
     regime_state = detect_regime(symbol)
-    weights = _weights_for_market(market)
+    weights = _weights_for_market(market, listing_type=listing_type)
     signal_result = compute_all_signals(symbol, weights, regime_state=regime_state)
+    if listing_type == "eu_us_mirror" and primary_symbol:
+        try:
+            primary_news_score, _meta = news_sentiment_score(primary_symbol)
+            if signal_result.get("signals", {}).get("news_sentiment") is not None:
+                signal_result["signals"]["news_sentiment"]["score"] = float(primary_news_score or 0)
+                signal_result["composite_score"] = sum(
+                    _signal_score(signal_result.get("signals") or {}, name) * weight
+                    for name, weight in weights.items()
+                )
+        except Exception:
+            pass
     composite = float(signal_result.get("composite_score") or 0)
     if composite <= 0 or (composite < cfg.min_composite and market in cfg.live_markets):
         return None
@@ -589,6 +659,9 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "broker_display_name": item.get("broker_display_name"),
         "exchange": item.get("exchange"),
         "currency": item.get("currency", "EUR"),
+        "listing_type": listing_type,
+        "primary_symbol": primary_symbol,
+        "origin_market": item.get("origin_market"),
         "side": side,
         "grade": grade,
         "composite_score": round(composite, 4),
@@ -606,6 +679,13 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "fx_rate": cfg.fx_rate,
         **plan,
     }
+    if listing_type == "eu_us_mirror":
+        record["signal_json"] = {
+            **record.get("signal_json", {}),
+            "listing_type": listing_type,
+            "primary_symbol": primary_symbol,
+            "origin_market": item.get("origin_market", "US"),
+        }
     record["message_text"] = _format_trade_card(record)
     return record
 
@@ -644,7 +724,7 @@ def run_advisory_cycle() -> dict:
     try:
         from backend.signals.engine import prefetch_newsapi_batch
         all_advisory_tickers = [
-            item["data_symbol"]
+            item.get("primary_symbol") or item["data_symbol"]
             for market in cfg.markets
             for item in ADVISORY_UNIVERSE.get(market, [])
         ]
