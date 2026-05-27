@@ -73,6 +73,12 @@ def _count_trades_today() -> int:
             1 for l in trade_logs
             if l.get("event") == "order_submitted"
             and (l.get("logged_at") or "")[:10] == str(today)
+            # Only count signal-driven intraday entries (entry.py path always sets
+            # mean_reversion_trade). Swing/dip entries and stale-cleanup orders come
+            # from orders.py which never sets this field, so they appear as None here
+            # and must be excluded — otherwise pre-market swing orders inflate the
+            # count and prematurely exhaust the ranging_regime daily cap.
+            and (l.get("detail") or {}).get("mean_reversion_trade") is not None
         )
         return max(closed_count, submitted_count)
     except Exception:
