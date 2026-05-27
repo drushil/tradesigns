@@ -570,6 +570,49 @@ def get_recent_advisory_signals(days: int = 1, mode: str = None,
         return []
 
 
+# ── FX rate cache ─────────────────────────────────────────────────────────────
+
+def get_fx_rate_cache(pair: str = "EURUSD", rate_date: str = None,
+                      max_age_days: int = 7) -> Optional[dict]:
+    """Return a cached FX rate, preferring the requested date when supplied."""
+    try:
+        db = get_client()
+        q = (db.table("fx_rate_cache")
+             .select("*")
+             .eq("pair", pair.upper())
+             .order("rate_date", desc=True)
+             .limit(1))
+        if rate_date:
+            q = q.eq("rate_date", rate_date)
+        else:
+            cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).date().isoformat()
+            q = q.gte("rate_date", cutoff)
+        result = q.execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        print(f"[FX_RATE_CACHE_READ_FAILED] {str(e)[:200]}")
+        return None
+
+
+def upsert_fx_rate_cache(pair: str, rate: float, source: str,
+                         rate_date: str = None, meta: dict = None) -> dict:
+    """Persist one FX rate per pair/date."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "pair": pair.upper(),
+            "rate_date": rate_date or datetime.utcnow().date().isoformat(),
+            "rate": round(float(rate), 6),
+            "source": source,
+            "meta_json": meta or {},
+        }
+        result = db.table("fx_rate_cache").upsert(record, on_conflict="pair,rate_date").execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[FX_RATE_CACHE_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 # ── Daily EOD reviews ────────────────────────────────────────────────────────
 
 def save_daily_review(review: dict) -> dict:

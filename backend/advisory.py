@@ -14,12 +14,19 @@ from typing import Optional
 
 from config.risk_profiles import get_profile
 from backend.signals.engine import compute_all_signals, detect_regime, news_sentiment_score
+try:
+    from backend.signals.engine import _get_bars
+except ImportError:  # tests may stub backend.signals.engine without private helpers
+    _get_bars = None
+from backend.execution.gates import _late_chase_block
 from backend.learning.engine import compute_expected_value
 from database.client import (
     get_recent_trades,
     get_recent_advisory_signals,
+    get_fx_rate_cache,
     insert_advisory_signal,
     log_event,
+    upsert_fx_rate_cache,
 )
 
 
@@ -93,6 +100,9 @@ EU_MIRROR_WEIGHTS = {
 
 LIVE_SIGNAL_STATUSES = {"sent", "entered", "hit_stop", "hit_target"}
 OPEN_LIVE_STATUSES = {"sent", "entered"}
+WATCH_SIGNAL_STATUSES = {"skipped"}
+WATCH_ALERT_STAGES = {"watch", "ignition"}
+ALERT_STAGE_RANK = {"ignition": 0, "watch": 1, "trade": 2}
 
 
 @dataclass
@@ -112,6 +122,8 @@ class AdvisoryConfig:
     default_size_eur: float
     a_plus_max_size_eur: float
     min_composite: float
+    min_watch_composite: float
+    min_watch_breakout_quality: float
     min_ev_pct: float
     min_breakout_quality: float
     min_discord_grade: str
@@ -120,6 +132,8 @@ class AdvisoryConfig:
     allow_short: bool
     discord_webhook_url: str
     fx_rate: float
+    fx_rate_source: str = "unknown"
+    fx_rate_fetched_at: str = ""
 
 
 def _env_value(key: str, default: str) -> str:
@@ -148,11 +162,96 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _today_utc_date() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _fetch_latest_eurusd_rate() -> Optional[float]:
+    """Fetch EUR/USD once through the existing bars data path."""
+    try:
+        if _get_bars is not None:
+            bars = _get_bars("EURUSD=X", period="5d", interval="1d")
+        else:
+            import yfinance as yf
+            bars = yf.download("EURUSD=X", period="5d", interval="1d", progress=False, auto_adjust=True)
+        if bars is None or bars.empty:
+            return None
+        close = bars["Close"].squeeze()
+        if hasattr(close, "dropna"):
+            rate = float(close.dropna().iloc[-1])
+        else:
+            rate = float(close)
+        if 0.8 <= rate <= 1.4:
+            return rate
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_daily_fx_rate(pair: str = "EURUSD") -> dict:
+    """Resolve one daily EUR/USD rate inside the advisory cycle, with DB cache."""
+    today = _today_utc_date()
+    cached_today = get_fx_rate_cache(pair, rate_date=today)
+    if cached_today and cached_today.get("rate"):
+        return {
+            "rate": float(cached_today["rate"]),
+            "source": cached_today.get("source") or "daily_cache",
+            "fetched_at": cached_today.get("fetched_at") or "",
+        }
+
+    fetched = _fetch_latest_eurusd_rate()
+    if fetched:
+        saved = upsert_fx_rate_cache(
+            pair,
+            fetched,
+            source="yfinance_daily",
+            rate_date=today,
+            meta={"symbol": "EURUSD=X"},
+        )
+        return {
+            "rate": float(fetched),
+            "source": "yfinance_daily" if "error" not in saved else "yfinance_daily_uncached",
+            "fetched_at": saved.get("fetched_at") or datetime.now(timezone.utc).isoformat(),
+        }
+
+    cached_recent = get_fx_rate_cache(pair, max_age_days=_env_int("ADVISORY_FX_MAX_STALE_DAYS", 7))
+    if cached_recent and cached_recent.get("rate"):
+        return {
+            "rate": float(cached_recent["rate"]),
+            "source": f"stale_cache:{cached_recent.get('rate_date')}",
+            "fetched_at": cached_recent.get("fetched_at") or "",
+        }
+
+    # Final fallback: explicitly-set EURUSD_RATE env var. Guards against the
+    # first-run-with-yfinance-offline case where DB cache is empty. Only honoured
+    # when the value is plausible (0.8–1.4); otherwise we surface "unavailable"
+    # so the issue is visible in stored cards rather than silently mispriced.
+    env_raw = os.getenv("EURUSD_RATE", "").strip()
+    if env_raw:
+        try:
+            env_rate = float(env_raw)
+            if 0.8 <= env_rate <= 1.4:
+                return {
+                    "rate": env_rate,
+                    "source": "env_fallback",
+                    "fetched_at": "",
+                }
+        except ValueError:
+            pass
+
+    return {
+        "rate": 0.0,
+        "source": "unavailable",
+        "fetched_at": "",
+    }
+
+
 def load_config() -> AdvisoryConfig:
     markets = _csv_set("ADVISORY_MARKETS", "US,EU")
     live = _csv_set("ADVISORY_LIVE_MARKETS", "US")
     shadow = _csv_set("ADVISORY_SHADOW_MARKETS", "EU")
     shadow_discord = _csv_set("ADVISORY_SHADOW_DISCORD_MARKETS", "OFF")
+    fx = _resolve_daily_fx_rate()
     return AdvisoryConfig(
         markets=markets,
         live_markets=live,
@@ -169,6 +268,8 @@ def load_config() -> AdvisoryConfig:
         default_size_eur=_env_float("ADVISORY_DEFAULT_SIZE_EUR", 750.0),
         a_plus_max_size_eur=_env_float("ADVISORY_A_PLUS_MAX_SIZE_EUR", 1500.0),
         min_composite=_env_float("ADVISORY_MIN_COMPOSITE", 0.45),
+        min_watch_composite=_env_float("ADVISORY_MIN_WATCH_COMPOSITE", 0.25),
+        min_watch_breakout_quality=_env_float("ADVISORY_MIN_WATCH_BREAKOUT_QUALITY", 0.30),
         min_ev_pct=_env_float("ADVISORY_MIN_EV_PCT", 0.50),
         min_breakout_quality=_env_float("ADVISORY_MIN_BREAKOUT_QUALITY", 0.45),
         min_discord_grade=_env_value("ADVISORY_DISCORD_MIN_GRADE", "A").upper(),
@@ -179,7 +280,9 @@ def load_config() -> AdvisoryConfig:
         us_min_minutes_after_open=_env_int("ADVISORY_US_MIN_MINUTES_AFTER_OPEN", 15),
         allow_short=_env_bool("ADVISORY_ALLOW_SHORT", False),
         discord_webhook_url=_env_value("DISCORD_WEBHOOK_URL", ""),
-        fx_rate=_env_float("EURUSD_RATE", 1.08),
+        fx_rate=fx["rate"],
+        fx_rate_source=fx["source"],
+        fx_rate_fetched_at=fx.get("fetched_at", ""),
     )
 
 
@@ -205,6 +308,8 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
             return "eu_catalyst_only"
         return None
     if market == "US":
+        if 15 * 60 <= minutes < 15 * 60 + 30:
+            return "us_premarket"
         if 15 * 60 + 30 <= minutes <= 17 * 60:
             return "us_open"
         if 20 * 60 <= minutes <= 21 * 60:
@@ -216,7 +321,7 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
 def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
     starts = {
         "EU": {"eu_open": (9, 15), "eu_catalyst_only": (14, 0)},
-        "US": {"us_open": (15, 30), "us_afternoon": (20, 0)},
+        "US": {"us_premarket": (15, 0), "us_open": (15, 30), "us_afternoon": (20, 0)},
     }
     hour, minute = starts.get(market, {}).get(window, (now_cet.hour, now_cet.minute))
     return now_cet.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -256,6 +361,84 @@ def _is_open_live_signal(signal: dict, now_utc: datetime) -> bool:
     return False
 
 
+def _recent_watch_signal_in_session(recent_live: list, symbol: str, market: str,
+                                    now_cet: datetime, minutes: int = 45) -> Optional[dict]:
+    # get_recent_advisory_signals returns newest first; escalation compares
+    # against the most recent watch state in this window.
+    window = _window_name(market, now_cet)
+    if not window:
+        return None
+    cutoff_utc = now_cet.astimezone(timezone.utc) - timedelta(minutes=minutes)
+    symbol = symbol.upper()
+    for signal in recent_live:
+        if str(signal.get("market", "")).upper() != market:
+            continue
+        if str(signal.get("data_symbol", "")).upper() != symbol:
+            continue
+        if str(signal.get("status")) not in WATCH_SIGNAL_STATUSES:
+            continue
+        created_at = _parse_dt(signal.get("created_at"))
+        if created_at and created_at >= cutoff_utc:
+            return signal
+    return None
+
+
+def _watch_signal_counts_in_session(recent_live: list, now_cet: datetime) -> tuple[dict, int]:
+    counts = {}
+    total = 0
+    for signal in recent_live:
+        if str(signal.get("status")) not in WATCH_SIGNAL_STATUSES:
+            continue
+        if not _is_signal_in_current_session(signal, now_cet):
+            continue
+        market = str(signal.get("market", "")).upper()
+        symbol = str(signal.get("data_symbol", "")).upper()
+        if not market or not symbol:
+            continue
+        key = (market, symbol)
+        counts[key] = counts.get(key, 0) + 1
+        total += 1
+    return counts, total
+
+
+def _watch_had_late_chase(signal: Optional[dict]) -> bool:
+    if not signal:
+        return False
+    signal_json = signal.get("signal_json") or {}
+    return bool(signal.get("late_chase_json") or signal_json.get("late_chase"))
+
+
+def _watch_repeat_blocked(recent_watch: dict, candidate: dict) -> bool:
+    if not recent_watch or candidate.get("alert_stage") not in WATCH_ALERT_STAGES:
+        return False
+    signal_json = recent_watch.get("signal_json") or {}
+    old_stage = str(signal_json.get("alert_stage") or recent_watch.get("alert_stage") or "watch")
+    new_stage = str(candidate.get("alert_stage") or "")
+    if ALERT_STAGE_RANK.get(new_stage, -1) > ALERT_STAGE_RANK.get(old_stage, -1):
+        return False
+    old_grade = str(recent_watch.get("grade") or "").upper()
+    new_grade = str(candidate.get("grade") or "").upper()
+    if _grade_rank(new_grade) > _grade_rank(old_grade):
+        return False
+    try:
+        old_composite = float(recent_watch.get("composite_score") or signal_json.get("composite_score") or 0)
+        new_composite = float(candidate.get("composite_score") or 0)
+    except (TypeError, ValueError):
+        old_composite = new_composite = 0.0
+    min_delta = _env_float("ADVISORY_WATCH_REPEAT_MIN_COMPOSITE_DELTA", 0.10)
+    if new_composite - old_composite >= min_delta:
+        return False
+    try:
+        old_breakout = float(recent_watch.get("breakout_quality") or 0)
+        new_breakout = float(candidate.get("breakout_quality") or 0)
+    except (TypeError, ValueError):
+        old_breakout = new_breakout = 0.0
+    breakout_delta = _env_float("ADVISORY_WATCH_REPEAT_MIN_BREAKOUT_DELTA", 0.15)
+    if new_breakout - old_breakout >= breakout_delta:
+        return False
+    return True
+
+
 def _alerted_symbol_in_session(recent_live: list, symbol: str, market: str,
                                now_cet: datetime) -> bool:
     window = _window_name(market, now_cet)
@@ -290,6 +473,56 @@ def _is_signal_in_current_session(signal: dict, now_cet: datetime) -> bool:
 
 def _currency_symbol(currency: str) -> str:
     return "$" if currency == "USD" else "€"
+
+
+PRICE_LEVEL_KEYS = (
+    "entry_min",
+    "entry_max",
+    "do_not_chase_price",
+    "stop_price",
+    "target_1",
+    "target_2",
+)
+
+
+def _display_price(value: float, currency: str, fx_rate: float) -> float:
+    value = float(value or 0)
+    if currency == "USD":
+        return value / max(float(fx_rate or 0), 0.0001)
+    return value
+
+
+def _display_levels(signal: dict) -> dict:
+    currency = signal.get("currency", "EUR")
+    fx_rate = float(signal.get("fx_rate") or 1.0)
+    levels = {
+        f"{key}_eur": round(_display_price(signal.get(key), currency, fx_rate), 4)
+        for key in PRICE_LEVEL_KEYS
+        if signal.get(key) is not None
+    }
+    levels.update({
+        "display_currency": "EUR",
+        "native_currency": currency,
+        "fx_rate": fx_rate,
+        "fx_rate_source": signal.get("fx_rate_source") or "unknown",
+        "fx_rate_fetched_at": signal.get("fx_rate_fetched_at") or "",
+    })
+    return levels
+
+
+def _eur_price(signal: dict, key: str) -> float:
+    return _display_price(signal.get(key), signal.get("currency", "EUR"), signal.get("fx_rate") or 1.0)
+
+
+def _native_ref_line(signal: dict) -> str:
+    if signal.get("currency") != "USD":
+        return ""
+    source = signal.get("fx_rate_source") or "unknown"
+    return (
+        f"Native ref: ${signal['entry_min']:.2f}-${signal['entry_max']:.2f}; "
+        f"stop ${signal['stop_price']:.2f}; T1 ${signal['target_1']:.2f}; "
+        f"EUR/USD {float(signal['fx_rate']):.4f} ({source}).\n"
+    )
 
 
 def _signal_score(signals: dict, name: str) -> float:
@@ -333,8 +566,11 @@ def _meets_min_grade(grade: str, min_grade: str) -> bool:
 
 def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
     try:
-        import yfinance as yf
-        bars = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
+        if _get_bars is not None:
+            bars = _get_bars(symbol, period="1d", interval="1m")
+        else:
+            import yfinance as yf
+            bars = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
         if bars is None or bars.empty:
             return {"ok": False, "reason": "missing_1m_bars"}
         rows = len(bars)
@@ -354,7 +590,19 @@ def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
             min_rows = 45
         else:
             min_rows = 30
+        early_us_min_rows = _env_int("ADVISORY_US_EARLY_MIN_ROWS", 10)
         if rows < min_rows:
+            if market == "US" and rows >= early_us_min_rows and age_min <= 5:
+                close = float(bars["Close"].squeeze().iloc[-1])
+                return {
+                    "ok": True,
+                    "rows": rows,
+                    "age_minutes": round(age_min, 1),
+                    "avg_recent_volume": round(avg_volume, 2),
+                    "last_price": round(close, 4),
+                    "early_session_relaxed": True,
+                    "required_rows": min_rows,
+                }
             return {"ok": False, "reason": "too_few_bars", "rows": rows}
         if age_min > 20:
             return {"ok": False, "reason": "stale_bars", "age_minutes": round(age_min, 1), "rows": rows}
@@ -377,6 +625,92 @@ def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
         }
     except Exception as e:
         return {"ok": False, "reason": "data_quality_error", "error": str(e)[:120]}
+
+
+def _bar_column(bars, name: str):
+    column = bars[name]
+    return column.squeeze() if hasattr(column, "squeeze") else column
+
+
+def _ignition_check(symbol: str, side: str, composite: float, atr_data: dict) -> dict:
+    debug = _env_bool("ADVISORY_IGNITION_DEBUG", False)
+
+    def _diag(reason: str, **detail):
+        if not debug:
+            return
+        log_event("INFO", "advisory_ignition_debug", {
+            "symbol": symbol,
+            "side": side,
+            "composite": round(float(composite or 0), 4),
+            "reason": reason,
+            **detail,
+        })
+
+    min_composite = _env_float("ADVISORY_IGNITION_MIN_COMPOSITE", 0.05)
+    if abs(float(composite or 0)) < min_composite:
+        _diag("below_min_composite", min_composite=min_composite)
+        return {}
+    try:
+        if _get_bars is not None:
+            bars = _get_bars(symbol, period="1d", interval="1m")
+        else:
+            import yfinance as yf
+            bars = yf.download(symbol, period="1d", interval="1m", progress=False, auto_adjust=True)
+        bar_count = 0 if bars is None or getattr(bars, "empty", True) else len(bars)
+        if bars is None or bars.empty or len(bars) < 6:
+            _diag("insufficient_bars", bar_count=bar_count)
+            return {}
+        close = _bar_column(bars, "Close")
+        volume = _bar_column(bars, "Volume")
+        window_bars = min(5, len(bars) - 1)
+        previous_close = float(close.iloc[-1 - window_bars])
+        latest_close = float(close.iloc[-1])
+        if previous_close <= 0:
+            _diag("bad_previous_close", bar_count=bar_count)
+            return {}
+        move_pct = (latest_close - previous_close) / previous_close * 100
+        if side == "BUY" and move_pct <= 0:
+            _diag("wrong_direction_buy", bar_count=bar_count, move_pct=round(move_pct, 3))
+            return {}
+        if side == "SELL" and move_pct >= 0:
+            _diag("wrong_direction_sell", bar_count=bar_count, move_pct=round(move_pct, 3))
+            return {}
+        atr_pct = float((atr_data or {}).get("atr_pct") or 0)
+        if atr_pct <= 0:
+            _diag("no_atr", bar_count=bar_count, move_pct=round(move_pct, 3))
+            return {}
+        atr_multiple = abs(move_pct) / atr_pct
+        recent_volume = float(volume.iloc[-window_bars:].mean())
+        prior_volume = volume.iloc[:-window_bars].tail(20)
+        prior_avg_volume = float(prior_volume.mean()) if len(prior_volume) else 0.0
+        if prior_avg_volume <= 0:
+            _diag("no_prior_volume", bar_count=bar_count, atr_multiple=round(atr_multiple, 2))
+            return {}
+        volume_ratio = recent_volume / prior_avg_volume
+        min_volume_ratio = _env_float("ADVISORY_IGNITION_MIN_VOLUME_RATIO", 2.0)
+        min_atr_move = _env_float("ADVISORY_IGNITION_MIN_ATR_MOVE", 0.50)
+        if volume_ratio < min_volume_ratio or atr_multiple < min_atr_move:
+            _diag("below_thresholds", bar_count=bar_count,
+                  volume_ratio=round(volume_ratio, 2),
+                  atr_multiple=round(atr_multiple, 2),
+                  min_volume_ratio=min_volume_ratio,
+                  min_atr_move=min_atr_move)
+            return {}
+        result = {
+            "reason": "momentum_ignition",
+            "window_bars": window_bars,
+            "volume_ratio": round(volume_ratio, 2),
+            "atr_multiple": round(atr_multiple, 2),
+            "move_pct": round(move_pct, 3),
+            "min_volume_ratio": min_volume_ratio,
+            "min_atr_move": min_atr_move,
+        }
+        _diag("fired", bar_count=bar_count, **{k: result[k] for k in
+              ("volume_ratio", "atr_multiple", "move_pct")})
+        return result
+    except Exception as e:
+        _diag("exception", error=str(e)[:120])
+        return {}
 
 
 def _entry_plan(price: float, side: str, atr_pct: float, currency: str, cfg: AdvisoryConfig,
@@ -458,33 +792,53 @@ def _compact_signal_payload(signal_result: dict) -> dict:
 def _format_trade_card(signal: dict) -> str:
     sym = signal["data_symbol"]
     name = signal.get("broker_display_name") or sym
-    cur = _currency_symbol(signal["currency"])
     is_shadow = signal["mode"] != "live"
-    mode = "LIVE" if not is_shadow else "SHADOW OBSERVATION"
-    valid = signal["valid_until_cet"]
-    time_exit = signal["time_exit_cet"]
-    approx_usd = signal["suggested_size_eur"] * signal["fx_rate"] if signal["currency"] == "USD" else None
+    is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
+    is_ignition = signal.get("alert_stage") == "ignition"
+    is_late_chase = bool(signal.get("late_chase_json"))
     notional = f"€{signal['suggested_size_eur']:.0f}"
-    if approx_usd:
-        notional += f" (~${approx_usd:.0f})"
-    fx_text = f"  |  FX: {signal['fx_rate']:.4f}" if signal["currency"] == "USD" else ""
+    fx_text = (
+        f"  |  EUR/USD: {signal['fx_rate']:.4f} ({signal.get('fx_rate_source', 'unknown')})"
+        if signal["currency"] == "USD" else ""
+    )
+    entry_min_eur = _eur_price(signal, "entry_min")
+    entry_max_eur = _eur_price(signal, "entry_max")
+    chase_eur = _eur_price(signal, "do_not_chase_price")
+    stop_eur = _eur_price(signal, "stop_price")
+    target_1_eur = _eur_price(signal, "target_1")
+    target_2_eur = _eur_price(signal, "target_2")
+    native_ref = _native_ref_line(signal)
     opportunity = {
         "A+": "EXCELLENT",
         "A": "VERY GOOD",
         "B": "WATCHLIST-QUALITY",
         "C": "LOW-GRADE SHADOW",
     }.get(str(signal.get("grade", "")).upper(), "OBSERVATION")
+    if is_ignition:
+        opportunity = "MOMENTUM IGNITION"
+    elif is_watch:
+        opportunity = "LATE-CHASE WATCH" if is_late_chase else "EARLY WATCH"
     quick_why = signal["rationale"].split(", window ")[0]
     headline = (
         f"{opportunity} {signal['side']} OPPORTUNITY: {sym} / {name} "
         f"because {quick_why}."
     )
-    first_line = (
-        f"**LIVE TRADE ALERT - {signal['market']} {signal['side']} NOW**"
-        if not is_shadow
-        else f"**SHADOW OBSERVATION - {signal['market']} {signal['side']} SETUP - DO NOT TRADE YET**"
-    )
-    quick_label = "Quick action" if not is_shadow else "Observation plan"
+    if is_ignition:
+        first_line = f"**MOMENTUM IGNITION - {signal['market']} {signal['side']} SETUP FORMING - WATCH ONLY**"
+        quick_label = "Ignition watch"
+    elif is_watch:
+        first_line = (
+            f"**WATCH ONLY - {signal['market']} {signal['side']} SETUP "
+            f"{'IS EXTENDED' if is_late_chase else 'FORMING'} - DO NOT CHASE**"
+        )
+        quick_label = "Watch plan"
+    else:
+        first_line = (
+            f"**LIVE TRADE ALERT - {signal['market']} {signal['side']} NOW**"
+            if not is_shadow
+            else f"**SHADOW OBSERVATION - {signal['market']} {signal['side']} SETUP - DO NOT TRADE YET**"
+        )
+        quick_label = "Quick action" if not is_shadow else "Observation plan"
     shadow_note = (
         "This is shadow mode: log/watch only until EU advisory is promoted live.\n"
         if is_shadow else ""
@@ -494,20 +848,70 @@ def _format_trade_card(signal: dict) -> str:
         f"EU-hours early read on US momentum. Execute on US listing after open.\n"
         if signal.get("listing_type") == "eu_us_mirror" else ""
     )
+    watch_note = ""
+    if is_watch:
+        if is_ignition:
+            detail = signal.get("ignition_json") or {}
+            watch_note = (
+                "Momentum ignition detected before the full advisory composite has confirmed; "
+                f"{detail.get('move_pct')}% over {detail.get('window_bars')}m, "
+                f"{detail.get('atr_multiple')}x ATR move, {detail.get('volume_ratio')}x volume.\n"
+            )
+        elif is_late_chase:
+            detail = signal.get("late_chase_json") or {}
+            watch_note = (
+                "Execution gate says this move is extended. Wait for a pullback into the entry band; "
+                f"VWAP deviation {detail.get('pct_deviation')}% vs threshold {detail.get('threshold_pct')}%.\n"
+            )
+        else:
+            watch_note = "Early signal only: prepare the chart and wait for confirmed A/A+ follow-through.\n"
+    elif signal.get("pullback_confirmed"):
+        watch_note = "Pullback confirmed: the prior late-chase extension has cleared and the entry band is now valid.\n"
+    if is_watch:
+        if is_ignition:
+            action_line = (
+                f"{quick_label}: prepare {signal['side']} {sym}; watch follow-through near "
+                f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
+                f"valid until {signal['valid_until_cet']}.\n"
+            )
+        else:
+            action_line = (
+                f"{quick_label}: prepare {signal['side']} {sym} only on pullback into "
+                f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
+                f"valid until {signal['valid_until_cet']}.\n"
+            )
+        risk_line = f"Tentative levels: max size {notional}, estimated risk ~€{signal['risk_eur']:.0f}{fx_text}.\n"
+        exit_line = (
+            f"Pullback plan: stop €{stop_eur:.2f}; T1 €{target_1_eur:.2f}; "
+            f"T2 €{target_2_eur:.2f}; reassess by {signal['time_exit_cet']}.\n"
+        )
+    else:
+        action_line = (
+            f"{quick_label}: LIMIT {signal['side']} {sym} "
+            f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
+            f"do not chase > €{chase_eur:.2f}; "
+            f"valid until {signal['valid_until_cet']}.\n"
+        )
+        risk_line = f"Size/risk: {notional} max, ~€{signal['risk_eur']:.0f} risk{fx_text}.\n"
+        exit_line = (
+            f"Exit: stop €{stop_eur:.2f}; T1 €{target_1_eur:.2f}; "
+            f"T2 €{target_2_eur:.2f}; time exit {signal['time_exit_cet']}.\n"
+        )
+    ev_net = signal.get("ev_net_pct")
+    ev_text = "n/a" if ev_net is None else f"{float(ev_net):.2f}"
     return (
         f"{first_line}\n"
         f"**{headline}**\n"
         f"{shadow_note}"
         f"{mirror_note}"
-        f"{quick_label}: LIMIT {signal['side']} {sym} "
-        f"{cur}{signal['entry_min']:.2f}-{cur}{signal['entry_max']:.2f}; "
-        f"do not chase > {cur}{signal['do_not_chase_price']:.2f}; valid until {valid}.\n"
-        f"Size/risk: {notional} max, ~€{signal['risk_eur']:.0f} risk{fx_text}.\n"
-        f"Exit: stop {cur}{signal['stop_price']:.2f}; T1 {cur}{signal['target_1']:.2f}; "
-        f"T2 {cur}{signal['target_2']:.2f}; time exit {time_exit}.\n"
+        f"{watch_note}"
+        f"{action_line}"
+        f"{native_ref}"
+        f"{risk_line}"
+        f"{exit_line}"
         f"Why: {signal['rationale']}.\n"
         f"Grade: **{signal['grade']}**  |  Composite: {signal['composite_score']:.2f}  "
-        f"|  EV: {signal['ev_net_pct'] if signal['ev_net_pct'] is not None else 'n/a'}%"
+        f"|  EV: {ev_text}%"
     )
 
 
@@ -537,6 +941,8 @@ def _weights_for_market(market: str, listing_type: str = None) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
+    if candidate.get("alert_stage") in WATCH_ALERT_STAGES:
+        return candidate.get("mode") == "live"
     if candidate.get("mode") == "live":
         if not _meets_min_grade(candidate.get("grade"), cfg.min_discord_grade):
             return False
@@ -586,6 +992,18 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
             "side": "BUY", "data_quality_json": quality,
             "rationale": f"Data quality blocked: {quality.get('reason')}",
         }
+    if item.get("currency") == "USD" and float(cfg.fx_rate or 0) <= 0:
+        return {
+            "market": market, "mode": mode, "status": "blocked_filter",
+            "data_symbol": symbol, "broker_display_name": item.get("broker_display_name"),
+            "exchange": item.get("exchange"), "currency": item.get("currency"),
+            "listing_type": listing_type, "primary_symbol": primary_symbol,
+            "origin_market": item.get("origin_market"),
+            "side": "BUY",
+            "rationale": "FX rate unavailable for EUR advisory display",
+            "data_quality_json": quality,
+            "signal_json": {"fx_rate_source": cfg.fx_rate_source},
+        }
 
     regime_state = detect_regime(symbol)
     weights = _weights_for_market(market, listing_type=listing_type)
@@ -602,7 +1020,8 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         except Exception:
             pass
     composite = float(signal_result.get("composite_score") or 0)
-    if composite <= 0 or (composite < cfg.min_composite and market in cfg.live_markets):
+    is_live_market = market in cfg.live_markets
+    if composite <= 0:
         return None
     side = "BUY" if composite > 0 else "SELL"
     if side == "SELL" and not cfg.allow_short:
@@ -612,12 +1031,44 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
     orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
     grade = _grade(composite, breakout, orb_active)
-    if market in cfg.live_markets and grade not in {"A+", "A"}:
-        return None
-    if market in cfg.live_markets and breakout < cfg.min_breakout_quality:
+    atr_data = signal_result.get("atr_data") or {}
+    late_chase = _late_chase_block(
+        side,
+        signals,
+        atr_data,
+        {
+            "late_chase_block_enabled": True,
+            "late_chase_atr_mult": _env_float("ADVISORY_LATE_CHASE_ATR_MULT", 1.5),
+        },
+    )
+    ignition = _ignition_check(symbol, side, composite, atr_data) if is_live_market else {}
+
+    trade_ready = (
+        not is_live_market
+        or (
+            composite >= cfg.min_composite
+            and grade in {"A+", "A"}
+            and breakout >= cfg.min_breakout_quality
+        )
+    )
+    watch_ready = (
+        is_live_market
+        and (grade != "C" or bool(late_chase))
+        and composite >= cfg.min_watch_composite
+        and (breakout >= cfg.min_watch_breakout_quality or orb_active)
+    )
+    ignition_ready = bool(ignition) and not trade_ready
+    if is_live_market and not (trade_ready or watch_ready or ignition_ready):
         return None
 
-    atr_data = signal_result.get("atr_data") or {}
+    if trade_ready and not late_chase:
+        alert_stage = "trade"
+    elif ignition_ready and not watch_ready:
+        alert_stage = "ignition"
+    else:
+        alert_stage = "watch"
+    if window == "us_premarket":
+        alert_stage = "ignition" if ignition_ready and not watch_ready else "watch"
     plan = _entry_plan(
         quality["last_price"], side, atr_data.get("atr_pct"),
         item.get("currency", "EUR"), cfg, grade,
@@ -634,14 +1085,17 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         profile={"ev_breakout_probe_min_quality": 0.65},
     )
     ev_net = ev.get("net_ev_pct")
-    if market in cfg.live_markets and ev_net is not None and float(ev_net) < cfg.min_ev_pct:
-        return None
+    if is_live_market and ev_net is not None and float(ev_net) < cfg.min_ev_pct:
+        if not (watch_ready or ignition_ready):
+            return None
+        alert_stage = "ignition" if ignition_ready and not watch_ready else "watch"
     if market == "EU" and window == "eu_catalyst_only":
         catalyst_score = _eu_catalyst_score(item, signals)
         if catalyst_score < 0.35:
             return None
 
-    valid_until = now_cet.astimezone(timezone.utc) + timedelta(minutes=15 if market == "US" else 12)
+    validity_minutes = 45 if alert_stage in WATCH_ALERT_STAGES and market == "US" else (15 if market == "US" else 12)
+    valid_until = now_cet.astimezone(timezone.utc) + timedelta(minutes=validity_minutes)
     time_exit = now_cet.replace(hour=20, minute=55, second=0, microsecond=0) if market == "US" else now_cet.replace(hour=16, minute=45, second=0, microsecond=0)
     rationale_bits = [
         f"{grade} setup",
@@ -654,7 +1108,10 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     record = {
         "market": market,
         "mode": mode,
-        "status": "sent" if mode == "live" else "shadow_logged",
+        "status": "sent" if mode == "live" and alert_stage == "trade" else (
+            "skipped" if mode == "live" else "shadow_logged"
+        ),
+        "alert_stage": alert_stage,
         "data_symbol": symbol,
         "broker_display_name": item.get("broker_display_name"),
         "exchange": item.get("exchange"),
@@ -676,8 +1133,21 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "signal_json": _compact_signal_payload(signal_result),
         "market_context_json": _market_context(market),
         "data_quality_json": quality,
+        "late_chase_json": late_chase or {},
+        "ignition_json": ignition or {},
+        "pullback_confirmed": False,
         "fx_rate": cfg.fx_rate,
+        "fx_rate_source": cfg.fx_rate_source,
+        "fx_rate_fetched_at": cfg.fx_rate_fetched_at,
         **plan,
+    }
+    display_levels = _display_levels(record)
+    record["signal_json"] = {
+        **record.get("signal_json", {}),
+        "alert_stage": alert_stage,
+        "late_chase": late_chase or {},
+        "ignition": ignition or {},
+        "display": display_levels,
     }
     if listing_type == "eu_us_mirror":
         record["signal_json"] = {
@@ -712,6 +1182,9 @@ def run_advisory_cycle() -> dict:
         and active_window.get(str(s.get("market", "")).upper())
         and _is_signal_in_current_session(s, now_cet)
     ])
+    watch_counts_by_symbol, live_watch_this_window = _watch_signal_counts_in_session(recent_live, now_cet)
+    max_watch_per_symbol = _env_int("ADVISORY_MAX_WATCH_ALERTS_PER_SYMBOL_PER_SESSION", 4)
+    max_watch_per_session = _env_int("ADVISORY_MAX_WATCH_ALERTS_PER_SESSION", 12)
     shadow_discord_sent_today = len([
         s for s in recent_shadow
         if str(s.get("market", "")).upper() in cfg.shadow_discord_markets
@@ -765,9 +1238,23 @@ def run_advisory_cycle() -> dict:
                 recent_live, item["data_symbol"], market, now_cet
             ):
                 continue
+            recent_watch = None
+            if mode == "live":
+                recent_watch = _recent_watch_signal_in_session(
+                    recent_live, item["data_symbol"], market, now_cet
+                )
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
             if not candidate:
                 continue
+            if mode == "live" and _watch_repeat_blocked(recent_watch, candidate):
+                continue
+            if mode == "live" and candidate.get("alert_stage") == "trade" and _watch_had_late_chase(recent_watch):
+                candidate["pullback_confirmed"] = True
+                candidate["signal_json"] = {
+                    **candidate.get("signal_json", {}),
+                    "pullback_confirmed": True,
+                }
+                candidate["message_text"] = _format_trade_card(candidate)
             if candidate.get("status", "").startswith("blocked"):
                 insert_advisory_signal(candidate)
                 blocked.append(candidate)
@@ -776,6 +1263,7 @@ def run_advisory_cycle() -> dict:
 
         market_candidates.sort(
             key=lambda c: (
+                ALERT_STAGE_RANK.get(str(c.get("alert_stage") or ""), -1),
                 c.get("grade") == "A+",
                 float(c.get("ev_net_pct") or 0),
                 float(c.get("breakout_quality") or 0),
@@ -790,6 +1278,20 @@ def run_advisory_cycle() -> dict:
         else:
             limit = cfg.max_shadow_signals_per_day
         for candidate in market_candidates[:max(0, limit)]:
+            if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES:
+                key = (str(candidate.get("market", "")).upper(), str(candidate.get("data_symbol", "")).upper())
+                if watch_counts_by_symbol.get(key, 0) >= max_watch_per_symbol:
+                    log_event("INFO", "advisory_watch_blocked_symbol_cap", {
+                        "symbol": key[1],
+                        "market": key[0],
+                        "max_watch_per_symbol": max_watch_per_symbol,
+                    })
+                    continue
+                if live_watch_this_window >= max_watch_per_session:
+                    log_event("INFO", "advisory_watch_blocked_session_cap", {
+                        "max_watch_per_session": max_watch_per_session,
+                    })
+                    continue
             saved = insert_advisory_signal(candidate)
             can_send_shadow = (
                 mode != "shadow"
@@ -799,10 +1301,14 @@ def run_advisory_cycle() -> dict:
                 _send_discord(candidate["message_text"], cfg.discord_webhook_url)
                 if mode == "shadow":
                     shadow_discord_sent_today += 1
-            if mode == "live" and "error" not in saved:
+            if mode == "live" and candidate.get("status") in LIVE_SIGNAL_STATUSES and "error" not in saved:
                 live_sent_today += 1
                 live_sent_this_window += 1
                 open_live_count += 1
+            if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES and "error" not in saved:
+                key = (str(candidate.get("market", "")).upper(), str(candidate.get("data_symbol", "")).upper())
+                watch_counts_by_symbol[key] = watch_counts_by_symbol.get(key, 0) + 1
+                live_watch_this_window += 1
             emitted.append(candidate)
 
     log_event("INFO", "advisory_cycle_complete", {

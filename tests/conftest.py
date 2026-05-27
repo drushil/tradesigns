@@ -182,6 +182,8 @@ if "database.client" not in sys.modules:
     _db.get_blocked_opportunities = MagicMock(return_value=[])
     _db.get_recent_advisory_signals = MagicMock(return_value=[])
     _db.insert_advisory_signal = MagicMock(return_value={})
+    _db.get_fx_rate_cache = MagicMock(return_value=None)
+    _db.upsert_fx_rate_cache = MagicMock(return_value={})
     _db.get_trade_stats = MagicMock(return_value={})
     _db.insert_portfolio_snapshot = MagicMock(return_value={})
     _db.log_event = MagicMock(return_value={})

@@ -91,7 +91,9 @@ def test_trade_card_is_actionable_for_manual_execution():
     assert "do not chase" in card
     assert "Exit: stop" in card
     assert "valid until" in card
-    assert "FX: 1.0800" in card
+    assert "Quick action: LIMIT BUY NVDA €" in card
+    assert "Native ref: $99.88-$100.12" in card
+    assert "EUR/USD 1.0800" in card
 
 
 def test_shadow_trade_card_is_clearly_observation_only():
@@ -120,6 +122,8 @@ def test_shadow_trade_card_is_clearly_observation_only():
     assert "SHADOW OBSERVATION" in card
     assert "DO NOT TRADE YET" in card
     assert "Observation plan:" in card
+    assert "Observation plan: LIMIT BUY SAP.DE €" in card
+    assert "Native ref:" not in card
 
 
 def test_watch_trade_card_is_not_a_buy_now_alert():
@@ -152,6 +156,8 @@ def test_watch_trade_card_is_not_a_buy_now_alert():
     assert "LIVE TRADE ALERT" not in card
     assert "BUY NOW" not in card
     assert "Watch plan: prepare BUY AMZN only on pullback into" in card
+    assert "€92." in card
+    assert "Native ref: $99.88-$100.12" in card
     assert "do not chase >" not in card
     assert "Tentative levels:" in card
     assert "Pullback plan:" in card
@@ -192,6 +198,7 @@ def test_late_chase_watch_card_explains_pullback_needed():
     assert "do not chase >" not in card
     assert "Tentative levels:" in card
     assert "Pullback plan:" in card
+    assert "Native ref: $99.88-$100.12" in card
     assert "EV: 0.70%" in card
 
 
@@ -389,6 +396,17 @@ def _make_ignition_bars(direction="up"):
     return bars
 
 
+def _make_fx_bars(rate=1.0923):
+    idx = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=3, freq="D")
+    return pd.DataFrame({
+        "Close": [rate - 0.002, rate - 0.001, rate],
+        "High": [rate] * 3,
+        "Low": [rate - 0.004] * 3,
+        "Open": [rate - 0.003] * 3,
+        "Volume": [0, 0, 0],
+    }, index=idx)
+
+
 def test_eu_mirror_data_quality_uses_relaxed_rows_but_volume_floor(monkeypatch):
     monkeypatch.setattr(advisory, "_get_bars", lambda *a, **kw: _make_fake_bars(25, 500))
 
@@ -417,6 +435,106 @@ def test_us_data_quality_relaxes_early_session_rows(monkeypatch):
     assert result["ok"] is True
     assert result["early_session_relaxed"] is True
     assert result["required_rows"] == 30
+
+
+def test_daily_fx_rate_uses_same_day_cache_without_fetch(monkeypatch):
+    monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
+    monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: {
+        "pair": "EURUSD",
+        "rate_date": "2026-05-27",
+        "rate": 1.0912,
+        "source": "yfinance_daily",
+        "fetched_at": "2026-05-27T06:00:00+00:00",
+    })
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: pytest.fail("cache hit should not fetch FX bars"))
+
+    fx = advisory._resolve_daily_fx_rate()
+
+    assert fx["rate"] == pytest.approx(1.0912)
+    assert fx["source"] == "yfinance_daily"
+
+
+def test_daily_fx_rate_fetches_once_and_caches_on_miss(monkeypatch):
+    writes = []
+
+    monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
+    monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: _make_fx_bars(1.0945))
+    monkeypatch.setattr(advisory, "upsert_fx_rate_cache", lambda pair, rate, source, rate_date=None, meta=None: (
+        writes.append((pair, rate, source, rate_date, meta)) or {"fetched_at": "2026-05-27T07:00:00+00:00"}
+    ))
+
+    fx = advisory._resolve_daily_fx_rate()
+
+    assert fx["rate"] == pytest.approx(1.0945)
+    assert fx["source"] == "yfinance_daily"
+    assert writes == [("EURUSD", pytest.approx(1.0945), "yfinance_daily", "2026-05-27", {"symbol": "EURUSD=X"})]
+
+
+def test_daily_fx_rate_uses_env_fallback_when_cache_and_fetch_fail(monkeypatch):
+    monkeypatch.setenv("EURUSD_RATE", "1.22")
+    monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
+    monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: None)
+
+    fx = advisory._resolve_daily_fx_rate()
+
+    assert fx["rate"] == pytest.approx(1.22)
+    assert fx["source"] == "env_fallback"
+
+
+def test_daily_fx_rate_returns_unavailable_when_env_also_missing(monkeypatch):
+    monkeypatch.delenv("EURUSD_RATE", raising=False)
+    monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
+    monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: None)
+
+    fx = advisory._resolve_daily_fx_rate()
+
+    assert fx["rate"] == 0.0
+    assert fx["source"] == "unavailable"
+
+
+def test_daily_fx_rate_ignores_implausible_env_value(monkeypatch):
+    monkeypatch.setenv("EURUSD_RATE", "42.0")
+    monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
+    monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: None)
+
+    fx = advisory._resolve_daily_fx_rate()
+
+    assert fx["rate"] == 0.0
+    assert fx["source"] == "unavailable"
+
+
+def test_ignition_debug_logs_when_env_flag_set(monkeypatch):
+    monkeypatch.setenv("ADVISORY_IGNITION_DEBUG", "true")
+    logs = []
+    monkeypatch.setattr(advisory, "log_event",
+                        lambda level, event, detail: logs.append((level, event, detail)))
+
+    # Insufficient bars path: only 4 rows returned.
+    monkeypatch.setattr(advisory, "_get_bars", lambda *a, **kw: _make_fake_bars(4, 1000))
+    result = advisory._ignition_check("AMZN", "BUY", 0.10, {"atr_pct": 0.3})
+
+    assert result == {}
+    diag = [d for lvl, ev, d in logs if ev == "advisory_ignition_debug"]
+    assert diag, "expected debug log when ADVISORY_IGNITION_DEBUG is set"
+    assert diag[0]["reason"] == "insufficient_bars"
+    assert diag[0]["bar_count"] == 4
+    assert diag[0]["symbol"] == "AMZN"
+
+
+def test_ignition_debug_silent_when_env_flag_unset(monkeypatch):
+    monkeypatch.delenv("ADVISORY_IGNITION_DEBUG", raising=False)
+    logs = []
+    monkeypatch.setattr(advisory, "log_event",
+                        lambda level, event, detail: logs.append((level, event, detail)))
+
+    monkeypatch.setattr(advisory, "_get_bars", lambda *a, **kw: _make_fake_bars(4, 1000))
+    advisory._ignition_check("AMZN", "BUY", 0.10, {"atr_pct": 0.3})
+
+    assert not [d for lvl, ev, d in logs if ev == "advisory_ignition_debug"]
 
 
 def test_expired_sent_signal_does_not_count_as_open_live_signal():
@@ -943,6 +1061,8 @@ def test_live_scan_emits_early_watch_below_trade_threshold(monkeypatch):
     assert candidate["alert_stage"] == "watch"
     assert candidate["status"] == "skipped"
     assert candidate["composite_score"] == pytest.approx(0.36)
+    assert candidate["signal_json"]["display"]["entry_min_eur"] == pytest.approx(92.5185, rel=1e-4)
+    assert candidate["signal_json"]["display"]["native_currency"] == "USD"
     assert "Early signal only" in candidate["message_text"]
 
 
