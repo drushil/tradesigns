@@ -5,7 +5,7 @@ Called by GitHub Actions after the signal cycle step.
 """
 import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 SUMMARY_EVENT = "discord_hourly_summary_sent"
@@ -77,7 +77,8 @@ def build_summary() -> str:
         equity_eur = equity / fx_rate
         cash_eur   = cash / fx_rate
         cum_pnl   = (equity_eur - start_eur) / start_eur * 100 if start_eur else 0
-        now       = datetime.now(timezone.utc).strftime("%H:%M UTC")
+        now_dt    = datetime.now(timezone.utc)
+        now       = now_dt.strftime("%H:%M UTC")
 
         lines = [
             f"🤖 **Cycle Update — {now}**",
@@ -172,8 +173,15 @@ def build_summary() -> str:
 
         # Gated / skipped signals from this cycle
         try:
-            logs = get_logs(limit=50, level="INFO")
-            gated = [l for l in logs if l.get("event") == "trade_gated"]
+            cutoff = now_dt - timedelta(minutes=20)
+            logs = get_logs(limit=200, level="INFO")
+            gated = []
+            for row in logs:
+                if row.get("event") != "trade_gated":
+                    continue
+                logged_at = _parse_dt(row.get("logged_at"))
+                if logged_at and logged_at >= cutoff:
+                    gated.append(row)
             if gated:
                 lines.append(f"🚧 Recent gated signals: {len(gated)}")
                 for g in gated[:3]:
