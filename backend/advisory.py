@@ -789,6 +789,59 @@ def _compact_signal_payload(signal_result: dict) -> dict:
     }
 
 
+def _trend_1h_alignment(symbol: str, side: str, composite: float) -> dict:
+    """Log-only 1h trend context for later replay analysis; never gates alerts."""
+    try:
+        from backend.signals.engine import _get_bars
+    except Exception:
+        return {"status": "unavailable", "reason": "bar_fetch_unavailable"}
+
+    try:
+        bars = _get_bars(symbol, period="5d", interval="1h")
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc)[:80]}
+    if bars is None or getattr(bars, "empty", True):
+        return {"status": "unavailable", "reason": "no_bars"}
+
+    try:
+        close = bars["Close"].dropna()
+        if len(close) < 8:
+            return {"status": "insufficient_data", "bars": int(len(close))}
+        last = float(close.iloc[-1])
+        first_6h = float(close.iloc[-7])
+        first_3h = float(close.iloc[-4])
+        ema_fast = close.ewm(span=3, adjust=False).mean()
+        ema_slow = close.ewm(span=8, adjust=False).mean()
+        ema_spread_pct = (
+            (float(ema_fast.iloc[-1]) - float(ema_slow.iloc[-1])) / last * 100
+            if last else 0.0
+        )
+        ret_6h_pct = ((last - first_6h) / first_6h * 100) if first_6h else 0.0
+        ret_3h_pct = ((last - first_3h) / first_3h * 100) if first_3h else 0.0
+        trend_score = max(-1.0, min(1.0, (ret_6h_pct / 2.0) + (ema_spread_pct / 0.75)))
+        trend_direction = "bullish" if trend_score > 0.15 else ("bearish" if trend_score < -0.15 else "neutral")
+        side = str(side or "BUY").upper()
+        aligned = (
+            trend_direction == "bullish" if side == "BUY"
+            else trend_direction == "bearish" if side == "SELL"
+            else False
+        )
+        return {
+            "status": "ok",
+            "aligned": bool(aligned),
+            "direction": trend_direction,
+            "score": round(trend_score, 4),
+            "ret_3h_pct": round(ret_3h_pct, 4),
+            "ret_6h_pct": round(ret_6h_pct, 4),
+            "ema_spread_pct": round(ema_spread_pct, 4),
+            "bars": int(len(close)),
+            "side": side,
+            "composite_score": round(float(composite or 0.0), 4),
+        }
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc)[:80]}
+
+
 def _format_trade_card(signal: dict) -> str:
     sym = signal["data_symbol"]
     name = signal.get("broker_display_name") or sym
@@ -1032,6 +1085,10 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
     grade = _grade(composite, breakout, orb_active)
     atr_data = signal_result.get("atr_data") or {}
+    trend_1h = _trend_1h_alignment(symbol, side, composite) if is_live_market else {
+        "status": "not_scored",
+        "reason": "shadow_market",
+    }
     late_chase = _late_chase_block(
         side,
         signals,
@@ -1103,6 +1160,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         f"MACD {signals.get('macd_crossover', {}).get('score', 0):+.2f}",
         f"RS {signals.get('relative_strength', {}).get('score', 0):+.2f}",
         f"ORB {signals.get('orb', {}).get('score', 0):+.2f}",
+        f"1h {trend_1h.get('direction', trend_1h.get('status'))}",
         f"window {window}",
     ]
     record = {
@@ -1135,6 +1193,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "data_quality_json": quality,
         "late_chase_json": late_chase or {},
         "ignition_json": ignition or {},
+        "trend_1h_json": trend_1h,
         "pullback_confirmed": False,
         "fx_rate": cfg.fx_rate,
         "fx_rate_source": cfg.fx_rate_source,
@@ -1147,6 +1206,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "alert_stage": alert_stage,
         "late_chase": late_chase or {},
         "ignition": ignition or {},
+        "trend_1h": trend_1h,
         "display": display_levels,
     }
     if listing_type == "eu_us_mirror":

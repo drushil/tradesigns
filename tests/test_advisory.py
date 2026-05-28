@@ -63,6 +63,24 @@ def test_entry_plan_caps_size_by_risk_and_capital():
     assert plan["do_not_chase_price"] > plan["entry_max"]
 
 
+def test_trend_1h_alignment_scores_direction(monkeypatch):
+    import backend.signals.engine as signal_engine
+
+    index = pd.date_range("2026-05-15T10:00:00Z", periods=9, freq="1h")
+    bars = pd.DataFrame(
+        {"Close": [100, 101, 102, 103, 104, 105, 106, 107, 108]},
+        index=index,
+    )
+    monkeypatch.setattr(signal_engine, "_get_bars", lambda *args, **kwargs: bars, raising=False)
+
+    result = advisory._trend_1h_alignment("AMZN", "BUY", 0.42)
+
+    assert result["status"] == "ok"
+    assert result["direction"] == "bullish"
+    assert result["aligned"] is True
+    assert result["bars"] == 9
+
+
 def test_trade_card_is_actionable_for_manual_execution():
     cfg = _cfg()
     plan = advisory._entry_plan(price=100.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
@@ -1052,6 +1070,13 @@ def test_live_scan_emits_early_watch_below_trade_threshold(monkeypatch):
         "net_ev_pct": 0.20, "confidence": 0.40,
     })
     monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "_trend_1h_alignment", lambda symbol, side, composite: {
+        "status": "ok",
+        "aligned": False,
+        "direction": "bearish",
+        "score": -0.42,
+        "side": side,
+    })
 
     candidate = advisory._scan_candidate(
         {"data_symbol": "AMZN", "broker_display_name": "Amazon", "exchange": "NASDAQ", "currency": "USD"},
@@ -1066,6 +1091,8 @@ def test_live_scan_emits_early_watch_below_trade_threshold(monkeypatch):
     assert candidate["alert_stage"] == "watch"
     assert candidate["status"] == "skipped"
     assert candidate["composite_score"] == pytest.approx(0.36)
+    assert candidate["trend_1h_json"]["aligned"] is False
+    assert candidate["signal_json"]["trend_1h"]["direction"] == "bearish"
     assert candidate["signal_json"]["display"]["entry_min_eur"] == pytest.approx(92.5185, rel=1e-4)
     assert candidate["signal_json"]["display"]["native_currency"] == "USD"
     assert "Early signal only" in candidate["message_text"]
