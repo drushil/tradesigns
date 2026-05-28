@@ -515,6 +515,11 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 "market_regime": getattr(ticker_regime_state, "market_regime", ""),
                 "vix":           portfolio_state.get("vix", ""),
             },
+            trade_context   = {
+                "grade":             setup_grade.grade if setup_grade else None,
+                "breakout_quality":  setup_context.get("breakout_quality"),
+                "ev_net_pct":        ev_result.get("net_ev_pct"),
+            },
         )
         _record_llm_call()
     suggested_action = str(llm_result.get("action", "HOLD")).upper()

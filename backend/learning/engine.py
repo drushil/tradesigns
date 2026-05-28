@@ -26,6 +26,11 @@ LEARNING_RATE        = 0.05
 MAX_WEIGHT           = 0.55
 MIN_WEIGHT           = 0.03
 
+# LLM model selection — override via GitHub Variable / .env to change without a code deploy.
+# llama-3.3-70b-versatile: same free tier as 8b-instant, stronger reasoning,
+#   better conviction calibration, supports JSON mode → cleaner parse path.
+GROQ_DECISION_MODEL = os.getenv("GROQ_DECISION_MODEL", "llama-3.3-70b-versatile")
+
 _client = None
 
 
@@ -669,7 +674,7 @@ Output ONLY a valid JSON array, no other text:
 
     try:
         response = _get_client().chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=os.getenv("GROQ_DIGEST_MODEL", "llama-3.3-70b-versatile"),
             max_tokens=800,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -686,17 +691,25 @@ Output ONLY a valid JSON array, no other text:
                  "confidence": 0.0, "category": "error"}]
 
 
-# ── LLM Signal Decision (Haiku — fast & cheap) ───────────────────────────────
+# ── LLM Signal Decision ──────────────────────────────────────────────────────
 
 def llm_signal_decision(ticker: str, composite_score: float,
                          regime: str, news_headline: str,
                          profile: dict,
                          signal_scores: dict = None,
                          atr_data: dict = None,
-                         regime_context: dict = None) -> dict:
+                         regime_context: dict = None,
+                         trade_context: dict = None) -> dict:
     """
-    Signal interpretation via Groq llama-3.1-8b-instant.
-    Conviction is set by the model based on signal alignment, not a canned value.
+    Signal interpretation via Groq (GROQ_DECISION_MODEL, default llama-3.3-70b-versatile).
+
+    Uses Groq JSON mode — the response is guaranteed to be valid JSON so no
+    regex stripping needed.  Conviction is set by the model based on signal
+    alignment, setup grade, and EV; it is not a canned value.
+
+    Args:
+        trade_context: optional dict with keys grade, breakout_quality, ev_net_pct —
+                       supplied by the entry pipeline when available.
     """
     max_hold     = profile.get("max_hold_minutes", 60)
     stop_default = profile.get("stop_loss_pct", 2.0)
@@ -724,52 +737,73 @@ def llm_signal_decision(ticker: str, composite_score: float,
         atr_pct = atr_data.get("atr_pct")
         vol_reg = atr_data.get("volatility_regime", "")
         if atr_pct:
-            atr_str = f"\nATR: {float(atr_pct):.3f}% volatility ({vol_reg})"
+            atr_str = f"\nATR: {float(atr_pct):.3f}% ({vol_reg})"
+
+    # Setup quality line from entry pipeline
+    ctx_lines = ""
+    if trade_context:
+        grade     = trade_context.get("grade")
+        bq        = trade_context.get("breakout_quality")
+        ev_pct    = trade_context.get("ev_net_pct")
+        parts = []
+        if grade:
+            parts.append(f"Setup grade: {grade}")
+        if bq is not None:
+            try:
+                parts.append(f"Breakout quality: {float(bq):.2f}")
+            except (TypeError, ValueError):
+                pass
+        if ev_pct is not None:
+            try:
+                parts.append(f"Expected value: {float(ev_pct):+.3f}%")
+            except (TypeError, ValueError):
+                pass
+        if parts:
+            ctx_lines = "\n" + " | ".join(parts)
 
     prompt = f"""Ticker: {ticker}
 Composite score: {composite_score:+.3f}  (scale: -1 bearish → +1 bullish){signal_lines}
-Regime: {regime_str}{vix_str}{atr_str}
+Regime: {regime_str}{vix_str}{atr_str}{ctx_lines}
 News: {news_headline[:150] if news_headline else 'none'}
 Profile: {profile.get('display_name', 'moderate')} | Max hold: {max_hold} min | Default stop: {stop_default}%
 
-Task: decide whether to act on this signal.
+Task: decide whether to act on this signal. Return a JSON object.
 1. Count how many individual signals agree with the composite direction.
 2. Set conviction proportional to agreement strength:
-   - 0.2-0.4 = weak (1-2 signals align, rest flat)
+   - 0.2-0.4 = weak (1-2 signals align, rest flat or opposing)
    - 0.5-0.6 = moderate (majority align)
    - 0.7-0.85 = strong (most signals agree, composite > 0.25)
-3. Return HOLD if signals conflict, composite is near zero, or VIX is high with weak alignment.
-4. In bull market regimes, favor BUY when composite is positive and momentum/relative-strength signals align.
-5. In bull market regimes, choose SELL only when bearish evidence is clear and not just a minor pullback.
-6. Set hold_minutes and stop_loss_pct based on ATR and volatility regime.
+3. Return HOLD if signals conflict, composite is near zero, or VIX is elevated with weak alignment.
+4. In bull market regimes, favour BUY when composite is positive and momentum signals align.
+   Choose SELL only when bearish evidence is clear — not a minor pullback.
+5. Setup grade A+ with breakout quality ≥ 0.75 is a high-conviction setup; use conviction 0.70+
+   when signal alignment supports it.
+6. If grade is B or C, require composite > 0.3 and clear signal agreement before going above 0.5 conviction.
+7. Set hold_minutes and stop_loss_pct based on ATR and volatility regime.
 
-Reply with ONLY this JSON (no markdown, no other text):
+JSON schema (respond with ONLY this object):
 {{"action":"BUY|SELL|HOLD","conviction":0.0,"hold_minutes":0,"stop_loss_pct":0.0,"rationale":"one sentence"}}"""
 
     try:
         response = _get_client().chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model=GROQ_DECISION_MODEL,
             max_tokens=150,
             temperature=0.2,
+            response_format={"type": "json_object"},
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a quantitative trading signal interpreter. "
                         "Analyse signal alignment carefully and calibrate conviction accordingly. "
-                        "Reply ONLY with the JSON format specified — no markdown, no explanation."
+                        "Respond ONLY with the JSON object specified — no markdown, no commentary."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
         )
         raw = response.choices[0].message.content.strip()
-        # Strip markdown code fences if the model adds them despite instructions
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
+        return json.loads(raw)
     except Exception as e:
         return {"action": "HOLD", "conviction": 0.0,
                 "hold_minutes": 0, "rationale": f"llm_error: {str(e)[:50]}"}
