@@ -19,10 +19,10 @@ on:
     # Full US market hours (14:00–20:00 UTC). Previously 13-15,18-19 left a
     # 16:00–17:59 UTC gap (noon–2pm ET) that was only covered by cron-job.org.
     # Extended to 13-19 so GitHub Actions covers the full session.
-    # 4-min interval: safe floor given P90 cycle time of ~190s (cancel-in-progress
-    # would kill a run at 3 min before it finishes ~10% of the time).
-    # cron-job.org set to 4 min as primary trigger via workflow_dispatch.
-    - cron: '*/4 13-19 * * 1-5'
+    # GitHub's native schedule floor is 5 min; shorter expressions are silently
+    # throttled. Keep at 5 min as safety-net backup — cron-job.org workflow_dispatch
+    # is the primary trigger (external dispatch bypasses the 5-min floor).
+    - cron: '*/5 13-19 * * 1-5'
   # Market-hours cycles triggered by cron-job.org via workflow_dispatch
   # (more reliable than GitHub's schedule — honours triggers within seconds)
   workflow_dispatch:

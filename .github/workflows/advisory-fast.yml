@@ -1,0 +1,148 @@
+name: Trading Agent - Advisory Fast
+
+# Lightweight advisory-only workflow. Runs run_advisory_cycle() without the
+# full signal/trade path so it completes in ~50s and can be safely triggered
+# every 2 minutes by cron-job.org via workflow_dispatch.
+#
+# Separate concurrency group from the main agent so advisory scans never
+# compete with or cancel full signal cycles.
+#
+# Trigger setup (cron-job.org):
+#   EU open window:  every 2 min, 07:00-09:00 UTC, Mon-Fri
+#   US session:      every 2 min, 13:00-20:00 UTC, Mon-Fri
+#   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
+#   Body: {"event_type": "advisory-fast-cycle"}
+#   OR workflow_dispatch via:
+#   https://api.github.com/repos/drushil/tradesigns/actions/workflows/advisory-fast.yml/dispatches
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Force mode override (leave blank for auto)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [advisory-fast-cycle]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: advisory-fast-cycle
+  cancel-in-progress: true
+
+jobs:
+  run-advisory-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        run: |
+          for attempt in 1 2 3; do
+            echo "Checkout attempt $attempt..."
+            curl -fsSL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -o repo.tar.gz && \
+            file repo.tar.gz | grep -q "gzip" && \
+            tar -xzf repo.tar.gz --strip-components=1 && \
+            rm repo.tar.gz && \
+            echo "Checkout succeeded on attempt $attempt" && break
+            echo "Attempt $attempt failed, retrying in 15s..."
+            rm -f repo.tar.gz
+            sleep 15
+          done
+          [ -f requirements-agent.txt ] || { echo "Checkout failed after 3 attempts"; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements-agent.txt
+
+      - name: Run advisory cycle
+        env:
+          ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
+          ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
+          ALPACA_BASE_URL:      https://paper-api.alpaca.markets
+          GROQ_API_KEY:         "${{ secrets.GROQ_API_KEY }}"
+          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
+          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
+          NEWSAPI_KEY:          "${{ secrets.NEWSAPI_KEY }}"
+          DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
+          EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
+          ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
+          ADVISORY_MARKETS:     "${{ vars.ADVISORY_MARKETS }}"
+          ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
+          ADVISORY_SHADOW_MARKETS: "${{ vars.ADVISORY_SHADOW_MARKETS }}"
+          ADVISORY_SHADOW_DISCORD_MARKETS: "${{ vars.ADVISORY_SHADOW_DISCORD_MARKETS }}"
+          ADVISORY_CAPITAL_EUR: "${{ vars.ADVISORY_CAPITAL_EUR }}"
+          ADVISORY_MAX_LIVE_ALERTS_PER_DAY: "${{ vars.ADVISORY_MAX_LIVE_ALERTS_PER_DAY }}"
+          ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY: "${{ vars.ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY }}"
+          ADVISORY_MAX_SHADOW_DISCORD_ALERTS_PER_DAY: "${{ vars.ADVISORY_MAX_SHADOW_DISCORD_ALERTS_PER_DAY }}"
+          ADVISORY_MAX_OPEN_LIVE_TRADES: "${{ vars.ADVISORY_MAX_OPEN_LIVE_TRADES }}"
+          ADVISORY_MAX_LIVE_TRADES_PER_SESSION: "${{ vars.ADVISORY_MAX_LIVE_TRADES_PER_SESSION }}"
+          ADVISORY_RISK_PER_TRADE_EUR: "${{ vars.ADVISORY_RISK_PER_TRADE_EUR }}"
+          ADVISORY_MAX_DAILY_LOSS_EUR: "${{ vars.ADVISORY_MAX_DAILY_LOSS_EUR }}"
+          ADVISORY_DEFAULT_SIZE_EUR: "${{ vars.ADVISORY_DEFAULT_SIZE_EUR }}"
+          ADVISORY_A_PLUS_MAX_SIZE_EUR: "${{ vars.ADVISORY_A_PLUS_MAX_SIZE_EUR }}"
+          ADVISORY_MIN_COMPOSITE: "${{ vars.ADVISORY_MIN_COMPOSITE }}"
+          ADVISORY_MIN_WATCH_COMPOSITE: "${{ vars.ADVISORY_MIN_WATCH_COMPOSITE }}"
+          ADVISORY_MIN_WATCH_BREAKOUT_QUALITY: "${{ vars.ADVISORY_MIN_WATCH_BREAKOUT_QUALITY }}"
+          ADVISORY_WATCH_REPEAT_MIN_COMPOSITE_DELTA: "${{ vars.ADVISORY_WATCH_REPEAT_MIN_COMPOSITE_DELTA }}"
+          ADVISORY_WATCH_REPEAT_MIN_BREAKOUT_DELTA: "${{ vars.ADVISORY_WATCH_REPEAT_MIN_BREAKOUT_DELTA }}"
+          ADVISORY_IGNITION_MIN_COMPOSITE: "${{ vars.ADVISORY_IGNITION_MIN_COMPOSITE }}"
+          ADVISORY_IGNITION_MIN_VOLUME_RATIO: "${{ vars.ADVISORY_IGNITION_MIN_VOLUME_RATIO }}"
+          ADVISORY_IGNITION_MIN_ATR_MOVE: "${{ vars.ADVISORY_IGNITION_MIN_ATR_MOVE }}"
+          ADVISORY_IGNITION_DEBUG: "${{ vars.ADVISORY_IGNITION_DEBUG }}"
+          ADVISORY_MAX_WATCH_ALERTS_PER_SYMBOL_PER_SESSION: "${{ vars.ADVISORY_MAX_WATCH_ALERTS_PER_SYMBOL_PER_SESSION }}"
+          ADVISORY_MAX_WATCH_ALERTS_PER_SESSION: "${{ vars.ADVISORY_MAX_WATCH_ALERTS_PER_SESSION }}"
+          ADVISORY_MIN_EV_PCT: "${{ vars.ADVISORY_MIN_EV_PCT }}"
+          ADVISORY_MIN_BREAKOUT_QUALITY: "${{ vars.ADVISORY_MIN_BREAKOUT_QUALITY }}"
+          ADVISORY_DISCORD_MIN_GRADE: "${{ vars.ADVISORY_DISCORD_MIN_GRADE }}"
+          ADVISORY_SHADOW_DISCORD_MIN_GRADE: "${{ vars.ADVISORY_SHADOW_DISCORD_MIN_GRADE }}"
+          ADVISORY_US_MIN_MINUTES_AFTER_OPEN: "${{ vars.ADVISORY_US_MIN_MINUTES_AFTER_OPEN }}"
+          ADVISORY_US_EARLY_MIN_ROWS: "${{ vars.ADVISORY_US_EARLY_MIN_ROWS }}"
+          ADVISORY_LATE_CHASE_ATR_MULT: "${{ vars.ADVISORY_LATE_CHASE_ATR_MULT }}"
+          ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
+          ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"
+          STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
+          TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
+          RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
+        run: |
+          python << 'PY'
+          import os
+          from datetime import datetime, timezone
+          from backend.advisory import run_advisory_cycle
+
+          def _truthy(value, default=False):
+              raw = str(value if value is not None else "").strip().lower()
+              if not raw:
+                  return default
+              return raw in {"1", "true", "yes", "on"}
+
+          advisory_enabled = _truthy(os.getenv("ADVISORY_MODE"), False)
+          if not advisory_enabled:
+              print("Advisory mode disabled — ADVISORY_MODE not set. Skipping.")
+          else:
+              now = datetime.now(timezone.utc)
+              in_window = (
+                  now.weekday() < 5 and
+                  (7 <= now.hour <= 9 or 13 <= now.hour <= 20)
+              )
+              dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
+              if in_window or dispatch_mode == "advisory":
+                  print(f"Running advisory cycle at {now.strftime('%H:%M UTC')}...")
+                  result = run_advisory_cycle()
+                  print(f"Advisory result: {result}")
+              else:
+                  print(f"Outside advisory window ({now.strftime('%H:%M UTC')}) — skipping.")
+          PY
