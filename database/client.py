@@ -629,8 +629,8 @@ def get_advisory_scoreboard(
     Fetch scored advisory signals for the replay scoreboard dashboard.
 
     Only returns rows that have been forward-scored (forward_scored_at IS NOT NULL).
-    Columns returned: id, created_at, data_symbol, market, mode, grade, alert_stage,
-    side, composite_score, breakout_quality, forward_return_5m/15m/30m/60m,
+    Columns returned: id, created_at, data_symbol, market, mode, grade,
+    signal_json, side, composite_score, breakout_quality, forward_return_5m/15m/30m/60m,
     forward_scored_at, max_favorable_pct, max_adverse_pct.
 
     Args:
@@ -644,7 +644,7 @@ def get_advisory_scoreboard(
         db = get_client()
         q = (db.table("advisory_signals")
              .select(
-                 "id,created_at,data_symbol,market,mode,grade,alert_stage,"
+                 "id,created_at,data_symbol,market,mode,grade,signal_json,"
                  "side,composite_score,breakout_quality,"
                  "forward_return_5m,forward_return_15m,"
                  "forward_return_30m,forward_return_60m,"

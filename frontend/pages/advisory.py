@@ -413,8 +413,7 @@ def _render_scoreboard(fetch_fn):
     # ── Grade × Stage breakdown ──────────────────────────────────────────
     st.markdown("**Grade × Stage breakdown**")
 
-    if "alert_stage" not in df.columns:
-        df["alert_stage"] = "trade"
+    df["alert_stage"] = df.apply(lambda row: _stage_of(row.to_dict()), axis=1)
     if "grade" not in df.columns:
         df["grade"] = "—"
 
@@ -429,7 +428,7 @@ def _render_scoreboard(fetch_fn):
         mae = grp["max_adverse_pct"].dropna() if "max_adverse_pct" in grp.columns else pd.Series(dtype=float)
         win15 = float((r15 > 0).mean() * 100) if len(r15) >= 3 else float("nan")
         mfe_mae_str = (
-            f"{mfe.mean():.1f}× / {mae.mean():.1f}×"
+            f"{mfe.mean():+.2f}% / {mae.mean():+.2f}%"
             if len(mfe) >= 2 and len(mae) >= 2
             else "—"
         )
@@ -442,7 +441,7 @@ def _render_scoreboard(fetch_fn):
             "avg 30m": _fmt_ret(r30.mean() if len(r30) else None),
             "avg 60m": _fmt_ret(r60.mean() if len(r60) else None),
             "win % 15m": _fmt_win(win15),
-            "MFE/MAE": mfe_mae_str,
+            "avg MFE/MAE": mfe_mae_str,
             "_sort": (grade_order.get(str(grade) if grade else "—", 99),
                       str(stage) if stage else ""),
         })
@@ -494,7 +493,7 @@ def _render_scoreboard(fetch_fn):
             sym_agg = (
                 df.groupby("data_symbol")["forward_return_15m"]
                 .agg(n="count", avg_15m="mean",
-                     win_pct=lambda x: float((x.dropna() > 0).mean() * 100) if x.dropna().any() else float("nan"))
+                     win_pct=lambda x: float((x.dropna() > 0).mean() * 100) if len(x.dropna()) else float("nan"))
                 .reset_index()
                 .sort_values("avg_15m", ascending=False)
             )
