@@ -14,8 +14,8 @@ on:
     - cron: '25 21 * * 1-5'
     # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
     - cron: '35 13,14 * * 1-5'
-    # Manual advisory scan windows — EU open (7-9 UTC = 9-11 CEST)
-    - cron: '*/5 7-9 * * 1-5'
+    # EU open advisory (7-9 UTC) is now handled by advisory-fast.yml triggered
+    # by cron-job.org every 2 min — no GH schedule needed here.
     # Full US market hours (14:00–20:00 UTC). Previously 13-15,18-19 left a
     # 16:00–17:59 UTC gap (noon–2pm ET) that was only covered by cron-job.org.
     # Extended to 13-19 so GitHub Actions covers the full session.
