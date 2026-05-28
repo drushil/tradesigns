@@ -23,10 +23,12 @@ from backend.learning.engine import compute_expected_value
 from database.client import (
     get_recent_trades,
     get_recent_advisory_signals,
+    get_open_advisory_positions,
     get_fx_rate_cache,
     insert_advisory_signal,
     log_event,
     upsert_fx_rate_cache,
+    update_advisory_exit_status,
 )
 
 
@@ -556,6 +558,39 @@ def _grade(composite: float, breakout_quality: float, orb_active: bool) -> str:
     return "C"
 
 
+def _intraday_grade_cap(grade: str, side: str, signals: dict, window: str) -> tuple[str, Optional[dict]]:
+    """Cap open-window grades when real-time ORB and VWAP both oppose the setup."""
+    if window != "us_open" or grade not in {"A", "A+"}:
+        return grade, None
+    direction = 1 if side == "BUY" else -1
+    orb_score = _signal_score(signals, "orb")
+    vwap_score = _signal_score(signals, "vwap_deviation")
+    intraday_weak = (orb_score * direction < -0.5) and (vwap_score * direction < -0.3)
+    if not intraday_weak:
+        return grade, None
+    return "B", {
+        "reason": "orb_vwap_intraday_grade_cap",
+        "original_grade": grade,
+        "capped_grade": "B",
+        "orb_score": round(orb_score, 4),
+        "vwap_score": round(vwap_score, 4),
+        "window": window,
+    }
+
+
+def _premium_setup_flag(side: str, signals: dict) -> dict:
+    direction = 1 if side == "BUY" else -1
+    macd_score = _signal_score(signals, "macd_crossover")
+    rs_score = _signal_score(signals, "relative_strength")
+    premium = (macd_score * direction >= 0.90) and (rs_score * direction >= 0.90)
+    return {
+        "premium_setup": premium,
+        "macd_score": round(macd_score, 4),
+        "relative_strength_score": round(rs_score, 4),
+        "rule": "macd_and_relative_strength_aligned_0_90",
+    }
+
+
 def _grade_rank(grade: str) -> int:
     return {"C": 0, "B": 1, "A": 2, "A+": 3}.get(str(grade).upper(), -1)
 
@@ -844,15 +879,17 @@ def _trend_1h_alignment(symbol: str, side: str, composite: float) -> dict:
 
 def _format_trade_card(signal: dict) -> str:
     sym = signal["data_symbol"]
-    name = signal.get("broker_display_name") or sym
+    side = str(signal.get("side") or "BUY").upper()
     is_shadow = signal["mode"] != "live"
     is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
     is_ignition = signal.get("alert_stage") == "ignition"
     is_late_chase = bool(signal.get("late_chase_json"))
+    is_holding = bool(signal.get("holding_context"))
     notional = f"€{signal['suggested_size_eur']:.0f}"
-    fx_text = (
-        f"  |  EUR/USD: {signal['fx_rate']:.4f} ({signal.get('fx_rate_source', 'unknown')})"
-        if signal["currency"] == "USD" else ""
+    range_action = (
+        "sell/short only inside range; avoid chasing below max extension."
+        if side == "SELL"
+        else "buy only inside range; avoid chasing above max."
     )
     entry_min_eur = _eur_price(signal, "entry_min")
     entry_max_eur = _eur_price(signal, "entry_max")
@@ -860,111 +897,93 @@ def _format_trade_card(signal: dict) -> str:
     stop_eur = _eur_price(signal, "stop_price")
     target_1_eur = _eur_price(signal, "target_1")
     target_2_eur = _eur_price(signal, "target_2")
-    native_ref = _native_ref_line(signal)
-    opportunity = {
-        "A+": "EXCELLENT",
-        "A": "VERY GOOD",
-        "B": "WATCHLIST-QUALITY",
-        "C": "LOW-GRADE SHADOW",
-    }.get(str(signal.get("grade", "")).upper(), "OBSERVATION")
-    if is_ignition:
-        opportunity = "MOMENTUM IGNITION"
-    elif is_watch:
-        opportunity = "LATE-CHASE WATCH" if is_late_chase else "EARLY WATCH"
     quick_why = signal["rationale"].split(", window ")[0]
-    headline = (
-        f"{opportunity} {signal['side']} OPPORTUNITY: {sym} / {name} "
-        f"because {quick_why}."
-    )
-    if is_ignition:
-        first_line = f"**MOMENTUM IGNITION - {signal['market']} {signal['side']} SETUP FORMING - WATCH ONLY**"
-        quick_label = "Ignition watch"
+
+    if is_holding:
+        prefix = "HOLD"
+    elif is_ignition:
+        prefix = "MOMENTUM IGNITION"
     elif is_watch:
-        first_line = (
-            f"**WATCH ONLY - {signal['market']} {signal['side']} SETUP "
-            f"{'IS EXTENDED' if is_late_chase else 'FORMING'} - DO NOT CHASE**"
-        )
-        quick_label = "Watch plan"
+        prefix = "WATCH ONLY"
+    elif is_shadow:
+        prefix = "SHADOW OBSERVATION"
     else:
-        first_line = (
-            f"**LIVE TRADE ALERT - {signal['market']} {signal['side']} NOW**"
-            if not is_shadow
-            else f"**SHADOW OBSERVATION - {signal['market']} {signal['side']} SETUP - DO NOT TRADE YET**"
+        prefix = "LIVE TRADE ALERT"
+
+    qualifier = ""
+    if is_late_chase:
+        qualifier = " - extended"
+    elif signal.get("pullback_confirmed"):
+        qualifier = " - pullback confirmed"
+    elif is_holding:
+        qualifier = " - runner check"
+
+    first_line = f"**{prefix} - {side} {sym} - {signal['grade']} - {signal['market']}{qualifier}**"
+
+    notes = []
+    if is_shadow:
+        if str(signal.get("grade", "")).upper() == "C":
+            notes.append(f"LOW-GRADE SHADOW {side} OPPORTUNITY: log only.")
+        notes.append("Action: log only; do not trade from shadow mode.")
+    elif is_holding:
+        notes.append("Action: holder context; manage the open trade, not a fresh chase.")
+    elif is_ignition:
+        detail = signal.get("ignition_json") or {}
+        notes.append(
+            "Why: momentum ignition "
+            f"({detail.get('move_pct')}% over {detail.get('window_bars')}m, "
+            f"{detail.get('atr_multiple')}x ATR, {detail.get('volume_ratio')}x volume)."
         )
-        quick_label = "Quick action" if not is_shadow else "Observation plan"
-    shadow_note = (
-        "This is shadow mode: log/watch only until EU advisory is promoted live.\n"
-        if is_shadow else ""
-    )
-    mirror_note = (
-        f"Pre-Nasdaq mirror of {signal.get('primary_symbol')} - "
-        f"EU-hours early read on US momentum. Execute on US listing after open.\n"
-        if signal.get("listing_type") == "eu_us_mirror" else ""
-    )
-    watch_note = ""
-    if is_watch:
+        notes.append("Action: watch for follow-through; use the band as tentative only.")
+    elif is_watch:
         if is_ignition:
-            detail = signal.get("ignition_json") or {}
-            watch_note = (
-                "Momentum ignition detected before the full advisory composite has confirmed; "
-                f"{detail.get('move_pct')}% over {detail.get('window_bars')}m, "
-                f"{detail.get('atr_multiple')}x ATR move, {detail.get('volume_ratio')}x volume.\n"
-            )
+            pass
         elif is_late_chase:
             detail = signal.get("late_chase_json") or {}
-            watch_note = (
-                "Execution gate says this move is extended. Wait for a pullback into the entry band; "
-                f"VWAP deviation {detail.get('pct_deviation')}% vs threshold {detail.get('threshold_pct')}%.\n"
+            notes.append(
+                "Why: setup is strong but extended "
+                f"(VWAP deviation {detail.get('pct_deviation')}% vs {detail.get('threshold_pct')}%)."
             )
+            notes.append("Action: wait for pullback into the band; no fresh chase.")
         else:
-            watch_note = "Early signal only: prepare the chart and wait for confirmed A/A+ follow-through.\n"
+            notes.append("Early signal only.")
+            notes.append(f"Why: {quick_why}.")
+            notes.append("Action: prepare the chart; buy only if the setup confirms in range.")
     elif signal.get("pullback_confirmed"):
-        watch_note = "Pullback confirmed: the prior late-chase extension has cleared and the entry band is now valid.\n"
+        notes.append("Why: prior late-chase extension cleared; entry band is valid again.")
+        notes.append(f"Action: {range_action}")
+    else:
+        notes.append(f"Why: {quick_why}.")
+        notes.append(f"Action: {range_action}")
+        try:
+            notes.append(f"EV: {float(signal.get('ev_net_pct') or 0):+.2f}%")
+        except (TypeError, ValueError):
+            pass
+
     if is_watch:
         if is_ignition:
-            action_line = (
-                f"{quick_label}: prepare {signal['side']} {sym}; watch follow-through near "
-                f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
-                f"valid until {signal['valid_until_cet']}.\n"
-            )
+            entry_line = f"Watch band: €{entry_min_eur:.2f}-€{entry_max_eur:.2f} | Valid: {signal['valid_until_cet']}"
         else:
-            action_line = (
-                f"{quick_label}: prepare {signal['side']} {sym} only on pullback into "
-                f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
-                f"valid until {signal['valid_until_cet']}.\n"
-            )
-        risk_line = f"Tentative levels: max size {notional}, estimated risk ~€{signal['risk_eur']:.0f}{fx_text}.\n"
-        exit_line = (
-            f"Pullback plan: stop €{stop_eur:.2f}; T1 €{target_1_eur:.2f}; "
-            f"T2 €{target_2_eur:.2f}; reassess by {signal['time_exit_cet']}.\n"
-        )
+            entry_line = f"Pullback zone: €{entry_min_eur:.2f}-€{entry_max_eur:.2f} | Valid: {signal['valid_until_cet']}"
     else:
-        action_line = (
-            f"{quick_label}: LIMIT {signal['side']} {sym} "
-            f"€{entry_min_eur:.2f}-€{entry_max_eur:.2f}; "
-            f"do not chase > €{chase_eur:.2f}; "
-            f"valid until {signal['valid_until_cet']}.\n"
+        entry_line = (
+            f"LIMIT {side}: €{entry_min_eur:.2f}-€{entry_max_eur:.2f} | "
+            f"Max: €{chase_eur:.2f} | Valid: {signal['valid_until_cet']}"
         )
-        risk_line = f"Size/risk: {notional} max, ~€{signal['risk_eur']:.0f} risk{fx_text}.\n"
-        exit_line = (
-            f"Exit: stop €{stop_eur:.2f}; T1 €{target_1_eur:.2f}; "
-            f"T2 €{target_2_eur:.2f}; time exit {signal['time_exit_cet']}.\n"
-        )
-    ev_net = signal.get("ev_net_pct")
-    ev_text = "n/a" if ev_net is None else f"{float(ev_net):.2f}"
+    levels_line = (
+        f"Levels: stop €{stop_eur:.2f} | T1 €{target_1_eur:.2f} | "
+        f"T2 €{target_2_eur:.2f} | Exit by {signal['time_exit_cet']}"
+    )
+    size_label = "Tentative size" if is_watch else "Size"
+    size_line = f"{size_label}: {notional} | Risk: ~€{signal['risk_eur']:.0f}"
+    if signal.get("listing_type") == "eu_us_mirror":
+        notes.append(f"Pre-Nasdaq mirror of {signal.get('primary_symbol')}: early EU read; execute on primary listing.")
     return (
         f"{first_line}\n"
-        f"**{headline}**\n"
-        f"{shadow_note}"
-        f"{mirror_note}"
-        f"{watch_note}"
-        f"{action_line}"
-        f"{native_ref}"
-        f"{risk_line}"
-        f"{exit_line}"
-        f"Why: {signal['rationale']}.\n"
-        f"Grade: **{signal['grade']}**  |  Composite: {signal['composite_score']:.2f}  "
-        f"|  EV: {ev_text}%"
+        f"{entry_line}\n"
+        f"{levels_line}\n"
+        f"{size_line}\n\n"
+        + "\n".join(notes)
     )
 
 
@@ -1003,6 +1022,168 @@ def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
     if not _meets_min_grade(candidate.get("grade"), cfg.shadow_min_discord_grade):
         return False
     return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
+
+
+def _latest_native_price(symbol: str) -> Optional[float]:
+    try:
+        if _get_bars is None:
+            return None
+        bars = _get_bars(symbol, period="1d", interval="1m")
+        if bars is None or bars.empty:
+            return None
+        close = bars["Close"].squeeze()
+        return float(close.dropna().iloc[-1])
+    except Exception:
+        return None
+
+
+def _monitor_alerts(position: dict) -> set[str]:
+    monitor = position.get("exit_monitor_json") or {}
+    if not isinstance(monitor, dict):
+        return set()
+    return {str(item) for item in (monitor.get("alerts") or [])}
+
+
+def _with_monitor_alert(position: dict, alert_type: str, payload: dict) -> dict:
+    monitor = position.get("exit_monitor_json") or {}
+    if not isinstance(monitor, dict):
+        monitor = {}
+    new_alerts = ["t1", "t2"] if alert_type == "t2" else [alert_type]
+    alerts = list(dict.fromkeys([*(monitor.get("alerts") or []), *new_alerts]))
+    monitor.update({
+        "alerts": alerts,
+        "last_alert": alert_type,
+        "last_checked_at": datetime.utcnow().isoformat() + "Z",
+        **payload,
+    })
+    return monitor
+
+
+def _monitor_checked_recently(position: dict, now_utc: datetime, minutes: int = 10) -> bool:
+    monitor = position.get("exit_monitor_json") or {}
+    if not isinstance(monitor, dict):
+        return False
+    last_checked = _parse_dt(monitor.get("last_checked_at"))
+    if not last_checked:
+        return False
+    return (now_utc - last_checked).total_seconds() < minutes * 60
+
+
+def _position_entry_native(position: dict) -> float:
+    try:
+        manual = float(position.get("manual_entry_price") or 0)
+        if manual > 0:
+            return manual
+    except (TypeError, ValueError):
+        pass
+    try:
+        entry_min = float(position.get("entry_min") or 0)
+        entry_max = float(position.get("entry_max") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if entry_min and entry_max:
+        return (entry_min + entry_max) / 2.0
+    return entry_min or entry_max
+
+
+def _format_exit_alert(position: dict, alert_type: str, current_native: float, cfg: AdvisoryConfig) -> str:
+    sym = position.get("data_symbol")
+    side = str(position.get("side") or "BUY").upper()
+    entry_native = _position_entry_native(position)
+    current_eur = _display_price(current_native, position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate)
+    entry_eur = _display_price(entry_native, position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate)
+    stop_eur = _display_price(position.get("stop_price"), position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate)
+    t1_eur = _display_price(position.get("target_1"), position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate)
+    t2_eur = _display_price(position.get("target_2"), position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate)
+    direction = 1 if side == "BUY" else -1
+    pnl_pct = ((current_native - entry_native) / entry_native * 100 * direction) if entry_native else 0.0
+    size_eur = float((position.get("exit_monitor_json") or {}).get("size_eur") or position.get("suggested_size_eur") or 0)
+    pnl_eur = size_eur * pnl_pct / 100.0
+
+    titles = {
+        "t1": "T1 HIT",
+        "t2": "T2 HIT",
+        "stop": "STOP ZONE",
+        "time": "TIME WINDOW CLOSING",
+    }
+    title = titles.get(alert_type, "POSITION UPDATE")
+    if alert_type == "t1":
+        action = f"Action: consider trimming part and moving stop near breakeven €{entry_eur:.2f}."
+    elif alert_type == "t2":
+        action = "Action: consider exiting more, or trail tightly if momentum is still strong."
+    elif alert_type == "stop":
+        action = "Action: protect capital; this is the planned invalidation zone."
+    else:
+        action = "Action: reassess manually; advisory validity window is nearly over."
+    return (
+        f"**{title} - {sym} {side} - {position.get('grade')}**\n"
+        f"Current: €{current_eur:.2f} | Entry: €{entry_eur:.2f} | P&L: {pnl_pct:+.2f}% (~€{pnl_eur:+.0f})\n"
+        f"Levels: stop €{stop_eur:.2f} | T1 €{t1_eur:.2f} | T2 €{t2_eur:.2f}\n"
+        f"{action}"
+    )
+
+
+def _monitor_open_positions(cfg: AdvisoryConfig, now_cet: datetime) -> list[dict]:
+    """Send one-shot recommendation alerts for manually entered advisory rows."""
+    if not cfg.discord_webhook_url:
+        return []
+    emitted = []
+    now_utc = now_cet.astimezone(timezone.utc)
+    for position in get_open_advisory_positions(max_age_days=7):
+        symbol = position.get("data_symbol")
+        if not symbol:
+            continue
+        current = _latest_native_price(symbol)
+        if not current:
+            continue
+        side = str(position.get("side") or "BUY").upper()
+        direction = 1 if side == "BUY" else -1
+        alerts = _monitor_alerts(position)
+        alert_type = None
+        try:
+            stop = float(position.get("stop_price") or 0)
+            t1 = float(position.get("target_1") or 0)
+            t2 = float(position.get("target_2") or 0)
+        except (TypeError, ValueError):
+            stop = t1 = t2 = 0.0
+        if stop and ((side == "BUY" and current <= stop) or (side == "SELL" and current >= stop)):
+            if "stop" not in alerts:
+                alert_type = "stop"
+        elif t2 and ((side == "BUY" and current >= t2) or (side == "SELL" and current <= t2)):
+            if "t2" not in alerts:
+                alert_type = "t2"
+        elif t1 and ((side == "BUY" and current >= t1) or (side == "SELL" and current <= t1)):
+            if "t1" not in alerts:
+                alert_type = "t1"
+        if not alert_type:
+            valid_until = _parse_dt(position.get("valid_until"))
+            if valid_until and 0 <= (valid_until - now_utc).total_seconds() <= 15 * 60 and "time" not in alerts:
+                alert_type = "time"
+        if not alert_type:
+            if _monitor_checked_recently(position, now_utc):
+                continue
+            update_advisory_exit_status(position["id"], {
+                "exit_monitor_json": _with_monitor_alert(position, "checked", {
+                    "last_price_native": round(current, 4),
+                }),
+            })
+            continue
+        message = _format_exit_alert(position, alert_type, current, cfg)
+        _send_discord(message, cfg.discord_webhook_url)
+        monitor = _with_monitor_alert(position, alert_type, {
+            "last_price_native": round(current, 4),
+            "last_price_eur": round(_display_price(current, position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate), 4),
+        })
+        updates = {
+            "exit_alert_type": alert_type,
+            "exit_alerted_at": datetime.utcnow().isoformat() + "Z",
+            "exit_monitor_json": monitor,
+        }
+        if alert_type == "t1":
+            updates["t1_alerted"] = True
+        update_advisory_exit_status(position["id"], updates)
+        emitted.append({"symbol": symbol, "alert_type": alert_type})
+    return emitted
 
 
 def _eu_catalyst_score(item: dict, signals: dict) -> float:
@@ -1084,6 +1265,10 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
     orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
     grade = _grade(composite, breakout, orb_active)
+    grade_cap = None
+    if is_live_market:
+        grade, grade_cap = _intraday_grade_cap(grade, side, signals, window)
+    premium_setup = _premium_setup_flag(side, signals)
     atr_data = signal_result.get("atr_data") or {}
     trend_1h = _trend_1h_alignment(symbol, side, composite) if is_live_market else {
         "status": "not_scored",
@@ -1207,6 +1392,8 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "late_chase": late_chase or {},
         "ignition": ignition or {},
         "trend_1h": trend_1h,
+        "premium_setup": premium_setup,
+        "grade_cap": grade_cap or {},
         "display": display_levels,
     }
     if listing_type == "eu_us_mirror":
@@ -1253,6 +1440,12 @@ def run_advisory_cycle() -> dict:
     recent_trades = get_recent_trades(days=90)
     emitted = []
     blocked = []
+    exit_alerts = []
+    if cfg.live_markets:
+        try:
+            exit_alerts = _monitor_open_positions(cfg, now_cet)
+        except Exception as exc:
+            log_event("WARN", "advisory_exit_monitor_failed", {"error": str(exc)[:160]})
 
     try:
         from backend.signals.engine import prefetch_newsapi_batch
@@ -1374,8 +1567,14 @@ def run_advisory_cycle() -> dict:
     log_event("INFO", "advisory_cycle_complete", {
         "emitted": len(emitted),
         "blocked": len(blocked),
+        "exit_alerts": len(exit_alerts),
         "live_sent_today": live_sent_today,
         "daily_live_pnl": daily_live_pnl,
         "markets": sorted(cfg.markets),
     })
-    return {"emitted": len(emitted), "blocked": len(blocked), "live_sent_today": live_sent_today}
+    return {
+        "emitted": len(emitted),
+        "blocked": len(blocked),
+        "exit_alerts": len(exit_alerts),
+        "live_sent_today": live_sent_today,
+    }

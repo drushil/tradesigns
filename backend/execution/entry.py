@@ -42,6 +42,7 @@ from backend.execution.exit import (
     _time_exit_cooldown_active, _ticker_loss_cooldown_active,
     _thesis_invalidated_cooldown_active, _ranging_stop_loss_cooldown_active,
 )
+from backend.execution.orders import _advisory_do_not_chase_block
 from backend.grading.engine import (
     SetupGrade, a_plus_hard_blocks, effective_size_multiplier,
 )
@@ -850,6 +851,22 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
         )
         return
     current_price = float(bar["Close"].squeeze().iloc[-1])
+    chase_block = _advisory_do_not_chase_block(ticker, action, current_price, profile)
+    if chase_block:
+        log_event("INFO", "advisory_chase_entry_block", {
+            "ticker": ticker,
+            "action": action,
+            "composite": round(float(composite or 0), 4),
+            **chase_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action, composite, signals_snap, setup_context,
+            ticker_regime, "entry_quality", chase_block["reason"],
+            ev_result=ev_result,
+            reference_price=current_price,
+            block_detail=chase_block,
+        )
+        return
     intended_size_eur = float(final_size or 0)
     use_bracket_orders = _env_value("USE_BRACKET_ORDERS", "true").lower() != "false"
 

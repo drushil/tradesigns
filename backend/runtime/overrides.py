@@ -135,6 +135,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("context_quality_after_close_multiplier", 0.0)
     p.setdefault("context_quality_outside_hours_multiplier", 0.0)
     p.setdefault("context_quality_unknown_multiplier", 0.50)
+    p.setdefault("advisory_chase_block_enabled", True)
     if state.IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
@@ -440,4 +441,6 @@ def _apply_execution_overrides(profile: dict) -> dict:
             "CONTEXT_QUALITY_UNKNOWN_MULTIPLIER",
             p["context_quality_unknown_multiplier"],
         )
+    if os.getenv("ADVISORY_CHASE_BLOCK_ENABLED") is not None:
+        p["advisory_chase_block_enabled"] = _env_bool("ADVISORY_CHASE_BLOCK_ENABLED", True)
     return p

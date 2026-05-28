@@ -104,14 +104,15 @@ def test_trade_card_is_actionable_for_manual_execution():
     card = advisory._format_trade_card(signal)
 
     assert "LIMIT BUY" in card
-    assert "VERY GOOD BUY OPPORTUNITY" in card
-    assert "Quick action:" in card
-    assert "do not chase" in card
-    assert "Exit: stop" in card
-    assert "valid until" in card
-    assert "Quick action: LIMIT BUY NVDA €" in card
-    assert "Native ref: $99.88-$100.12" in card
-    assert "EUR/USD 1.0800" in card
+    assert "LIVE TRADE ALERT" in card
+    assert "Action:" in card
+    assert "avoid chasing above max" in card
+    assert "Levels: stop" in card
+    assert "Valid:" in card
+    assert "Native ref:" not in card
+    assert "EUR/USD" not in card
+    assert "Composite:" not in card
+    assert "EV: +0.72%" in card
 
 
 def test_shadow_trade_card_is_clearly_observation_only():
@@ -138,9 +139,8 @@ def test_shadow_trade_card_is_clearly_observation_only():
     card = advisory._format_trade_card(signal)
 
     assert "SHADOW OBSERVATION" in card
-    assert "DO NOT TRADE YET" in card
-    assert "Observation plan:" in card
-    assert "Observation plan: LIMIT BUY SAP.DE €" in card
+    assert "do not trade from shadow mode" in card
+    assert "LIMIT BUY" in card
     assert "Native ref:" not in card
 
 
@@ -169,19 +169,45 @@ def test_watch_trade_card_is_not_a_buy_now_alert():
     card = advisory._format_trade_card(signal)
 
     assert "WATCH ONLY" in card
-    assert "DO NOT CHASE" in card
     assert "Early signal only" in card
     assert "LIVE TRADE ALERT" not in card
-    assert "BUY NOW" not in card
-    assert "Watch plan: prepare BUY AMZN only on pullback into" in card
+    assert "Pullback zone:" in card
     assert "€92." in card
-    assert "Native ref: $99.88-$100.12" in card
+    assert "Native ref:" not in card
     assert "do not chase >" not in card
-    assert "Tentative levels:" in card
-    assert "Pullback plan:" in card
+    assert "Tentative size:" in card
+    assert "Levels: stop" in card
     assert "Size/risk:" not in card
     assert "Exit: stop" not in card
-    assert "EV: 0.20%" in card
+    assert "EV:" not in card
+
+
+def test_sell_trade_card_uses_direction_aware_action():
+    cfg = _cfg(allow_short=True)
+    plan = advisory._entry_plan(price=100.0, side="SELL", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
+    signal = {
+        "mode": "live",
+        "alert_stage": "trade",
+        "market": "US",
+        "data_symbol": "TSLA",
+        "broker_display_name": "Tesla",
+        "currency": "USD",
+        "side": "SELL",
+        "valid_until_cet": "16:31 Berlin",
+        "time_exit_cet": "20:55 Berlin",
+        "rationale": "A setup, VWAP -0.80, ORB -0.80",
+        "grade": "A",
+        "composite_score": -0.48,
+        "ev_net_pct": 0.70,
+        "fx_rate": 1.08,
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "LIMIT SELL" in card
+    assert "sell/short only inside range" in card
+    assert "buy only inside range" not in card
 
 
 def test_late_chase_watch_card_explains_pullback_needed():
@@ -209,15 +235,15 @@ def test_late_chase_watch_card_explains_pullback_needed():
     card = advisory._format_trade_card(signal)
 
     assert "WATCH ONLY" in card
-    assert "IS EXTENDED" in card
-    assert "Execution gate says this move is extended" in card
-    assert "Wait for a pullback" in card
+    assert "extended" in card
+    assert "setup is strong but extended" in card
+    assert "wait for pullback" in card
     assert "LIVE TRADE ALERT" not in card
     assert "do not chase >" not in card
-    assert "Tentative levels:" in card
-    assert "Pullback plan:" in card
-    assert "Native ref: $99.88-$100.12" in card
-    assert "EV: 0.70%" in card
+    assert "Tentative size:" in card
+    assert "Levels: stop" in card
+    assert "Native ref:" not in card
+    assert "EV:" not in card
 
 
 def test_pullback_confirmed_trade_card_closes_late_chase_loop():
@@ -247,8 +273,8 @@ def test_pullback_confirmed_trade_card_closes_late_chase_loop():
     card = advisory._format_trade_card(signal)
 
     assert "LIVE TRADE ALERT" in card
-    assert "Pullback confirmed" in card
-    assert "entry band is now valid" in card
+    assert "pullback confirmed" in card
+    assert "entry band is valid again" in card
 
 
 def test_mirror_trade_card_identifies_primary_us_symbol():
@@ -277,7 +303,7 @@ def test_mirror_trade_card_identifies_primary_us_symbol():
     card = advisory._format_trade_card(signal)
 
     assert "Pre-Nasdaq mirror of NVDA" in card
-    assert "EU-hours early read on US momentum" in card
+    assert "early EU read" in card
 
 
 def test_discord_alert_requires_a_grade_or_better():
@@ -973,7 +999,7 @@ def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatc
     assert saved[0]["status"] == "shadow_logged"
     assert len(sent) == 1
     assert "SHADOW OBSERVATION" in sent[0]
-    assert "DO NOT TRADE YET" in sent[0]
+    assert "do not trade from shadow mode" in sent[0]
 
 
 def test_eu_mirror_is_skipped_outside_mirror_window(monkeypatch):
@@ -1382,3 +1408,130 @@ def test_eu_catalyst_score_uses_clean_symbol_and_broker_name(monkeypatch):
 
     assert score == pytest.approx(0.42)
     assert "ASML" in calls
+
+
+def test_intraday_grade_cap_downgrades_opposing_orb_and_vwap():
+    signals = {
+        "orb": {"score": -0.81},
+        "vwap_deviation": {"score": -0.73},
+    }
+
+    grade, detail = advisory._intraday_grade_cap("A", "BUY", signals, "us_open")
+
+    assert grade == "B"
+    assert detail["reason"] == "orb_vwap_intraday_grade_cap"
+    assert detail["original_grade"] == "A"
+
+
+def test_premium_setup_flag_tracks_double_max_alignment():
+    signals = {
+        "macd_crossover": {"score": 0.95},
+        "relative_strength": {"score": 0.91},
+    }
+
+    result = advisory._premium_setup_flag("BUY", signals)
+
+    assert result["premium_setup"] is True
+    assert result["macd_score"] == pytest.approx(0.95)
+
+
+def test_exit_monitor_sends_t1_recommendation_without_closing(monkeypatch):
+    sent = []
+    updates = []
+    position = {
+        "id": 42,
+        "data_symbol": "AMD",
+        "side": "BUY",
+        "grade": "A",
+        "currency": "USD",
+        "fx_rate": 1.08,
+        "manual_entry_price": 100.0,
+        "stop_price": 98.0,
+        "target_1": 104.0,
+        "target_2": 108.0,
+        "suggested_size_eur": 750.0,
+        "exit_monitor_json": {"size_eur": 750.0, "alerts": []},
+    }
+
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda max_age_days=7: [position])
+    monkeypatch.setattr(advisory, "_latest_native_price", lambda symbol: 104.5)
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: updates.append((signal_id, update)) or update)
+
+    emitted = advisory._monitor_open_positions(
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 5, 15, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted == [{"symbol": "AMD", "alert_type": "t1"}]
+    assert "T1 HIT" in sent[0]
+    assert updates[0][0] == 42
+    assert updates[0][1]["t1_alerted"] is True
+    assert "status" not in updates[0][1]
+
+
+def test_exit_monitor_marks_t1_when_t2_fires(monkeypatch):
+    sent = []
+    updates = []
+    position = {
+        "id": 42,
+        "data_symbol": "AMD",
+        "side": "BUY",
+        "grade": "A",
+        "currency": "USD",
+        "fx_rate": 1.08,
+        "manual_entry_price": 100.0,
+        "stop_price": 98.0,
+        "target_1": 104.0,
+        "target_2": 108.0,
+        "suggested_size_eur": 750.0,
+        "exit_monitor_json": {"size_eur": 750.0, "alerts": []},
+    }
+
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda max_age_days=7: [position])
+    monkeypatch.setattr(advisory, "_latest_native_price", lambda symbol: 109.0)
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: updates.append(update) or update)
+
+    emitted = advisory._monitor_open_positions(
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 5, 15, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted == [{"symbol": "AMD", "alert_type": "t2"}]
+    assert "T2 HIT" in sent[0]
+    assert updates[0]["exit_monitor_json"]["alerts"] == ["t1", "t2"]
+
+
+def test_exit_monitor_throttles_checked_heartbeat(monkeypatch):
+    updates = []
+    position = {
+        "id": 42,
+        "data_symbol": "AMD",
+        "side": "BUY",
+        "grade": "A",
+        "currency": "USD",
+        "fx_rate": 1.08,
+        "manual_entry_price": 100.0,
+        "stop_price": 90.0,
+        "target_1": 110.0,
+        "target_2": 120.0,
+        "suggested_size_eur": 750.0,
+        "exit_monitor_json": {
+            "size_eur": 750.0,
+            "alerts": ["checked"],
+            "last_checked_at": "2026-05-15T15:55:00+00:00",
+        },
+    }
+
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda max_age_days=7: [position])
+    monkeypatch.setattr(advisory, "_latest_native_price", lambda symbol: 101.0)
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: updates.append(update) or update)
+
+    emitted = advisory._monitor_open_positions(
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 5, 15, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted == []
+    assert updates == []

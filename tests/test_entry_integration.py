@@ -80,6 +80,106 @@ def test_context_quality_blocks_opening_noise():
     assert decision["reason"] == "session_window_opening_noise_blocked"
 
 
+def test_horizon_order_blocks_shadow_only_before_price_fetch(monkeypatch):
+    """Swing/dip horizon orders must not bypass the live data-quality floor."""
+    import backend.execution.orders as orders
+
+    monkeypatch.setattr(
+        orders,
+        "_current_daily_price",
+        lambda ticker: pytest.fail("price fetch should not run after a shadow-only context block"),
+    )
+    logged = []
+    monkeypatch.setattr(orders, "log_event", lambda level, event, data=None: logged.append((event, data or {})))
+
+    result = orders._submit_horizon_order(
+        ticker="AMD",
+        side="BUY",
+        conviction=0.70,
+        profile={"stop_loss_pct": 2.0, "take_profit_pct": 3.0},
+        portfolio_state={"equity": 5000.0},
+        regime="ranging",
+        horizon="swing",
+        stop_loss_pct=2.0,
+        hold_days=3,
+        composite_score=0.198,
+        signals_json={"swing_score": {"score": 0.198, "meta": {"rsi": 73}}},
+        atr_data={},
+        sizing_json={"size_eur": 750.0},
+    )
+
+    assert result["error"] == "data_quality_shadow_only"
+    assert result["setup_context"]["data_quality_state"] == "shadow_only"
+    assert logged[-1][0] == "horizon_context_quality_entry_block"
+
+
+def test_horizon_context_quality_blocks_opening_noise():
+    """Executable data is still blocked in the first noisy regular-session minutes."""
+    import backend.execution.orders as orders
+
+    decision = orders._horizon_context_quality_decision(
+        {"data_quality_state": "executable", "session_window": "opening_noise"},
+        {},
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "session_window_opening_noise_blocked"
+
+
+def test_advisory_do_not_chase_blocks_buy_above_latest_limit():
+    """Automated entries should respect a recent advisory's do-not-chase ceiling."""
+    import backend.execution.orders as orders
+
+    block = orders._advisory_do_not_chase_block(
+        "AMD",
+        "BUY",
+        504.88,
+        {},
+        recent_advisories=[
+            {
+                "id": 567,
+                "symbol": "AMD",
+                "data_symbol": "AMD",
+                "side": "BUY",
+                "grade": "A",
+                "do_not_chase_price": 497.96,
+                "signal_json": {"alert_stage": "watch"},
+            }
+        ],
+    )
+
+    assert block["reason"] == "advisory_do_not_chase"
+    assert block["advisory_signal_id"] == 567
+    assert block["current_price"] == pytest.approx(504.88)
+    assert block["do_not_chase_price"] == pytest.approx(497.96)
+
+
+def test_advisory_do_not_chase_ignores_expired_signal():
+    """Yesterday or expired morning advisories must not block valid later entries."""
+    import backend.execution.orders as orders
+
+    block = orders._advisory_do_not_chase_block(
+        "AMD",
+        "BUY",
+        504.88,
+        {},
+        recent_advisories=[
+            {
+                "id": 567,
+                "symbol": "AMD",
+                "data_symbol": "AMD",
+                "side": "BUY",
+                "grade": "A",
+                "valid_until": "2000-01-01T10:35:00Z",
+                "do_not_chase_price": 497.96,
+                "signal_json": {"alert_stage": "watch"},
+            }
+        ],
+    )
+
+    assert block is None
+
+
 def test_llm_block_records_reference_price_for_replay():
     """LLM vetoes should be replayable against the price known at signal time."""
     import backend.execution.entry as entry

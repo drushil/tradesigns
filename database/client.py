@@ -571,6 +571,127 @@ def get_recent_advisory_signals(days: int = 1, mode: str = None,
         return []
 
 
+def get_advisory_signal_by_id(signal_id: int) -> dict:
+    """Fetch one advisory signal row by id."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .eq("id", signal_id)
+                  .limit(1)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_SIGNAL_BY_ID_FAILED] {str(e)[:200]}")
+        return {}
+
+
+def _advisory_eur_to_native(row: dict, price_eur: float) -> float:
+    currency = str(row.get("currency") or "EUR").upper()
+    fx_rate = float(row.get("fx_rate") or 1.0)
+    if currency == "USD":
+        return float(price_eur) * fx_rate
+    return float(price_eur)
+
+
+def _advisory_native_to_eur(row: dict, price_native: float) -> float:
+    currency = str(row.get("currency") or "EUR").upper()
+    fx_rate = float(row.get("fx_rate") or 1.0)
+    if currency == "USD":
+        return float(price_native) / max(fx_rate, 0.0001)
+    return float(price_native)
+
+
+def mark_advisory_taken(signal_id: int, entry_price_eur: float = None,
+                        size_eur: float = None, notes: str = None,
+                        entry_price_native: float = None) -> dict:
+    """
+    Mark a manual advisory as entered.
+
+    `manual_entry_price` stays in the row's native price currency for replay
+    compatibility. EUR details are stored in exit_monitor_json for display.
+    """
+    try:
+        row = get_advisory_signal_by_id(signal_id)
+        if not row:
+            return {"error": "advisory_signal_not_found"}
+        if entry_price_native is None:
+            if entry_price_eur is None:
+                entry_min = _advisory_native_to_eur(row, float(row.get("entry_min") or 0))
+                entry_max = _advisory_native_to_eur(row, float(row.get("entry_max") or 0))
+                entry_price_eur = (entry_min + entry_max) / 2.0 if entry_min and entry_max else entry_min or entry_max
+            entry_price_native = _advisory_eur_to_native(row, float(entry_price_eur or 0))
+        else:
+            entry_price_eur = _advisory_native_to_eur(row, float(entry_price_native))
+
+        monitor = row.get("exit_monitor_json") or {}
+        if not isinstance(monitor, dict):
+            monitor = {}
+        monitor.update({
+            "manual_entry_price_eur": round(float(entry_price_eur or 0), 4),
+            "size_eur": round(float(size_eur or row.get("suggested_size_eur") or 0), 2),
+            "entered_at": datetime.utcnow().isoformat() + "Z",
+            "alerts": monitor.get("alerts") or [],
+        })
+        if notes:
+            monitor["notes"] = notes
+
+        record = {
+            "entry_triggered": True,
+            "manual_entry_price": round(float(entry_price_native or 0), 4),
+            "status": "entered",
+            "exit_monitor_json": _json_safe(monitor),
+        }
+        db = get_client(write=True)
+        result = (db.table("advisory_signals")
+                  .update(record)
+                  .eq("id", signal_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_MARK_TAKEN_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_open_advisory_positions(max_age_days: int = 7, limit: int = 50) -> list:
+    """Return manually-entered advisory rows that are still open."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .eq("entry_triggered", True)
+                  .eq("status", "entered")
+                  .in_("grade", ["A+", "A", "B"])
+                  .gte("created_at", cutoff)
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_OPEN_POSITIONS_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_advisory_exit_status(signal_id: int, updates: dict) -> dict:
+    """Generic advisory lifecycle update helper, filtering out None values."""
+    try:
+        record = {key: value for key, value in (updates or {}).items() if value is not None}
+        if "exit_monitor_json" in record:
+            record["exit_monitor_json"] = _json_safe(record["exit_monitor_json"] or {})
+        if not record:
+            return {}
+        db = get_client(write=True)
+        result = (db.table("advisory_signals")
+                  .update(record)
+                  .eq("id", signal_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_EXIT_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 def get_unscored_advisory_signals(min_age_minutes: int = 5, limit: int = 25,
                                   max_age_days: int = 4) -> list:
     """Fetch advisory rows eligible for forward-return replay."""

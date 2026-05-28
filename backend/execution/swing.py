@@ -516,7 +516,7 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
             fallback=profile.get("stop_loss_pct", 2.0) * 2,
         )
         conviction = max(0.65, min(0.90, abs(score)))
-        _submit_horizon_order(
+        order = _submit_horizon_order(
             ticker=ticker,
             side=action,
             conviction=conviction,
@@ -536,3 +536,11 @@ def run_swing_cycle(portfolio_state: dict = None, profile: dict = None,
             atr_data=atr_data,
             order_ref=_make_order_ref("swing", ticker, action, date.today().isoformat()),
         )
+        if isinstance(order, dict) and order.get("error"):
+            log_event("INFO", "swing_entry_blocked", {
+                "ticker": ticker,
+                "action": action,
+                "score": round(score, 4),
+                "reason": order.get("error"),
+                "block_detail": order.get("block_detail"),
+            })
