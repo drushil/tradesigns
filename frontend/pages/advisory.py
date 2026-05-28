@@ -112,7 +112,11 @@ def _select_index(options: list[str], preferred: str, fallback: str = None) -> i
 
 
 def render():
-    from database.client import get_recent_advisory_signals, get_advisory_scoreboard
+    from database.client import get_recent_advisory_signals
+    try:
+        from database.client import get_advisory_scoreboard as _get_advisory_scoreboard
+    except (ImportError, AttributeError):
+        _get_advisory_scoreboard = None
     from backend import advisory
 
     cfg = advisory.load_config()
@@ -158,7 +162,8 @@ def render():
     st.divider()
 
     # ── Replay Scoreboard ──────────────────────────────────────────────────
-    _render_scoreboard(get_advisory_scoreboard)
+    if _get_advisory_scoreboard is not None:
+        _render_scoreboard(_get_advisory_scoreboard)
 
     st.divider()
 

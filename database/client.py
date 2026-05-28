@@ -6,7 +6,7 @@ Reads credentials from os.environ (which app.py populates from st.secrets).
 import os
 from datetime import date, datetime, timedelta
 from typing import Optional
-from supabase import create_client, Client
+from supabase import create_client
 
 
 def _get_env(key: str) -> Optional[str]:
@@ -35,7 +35,7 @@ def _json_safe(value):
     return value
 
 
-def get_client(write: bool = False) -> Client:
+def get_client(write: bool = False):
     """
     write=False → anon key  (dashboard reads — respects RLS)
     write=True  → service_role key (agent writes — bypasses RLS)
