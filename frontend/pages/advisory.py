@@ -76,6 +76,41 @@ def _format_time(ts) -> str:
         return str(ts) if ts else "—"
 
 
+def _symbol_catalog(advisory_mod, rows: list[dict] = None,
+                    market: str = None) -> tuple[list[str], dict[str, str]]:
+    labels: dict[str, str] = {}
+    for market_name, market_items in advisory_mod.ADVISORY_UNIVERSE.items():
+        if market and market_name != market:
+            continue
+        for item in market_items:
+            symbol = str(item.get("data_symbol") or "").upper()
+            if not symbol:
+                continue
+            name = item.get("broker_display_name") or symbol
+            labels[symbol] = f"{symbol} — {name}"
+
+    for row in rows or []:
+        symbol = str(row.get("data_symbol") or "").upper()
+        if not symbol:
+            continue
+        if market and str(row.get("market") or "").upper() != market:
+            continue
+        name = row.get("broker_display_name") or symbol
+        labels.setdefault(symbol, f"{symbol} — {name}")
+
+    return sorted(labels), labels
+
+
+def _select_index(options: list[str], preferred: str, fallback: str = None) -> int:
+    preferred = str(preferred or "").upper()
+    fallback = str(fallback or "").upper()
+    if preferred in options:
+        return options.index(preferred)
+    if fallback in options:
+        return options.index(fallback)
+    return 0
+
+
 def render():
     from database.client import get_recent_advisory_signals
     from backend import advisory
@@ -130,16 +165,26 @@ def render():
         "not affect daily alert caps."
     )
 
-    c_sym, c_market, c_side, c_btn = st.columns([2, 1, 1, 1])
-    with c_sym:
-        symbol = st.text_input(
-            "Symbol",
-            value=st.session_state.get("advisory_check_symbol", "AMZN"),
-            placeholder="e.g. AMZN, NVDA, SAP.DE",
-            key="advisory_check_symbol_input",
-        ).strip().upper()
+    c_market, c_sym, c_market_spacer, c_side, c_btn = st.columns([1, 2, 1, 1, 1])
     with c_market:
         market = st.selectbox("Market", ["US", "EU"], index=0, key="advisory_check_market")
+    symbol_options, symbol_labels = _symbol_catalog(advisory, rows=rows, market=market)
+    with c_sym:
+        symbol = st.selectbox(
+            "Symbol",
+            symbol_options,
+            index=_select_index(
+                symbol_options,
+                st.session_state.get("advisory_check_symbol", "AMZN"),
+                "AMZN" if market == "US" else "SAP.DE",
+            ),
+            format_func=lambda s: symbol_labels.get(s, s),
+            key=f"advisory_check_symbol_select_{market}",
+        )
+    with c_market_spacer:
+        st.caption("Ticker universe")
+        selected_item = _find_universe_item(advisory, symbol) or {}
+        st.write(selected_item.get("exchange") or market)
     with c_side:
         side_choice = st.selectbox("Side", ["auto", "BUY", "SELL"], index=0, key="advisory_check_side")
     with c_btn:
@@ -172,7 +217,14 @@ def render():
         mode_filter = st.radio("Mode", mode_options, index=0, horizontal=True,
                                key="advisory_mode_filter")
     with c_symbol:
-        symbol_filter = st.text_input("Filter symbol", value="", key="advisory_symbol_filter").strip().upper()
+        feed_symbols, feed_labels = _symbol_catalog(advisory, rows=rows)
+        symbol_filter = st.selectbox(
+            "Symbol",
+            ["__all__"] + feed_symbols,
+            index=0,
+            format_func=lambda s: "All symbols" if s == "__all__" else feed_labels.get(s, s),
+            key="advisory_symbol_filter",
+        )
 
     filtered = []
     for r in rows:
@@ -180,7 +232,7 @@ def render():
             continue
         if mode_filter != "all" and str(r.get("mode")) != mode_filter:
             continue
-        if symbol_filter and symbol_filter not in str(r.get("data_symbol", "")).upper():
+        if symbol_filter != "__all__" and symbol_filter != str(r.get("data_symbol", "")).upper():
             continue
         filtered.append(r)
 
@@ -192,6 +244,7 @@ def render():
         {
             "time": _format_time(r.get("created_at")),
             "symbol": r.get("data_symbol"),
+            "name": r.get("broker_display_name"),
             "stage": STAGE_LABEL.get(_stage_of(r), _stage_of(r)),
             "side": r.get("side"),
             "grade": r.get("grade"),
