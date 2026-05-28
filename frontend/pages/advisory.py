@@ -112,7 +112,7 @@ def _select_index(options: list[str], preferred: str, fallback: str = None) -> i
 
 
 def render():
-    from database.client import get_recent_advisory_signals
+    from database.client import get_recent_advisory_signals, get_advisory_scoreboard
     from backend import advisory
 
     cfg = advisory.load_config()
@@ -158,7 +158,7 @@ def render():
     st.divider()
 
     # ── Replay Scoreboard ──────────────────────────────────────────────────
-    _render_scoreboard()
+    _render_scoreboard(get_advisory_scoreboard)
 
     st.divider()
 
@@ -324,7 +324,7 @@ def _fmt_win(rate_pct) -> str:
     return f"🔴 {r:.0f}%"
 
 
-def _render_scoreboard():
+def _render_scoreboard(fetch_fn):
     """Grade × Stage forward-return scoreboard section."""
     try:
         import plotly.express as px
@@ -356,8 +356,7 @@ def _render_scoreboard():
             horizontal=True, key="sb_market",
         )
 
-    from database.client import get_advisory_scoreboard
-    sb_rows = get_advisory_scoreboard(
+    sb_rows = fetch_fn(
         days_back=days_back,
         mode=None if sb_mode == "all" else sb_mode,
         market=None if sb_market == "all" else sb_market,
