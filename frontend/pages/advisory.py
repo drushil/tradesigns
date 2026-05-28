@@ -157,6 +157,11 @@ def render():
 
     st.divider()
 
+    # ── Replay Scoreboard ──────────────────────────────────────────────────
+    _render_scoreboard()
+
+    st.divider()
+
     # ── On-demand ticker scan ───────────────────────────────────────────────
     st.subheader("🔍 Check a ticker on demand")
     st.caption(
@@ -289,6 +294,218 @@ def render():
             non_empty = {k: v for k, v in extras.items() if v not in (None, {}, "", False)}
             if non_empty:
                 st.json(non_empty)
+
+
+# ── Replay Scoreboard ───────────────────────────────────────────────────────
+
+def _fmt_ret(val) -> str:
+    """Format a forward-return value as a coloured +/-% string with emoji."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "—"
+    if v >= 0.5:
+        return f"🟢 {v:+.2f}%"
+    if v >= 0.1:
+        return f"🟡 {v:+.2f}%"
+    if v >= -0.1:
+        return f"⬜ {v:+.2f}%"
+    return f"🔴 {v:+.2f}%"
+
+
+def _fmt_win(rate_pct) -> str:
+    if pd.isna(rate_pct):
+        return "—"
+    r = float(rate_pct)
+    if r >= 60:
+        return f"🟢 {r:.0f}%"
+    if r >= 45:
+        return f"🟡 {r:.0f}%"
+    return f"🔴 {r:.0f}%"
+
+
+def _render_scoreboard():
+    """Grade × Stage forward-return scoreboard section."""
+    try:
+        import plotly.express as px
+    except ImportError:
+        px = None
+
+    st.subheader("📊 Replay Scoreboard")
+    st.caption(
+        "Forward-return performance of advisory alerts, scored automatically "
+        "5 / 15 / 30 / 60 min after each alert fires. "
+        "Green = profitable on average at that horizon."
+    )
+
+    c_days, c_mode, c_market, _ = st.columns([2, 2, 2, 4])
+    with c_days:
+        days_back = st.radio(
+            "Window", [7, 14, 30, 90], index=1,
+            horizontal=True, key="sb_days_back",
+            format_func=lambda x: f"{x}d",
+        )
+    with c_mode:
+        sb_mode = st.radio(
+            "Mode", ["all", "live", "shadow"], index=0,
+            horizontal=True, key="sb_mode",
+        )
+    with c_market:
+        sb_market = st.radio(
+            "Market", ["all", "US", "EU"], index=0,
+            horizontal=True, key="sb_market",
+        )
+
+    from database.client import get_advisory_scoreboard
+    sb_rows = get_advisory_scoreboard(
+        days_back=days_back,
+        mode=None if sb_mode == "all" else sb_mode,
+        market=None if sb_market == "all" else sb_market,
+    )
+
+    if not sb_rows:
+        st.info(
+            "No scored alerts yet — forward returns are computed automatically "
+            "during each agent cycle (min_age=5 min, max_age=4 days)."
+        )
+        return
+
+    df = pd.DataFrame(sb_rows)
+    for col in ["forward_return_5m", "forward_return_15m",
+                "forward_return_30m", "forward_return_60m",
+                "max_favorable_pct", "max_adverse_pct",
+                "composite_score", "breakout_quality"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    total_scored = len(df)
+    r15_all = df["forward_return_15m"].dropna()
+    win_rate_15m = float((r15_all > 0).mean() * 100) if len(r15_all) else float("nan")
+    avg_15m = float(r15_all.mean()) if len(r15_all) else float("nan")
+    best_grade = (
+        df.loc[df["forward_return_15m"] == df["forward_return_15m"].max(), "grade"].iloc[0]
+        if "grade" in df.columns and not df["forward_return_15m"].isna().all()
+        else "—"
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    metric_card(c1, "Scored alerts", total_scored, tone="info")
+    metric_card(
+        c2, "Win rate 15m",
+        f"{win_rate_15m:.0f}%" if not pd.isna(win_rate_15m) else "—",
+        tone="positive" if win_rate_15m >= 55 else (
+            "warning" if win_rate_15m >= 45 else "negative"
+        ) if not pd.isna(win_rate_15m) else "neutral",
+    )
+    metric_card(
+        c3, "Avg return 15m",
+        f"{avg_15m:+.2f}%" if not pd.isna(avg_15m) else "—",
+        tone="positive" if (not pd.isna(avg_15m) and avg_15m > 0.1) else (
+            "warning" if (not pd.isna(avg_15m) and avg_15m > -0.1) else "negative"
+        ),
+    )
+    metric_card(c4, "Coverage", f"{days_back}d", tone="neutral")
+
+    # ── Grade × Stage breakdown ──────────────────────────────────────────
+    st.markdown("**Grade × Stage breakdown**")
+
+    if "alert_stage" not in df.columns:
+        df["alert_stage"] = "trade"
+    if "grade" not in df.columns:
+        df["grade"] = "—"
+
+    grade_order = {"A+": 0, "A": 1, "B": 2, "C": 3}
+    agg_rows = []
+    for (grade, stage), grp in df.groupby(["grade", "alert_stage"], dropna=False):
+        r5  = grp["forward_return_5m"].dropna()
+        r15 = grp["forward_return_15m"].dropna()
+        r30 = grp["forward_return_30m"].dropna()
+        r60 = grp["forward_return_60m"].dropna()
+        mfe = grp["max_favorable_pct"].dropna() if "max_favorable_pct" in grp.columns else pd.Series(dtype=float)
+        mae = grp["max_adverse_pct"].dropna() if "max_adverse_pct" in grp.columns else pd.Series(dtype=float)
+        win15 = float((r15 > 0).mean() * 100) if len(r15) >= 3 else float("nan")
+        mfe_mae_str = (
+            f"{mfe.mean():.1f}× / {mae.mean():.1f}×"
+            if len(mfe) >= 2 and len(mae) >= 2
+            else "—"
+        )
+        agg_rows.append({
+            "grade": str(grade) if grade is not None else "—",
+            "stage": STAGE_LABEL.get(str(stage), str(stage)),
+            "n": len(grp),
+            "avg 5m": _fmt_ret(r5.mean() if len(r5) else None),
+            "avg 15m": _fmt_ret(r15.mean() if len(r15) else None),
+            "avg 30m": _fmt_ret(r30.mean() if len(r30) else None),
+            "avg 60m": _fmt_ret(r60.mean() if len(r60) else None),
+            "win % 15m": _fmt_win(win15),
+            "MFE/MAE": mfe_mae_str,
+            "_sort": (grade_order.get(str(grade) if grade else "—", 99),
+                      str(stage) if stage else ""),
+        })
+
+    if agg_rows:
+        agg_df = (
+            pd.DataFrame(agg_rows)
+            .sort_values("_sort", key=lambda s: s.map(str))
+            .drop(columns=["_sort"])
+            .reset_index(drop=True)
+        )
+        st.dataframe(agg_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("Not enough data to build the breakdown table yet.")
+
+    # ── Daily trend chart ─────────────────────────────────────────────────
+    if (px is not None
+            and "created_at" in df.columns
+            and not df["forward_return_15m"].isna().all()):
+        df["_date"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce").dt.date
+        daily = (
+            df.groupby("_date")["forward_return_15m"]
+            .agg(avg_15m="mean", alerts="count")
+            .reset_index()
+            .rename(columns={"_date": "date"})
+        )
+        if len(daily) >= 2:
+            st.markdown("**Daily average 15m return**")
+            fig = px.bar(
+                daily, x="date", y="avg_15m",
+                color="avg_15m",
+                color_continuous_scale=["#ef4444", "#6b7280", "#22c55e"],
+                color_continuous_midpoint=0,
+                labels={"avg_15m": "Avg 15m return (%)", "date": ""},
+                template="plotly_dark",
+                height=220,
+                hover_data={"alerts": True, "avg_15m": ":.2f"},
+            )
+            fig.update_layout(
+                showlegend=False,
+                coloraxis_showscale=False,
+                margin=dict(t=16, b=28, l=0, r=0),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # ── Ticker breakdown ──────────────────────────────────────────────────
+    if "data_symbol" in df.columns:
+        with st.expander("Ticker breakdown", expanded=False):
+            sym_agg = (
+                df.groupby("data_symbol")["forward_return_15m"]
+                .agg(n="count", avg_15m="mean",
+                     win_pct=lambda x: float((x.dropna() > 0).mean() * 100) if x.dropna().any() else float("nan"))
+                .reset_index()
+                .sort_values("avg_15m", ascending=False)
+            )
+            sym_agg["avg_15m"] = sym_agg["avg_15m"].apply(
+                lambda v: _fmt_ret(v) if not pd.isna(v) else "—"
+            )
+            sym_agg["win_pct"] = sym_agg["win_pct"].apply(
+                lambda v: _fmt_win(v) if not pd.isna(v) else "—"
+            )
+            sym_agg = sym_agg.rename(columns={
+                "data_symbol": "symbol",
+                "avg_15m": "avg 15m return",
+                "win_pct": "win %",
+            })
+            st.dataframe(sym_agg, hide_index=True, use_container_width=True)
 
 
 # ── On-demand preview ───────────────────────────────────────────────────────

@@ -619,6 +619,52 @@ def update_advisory_signal_replay(signal_id: int, replay: dict) -> dict:
         return {"error": str(e)}
 
 
+def get_advisory_scoreboard(
+    days_back: int = 30,
+    mode: str = None,
+    market: str = None,
+    limit: int = 500,
+) -> list:
+    """
+    Fetch scored advisory signals for the replay scoreboard dashboard.
+
+    Only returns rows that have been forward-scored (forward_scored_at IS NOT NULL).
+    Columns returned: id, created_at, data_symbol, market, mode, grade, alert_stage,
+    side, composite_score, breakout_quality, forward_return_5m/15m/30m/60m,
+    forward_scored_at, max_favorable_pct, max_adverse_pct.
+
+    Args:
+        days_back: How many calendar days back to include.
+        mode: Optional 'live' or 'shadow' filter (None = all).
+        market: Optional 'US' or 'EU' filter (None = all).
+        limit: Row cap (default 500 — more than enough for aggregation).
+    """
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat() + "Z"
+        db = get_client()
+        q = (db.table("advisory_signals")
+             .select(
+                 "id,created_at,data_symbol,market,mode,grade,alert_stage,"
+                 "side,composite_score,breakout_quality,"
+                 "forward_return_5m,forward_return_15m,"
+                 "forward_return_30m,forward_return_60m,"
+                 "forward_scored_at,max_favorable_pct,max_adverse_pct"
+             )
+             .not_.is_("forward_scored_at", "null")
+             .gte("created_at", cutoff)
+             .order("created_at", desc=True)
+             .limit(limit))
+        if mode and mode.lower() != "all":
+            q = q.eq("mode", mode.lower())
+        if market and market.upper() not in ("ALL", ""):
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_SCOREBOARD_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 # ── FX rate cache ─────────────────────────────────────────────────────────────
 
 def get_fx_rate_cache(pair: str = "EURUSD", rate_date: str = None,
