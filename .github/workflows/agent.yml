@@ -14,13 +14,15 @@ on:
     - cron: '25 21 * * 1-5'
     # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
     - cron: '35 13,14 * * 1-5'
-    # Manual advisory scan windows — EU open and US high-probability windows
-    - cron: '*/15 7-9 * * 1-5'
+    # Manual advisory scan windows — EU open (7-9 UTC = 9-11 CEST)
+    - cron: '*/5 7-9 * * 1-5'
     # Full US market hours (14:00–20:00 UTC). Previously 13-15,18-19 left a
     # 16:00–17:59 UTC gap (noon–2pm ET) that was only covered by cron-job.org.
     # Extended to 13-19 so GitHub Actions covers the full session.
-    # cron-job.org set to 15 min as backup only — GitHub cron is primary at 5 min.
-    - cron: '*/5 13-19 * * 1-5'
+    # 4-min interval: safe floor given P90 cycle time of ~190s (cancel-in-progress
+    # would kill a run at 3 min before it finishes ~10% of the time).
+    # cron-job.org set to 4 min as primary trigger via workflow_dispatch.
+    - cron: '*/4 13-19 * * 1-5'
   # Market-hours cycles triggered by cron-job.org via workflow_dispatch
   # (more reliable than GitHub's schedule — honours triggers within seconds)
   workflow_dispatch:
