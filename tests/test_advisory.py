@@ -455,11 +455,16 @@ def test_daily_fx_rate_uses_same_day_cache_without_fetch(monkeypatch):
 
 
 def test_daily_fx_rate_fetches_once_and_caches_on_miss(monkeypatch):
+    # Patch _fetch_latest_eurusd_rate directly rather than routing through
+    # _get_bars / _make_fx_bars.  The conftest mocks pd.Timestamp = MagicMock
+    # when real pandas is absent, which makes pd.Timestamp.now() explode inside
+    # _make_fx_bars.  This test is about _resolve_daily_fx_rate caching logic;
+    # the fetch internals are tested separately.
     writes = []
 
     monkeypatch.setattr(advisory, "_today_utc_date", lambda: "2026-05-27")
     monkeypatch.setattr(advisory, "get_fx_rate_cache", lambda *args, **kwargs: None)
-    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: _make_fx_bars(1.0945))
+    monkeypatch.setattr(advisory, "_fetch_latest_eurusd_rate", lambda: 1.0945)
     monkeypatch.setattr(advisory, "upsert_fx_rate_cache", lambda pair, rate, source, rate_date=None, meta=None: (
         writes.append((pair, rate, source, rate_date, meta)) or {"fetched_at": "2026-05-27T07:00:00+00:00"}
     ))
