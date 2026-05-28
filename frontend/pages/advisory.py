@@ -217,12 +217,16 @@ def render():
         return
 
     stage_options = ["all", "trade", "watch", "ignition"]
-    mode_options = ["all", "live", "shadow"]
+    mode_options  = ["all", "live", "shadow"]
+    grade_options = ["all", "A+", "A", "B", "C"]
 
-    c_stage, c_mode, c_symbol = st.columns([2, 2, 2])
+    c_stage, c_grade, c_mode, c_symbol = st.columns([2, 2, 2, 2])
     with c_stage:
         stage_filter = st.radio("Stage", stage_options, index=0, horizontal=True,
                                 key="advisory_stage_filter")
+    with c_grade:
+        grade_filter = st.radio("Grade", grade_options, index=0, horizontal=True,
+                                key="advisory_grade_filter")
     with c_mode:
         mode_filter = st.radio("Mode", mode_options, index=0, horizontal=True,
                                key="advisory_mode_filter")
@@ -239,6 +243,8 @@ def render():
     filtered = []
     for r in rows:
         if stage_filter != "all" and _stage_of(r) != stage_filter:
+            continue
+        if grade_filter != "all" and str(r.get("grade") or "").upper() != grade_filter:
             continue
         if mode_filter != "all" and str(r.get("mode")) != mode_filter:
             continue
