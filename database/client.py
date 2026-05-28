@@ -570,6 +570,55 @@ def get_recent_advisory_signals(days: int = 1, mode: str = None,
         return []
 
 
+def get_unscored_advisory_signals(min_age_minutes: int = 5, limit: int = 25,
+                                  max_age_days: int = 4) -> list:
+    """Fetch advisory rows eligible for forward-return replay."""
+    try:
+        now = datetime.utcnow()
+        recent_cutoff = (now - timedelta(minutes=min_age_minutes)).isoformat() + "Z"
+        oldest_cutoff = (now - timedelta(days=max_age_days)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .is_("forward_scored_at", "null")
+                  .gte("created_at", oldest_cutoff)
+                  .lte("created_at", recent_cutoff)
+                  .order("created_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_REPLAY_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_advisory_signal_replay(signal_id: int, replay: dict) -> dict:
+    """Persist incremental forward-return replay stats for an advisory signal."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "replay_checked_at": datetime.utcnow().isoformat() + "Z",
+            "forward_return_5m": replay.get("forward_return_5m"),
+            "forward_return_15m": replay.get("forward_return_15m"),
+            "forward_return_30m": replay.get("forward_return_30m"),
+            "forward_return_60m": replay.get("forward_return_60m"),
+            "forward_scored_at": replay.get("forward_scored_at"),
+            "max_favorable_pct": replay.get("max_favorable_pct"),
+            "max_adverse_pct": replay.get("max_adverse_pct"),
+            "close_after_pct": replay.get("close_after_pct"),
+            "advisory_replay_json": _json_safe(replay.get("advisory_replay_json") or {}),
+        }
+        record = {key: value for key, value in record.items() if value is not None}
+        result = (db.table("advisory_signals")
+                  .update(record)
+                  .eq("id", signal_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_REPLAY_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 # ── FX rate cache ─────────────────────────────────────────────────────────────
 
 def get_fx_rate_cache(pair: str = "EURUSD", rate_date: str = None,

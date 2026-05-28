@@ -20,7 +20,11 @@ from database.client import log_event
 from backend.runtime.env import _env_bool, _env_float
 from backend.broker.alpaca import get_account, get_positions
 from backend.sweep.agent import compute_sweep_plan, execute_sweep
-from backend.analytics.replay import _replay_blocked_opportunities, _replay_closed_trade_exits
+from backend.analytics.replay import (
+    _replay_advisory_signals,
+    _replay_blocked_opportunities,
+    _replay_closed_trade_exits,
+)
 from backend.learning.engine import generate_weekly_insights
 
 
@@ -83,6 +87,7 @@ def run_post_market_analytics():
     """
     try:
         log_event("INFO", "post_market_analytics_start", {})
+        _replay_advisory_signals()
         _replay_blocked_opportunities()
         _replay_closed_trade_exits()
         log_event("INFO", "post_market_analytics_complete", {})

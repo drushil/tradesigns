@@ -101,6 +101,7 @@ from backend.execution.common    import (_trading_capital, _deterministic_action
                                           _directional_score, _parse_dt, _trade_pnl_pct)
 from backend.analytics.replay    import (_parse_supabase_time, _replay_price_window,
                                           _replay_one_blocked_opportunity,
+                                          _replay_advisory_signals,
                                           _replay_blocked_opportunities,
                                           _closed_trade_replay_exit_reasons,
                                           _replay_one_closed_trade_exit,
@@ -371,6 +372,10 @@ def run_signal_cycle():
     weights          = _learning_engine.get_weights(regime)
     recent_trades    = get_recent_trades(days=30)
     _hydrate_open_trades(portfolio_state.get("positions", []))
+    try:
+        _replay_advisory_signals()
+    except Exception as e:
+        log_event("WARN", "advisory_replay_cycle_failed", {"error": str(e)[:160]})
 
     # Staleness guard: if this cycle started too late (queued behind a cancelled
     # run), skip signal computation and only run exit checks. Bracket orders
