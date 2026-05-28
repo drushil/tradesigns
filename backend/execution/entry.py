@@ -24,7 +24,7 @@ from typing import Optional
 
 import backend.runtime.state as state
 from backend.runtime.env import (
-    _env_float, _env_value, _eurusd_rate, _eur_to_usd,
+    _env_bool, _env_float, _env_value, _eurusd_rate, _eur_to_usd,
 )
 from backend.execution.common import (
     _trading_capital, _deterministic_action, _cap_short_notional,
@@ -52,9 +52,12 @@ from backend.market.timing import (
     _is_new_intraday_entry_too_late, _leveraged_etf_max_hold_window,
 )
 from backend.broker.alpaca import pre_trade_gate, compute_position_size, submit_market_order
-from backend.learning.engine import compute_expected_value, llm_signal_decision
+from backend.learning.engine import (
+    GROQ_DECISION_MODEL, GROQ_SHADOW_DECISION_MODEL,
+    compute_expected_value, llm_signal_decision,
+)
 from backend.signals.engine import compute_all_signals
-from database.client import insert_signal, save_open_trade, log_event
+from database.client import insert_signal, save_open_trade, log_event, update_signal
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,47 @@ def _context_quality_decision(setup_context: dict, profile: dict) -> dict:
         "session_window": window,
         "data_quality_state": data_quality,
     }
+
+
+def _llm_trade_context(setup_grade: SetupGrade | None, setup_context: dict,
+                       ev_result: dict) -> dict:
+    return {
+        "grade": setup_grade.grade if setup_grade else None,
+        "breakout_quality": (setup_context or {}).get("breakout_quality"),
+        "ev_net_pct": (ev_result or {}).get("net_ev_pct"),
+    }
+
+
+def _compact_llm_result(result: dict, role: str) -> dict:
+    result = result or {}
+    return {
+        "role": role,
+        "model": result.get("model"),
+        "action": result.get("action"),
+        "conviction": result.get("conviction"),
+        "hold_minutes": result.get("hold_minutes"),
+        "stop_loss_pct": result.get("stop_loss_pct"),
+        "rationale": result.get("rationale"),
+        "shadow": bool(result.get("shadow")),
+    }
+
+
+def _shadow_llm_payload(primary_result: dict, shadow_result: dict = None,
+                        skipped_reason: str = None) -> dict:
+    payload = {"primary": _compact_llm_result(primary_result, "primary")}
+    if shadow_result is not None:
+        payload["shadow"] = _compact_llm_result(shadow_result, "shadow")
+        payload["disagreement"] = {
+            "action": payload["primary"].get("action") != payload["shadow"].get("action"),
+            "conviction_delta": round(
+                float(payload["shadow"].get("conviction") or 0)
+                - float(payload["primary"].get("conviction") or 0),
+                4,
+            ),
+        }
+    if skipped_reason:
+        payload["shadow_skipped"] = skipped_reason
+    return payload
 
 
 def _candidate_reference_price(signal_result: dict, atr_data: dict = None) -> Optional[float]:
@@ -507,6 +551,7 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
             return
 
     if llm_result is None:
+        trade_context = _llm_trade_context(setup_grade, setup_context, ev_result)
         llm_result = llm_signal_decision(
             ticker, composite, ticker_regime, news_headline, profile,
             signal_scores   = signals_snap,
@@ -515,13 +560,46 @@ def _execute_trade_candidate(candidate: dict, profile: dict, portfolio_state: di
                 "market_regime": getattr(ticker_regime_state, "market_regime", ""),
                 "vix":           portfolio_state.get("vix", ""),
             },
-            trade_context   = {
-                "grade":             setup_grade.grade if setup_grade else None,
-                "breakout_quality":  setup_context.get("breakout_quality"),
-                "ev_net_pct":        ev_result.get("net_ev_pct"),
-            },
+            trade_context   = trade_context,
         )
         _record_llm_call()
+        shadow_payload = None
+        shadow_enabled = _env_bool("LLM_SHADOW_DECISION_ENABLED", True)
+        shadow_model = _env_value("GROQ_SHADOW_DECISION_MODEL", GROQ_SHADOW_DECISION_MODEL)
+        primary_model = str(llm_result.get("model") or GROQ_DECISION_MODEL)
+        if shadow_enabled and shadow_model and shadow_model != primary_model:
+            if _can_call_llm():
+                shadow_result = llm_signal_decision(
+                    ticker, composite, ticker_regime, news_headline, profile,
+                    signal_scores   = signals_snap,
+                    atr_data        = atr_data,
+                    regime_context  = {
+                        "market_regime": getattr(ticker_regime_state, "market_regime", ""),
+                        "vix":           portfolio_state.get("vix", ""),
+                    },
+                    trade_context   = trade_context,
+                    model           = shadow_model,
+                    shadow          = True,
+                )
+                _record_llm_call()
+                shadow_payload = _shadow_llm_payload(llm_result, shadow_result)
+            else:
+                shadow_payload = _shadow_llm_payload(llm_result, skipped_reason="llm_limit_hit")
+        elif shadow_enabled:
+            shadow_payload = _shadow_llm_payload(llm_result, skipped_reason="same_model")
+        if shadow_payload:
+            setup_context["llm_shadow"] = shadow_payload
+            if candidate.get("signal_id"):
+                update_signal(candidate["signal_id"], {"llm_shadow_json": shadow_payload})
+            log_event("INFO", "llm_shadow_decision", {
+                "ticker": ticker,
+                "primary_model": shadow_payload.get("primary", {}).get("model"),
+                "shadow_model": shadow_payload.get("shadow", {}).get("model"),
+                "primary_action": shadow_payload.get("primary", {}).get("action"),
+                "shadow_action": shadow_payload.get("shadow", {}).get("action"),
+                "shadow_skipped": shadow_payload.get("shadow_skipped"),
+                "disagreement": shadow_payload.get("disagreement"),
+            })
     suggested_action = str(llm_result.get("action", "HOLD")).upper()
     action = _deterministic_action(composite)
     raw_llm_conviction = llm_result.get("conviction", 0)

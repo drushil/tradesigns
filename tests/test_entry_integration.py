@@ -166,7 +166,7 @@ def test_state_bridge_is_alias():
 # Test 2 — _execute_trade_candidate populates state._open_trades with evidence
 # ---------------------------------------------------------------------------
 
-def test_execute_trade_candidate_populates_open_trades():
+def test_execute_trade_candidate_populates_open_trades(monkeypatch):
     """
     _execute_trade_candidate must write side, entry_price, and all Codex
     evidence fields into state._open_trades[ticker].
@@ -175,6 +175,8 @@ def test_execute_trade_candidate_populates_open_trades():
     import backend.execution.entry as entry
 
     state._open_trades.clear()
+    monkeypatch.setenv("LLM_SHADOW_DECISION_ENABLED", "true")
+    monkeypatch.setenv("GROQ_SHADOW_DECISION_MODEL", "llama-3.1-8b-instant")
 
     # Minimal candidate dict that _execute_trade_candidate expects
     fake_regime_state = SimpleNamespace(
@@ -230,7 +232,7 @@ def test_execute_trade_candidate_populates_open_trades():
         "action_hint":   "BUY",
         "setup_grade":   None,
         "orb_score":     0.0,
-        "signal_id":     None,
+        "signal_id":     77,
     }
     profile = {
         "min_conviction":        0.30,
@@ -264,12 +266,22 @@ def test_execute_trade_candidate_populates_open_trades():
         "stop_multiplier": 1.0,
     }
     # Stub LLM result
-    llm_result = {
+    primary_llm_result = {
         "action":       "BUY",
         "conviction":   0.72,
         "hold_minutes": 30,
         "stop_loss_pct": 2.0,
         "rationale":    "strong momentum",
+        "model":        "llama-3.3-70b-versatile",
+    }
+    shadow_llm_result = {
+        "action":       "HOLD",
+        "conviction":   0.35,
+        "hold_minutes": 0,
+        "stop_loss_pct": 2.0,
+        "rationale":    "8b wants more confirmation",
+        "model":        "llama-3.1-8b-instant",
+        "shadow":       True,
     }
     # Stub order result
     order_result = {
@@ -292,9 +304,11 @@ def test_execute_trade_candidate_populates_open_trades():
     with patch("backend.agent._can_call_llm", return_value=True), \
          patch("backend.agent._record_llm_call"), \
          patch("backend.execution.entry.compute_position_size", return_value=sizing_result), \
-         patch("backend.execution.entry.llm_signal_decision", return_value=llm_result), \
+         patch("backend.execution.entry.llm_signal_decision",
+               side_effect=[primary_llm_result, shadow_llm_result]), \
          patch("backend.execution.entry.submit_market_order", return_value=order_result), \
          patch("backend.execution.entry.save_open_trade", return_value={}), \
+         patch("backend.execution.entry.update_signal", return_value={}) as update_signal, \
          patch("backend.execution.entry.log_event"), \
          patch("backend.execution.entry._apply_learned_hold_extension",
                return_value=(30, None)), \
@@ -318,6 +332,11 @@ def test_execute_trade_candidate_populates_open_trades():
     assert trade["sizing_json"]["context_quality_multiplier"] == pytest.approx(1.0)
     assert trade["sizing_json"]["context_quality_reason"] == \
         "session_window_morning_trend_multiplier"
+    assert trade["sizing_json"]["setup_context"]["llm_shadow"]["primary"]["action"] == "BUY"
+    assert trade["sizing_json"]["setup_context"]["llm_shadow"]["shadow"]["action"] == "HOLD"
+    update_signal.assert_called_once()
+    assert update_signal.call_args.args[0] == 77
+    assert update_signal.call_args.args[1]["llm_shadow_json"]["disagreement"]["action"] is True
 
     # Cleanup
     state._open_trades.clear()

@@ -30,6 +30,7 @@ MIN_WEIGHT           = 0.03
 # llama-3.3-70b-versatile: same free tier as 8b-instant, stronger reasoning,
 #   better conviction calibration, supports JSON mode → cleaner parse path.
 GROQ_DECISION_MODEL = os.getenv("GROQ_DECISION_MODEL", "llama-3.3-70b-versatile")
+GROQ_SHADOW_DECISION_MODEL = os.getenv("GROQ_SHADOW_DECISION_MODEL", "llama-3.1-8b-instant")
 
 _client = None
 
@@ -699,7 +700,9 @@ def llm_signal_decision(ticker: str, composite_score: float,
                          signal_scores: dict = None,
                          atr_data: dict = None,
                          regime_context: dict = None,
-                         trade_context: dict = None) -> dict:
+                         trade_context: dict = None,
+                         model: str = None,
+                         shadow: bool = False) -> dict:
     """
     Signal interpretation via Groq (GROQ_DECISION_MODEL, default llama-3.3-70b-versatile).
 
@@ -710,6 +713,8 @@ def llm_signal_decision(ticker: str, composite_score: float,
     Args:
         trade_context: optional dict with keys grade, breakout_quality, ev_net_pct —
                        supplied by the entry pipeline when available.
+        model: optional model override for shadow/A-B decisions.
+        shadow: marks this result as non-executing telemetry.
     """
     max_hold     = profile.get("max_hold_minutes", 60)
     stop_default = profile.get("stop_loss_pct", 2.0)
@@ -785,8 +790,9 @@ JSON schema (respond with ONLY this object):
 {{"action":"BUY|SELL|HOLD","conviction":0.0,"hold_minutes":0,"stop_loss_pct":0.0,"rationale":"one sentence"}}"""
 
     try:
+        selected_model = model or GROQ_DECISION_MODEL
         response = _get_client().chat.completions.create(
-            model=GROQ_DECISION_MODEL,
+            model=selected_model,
             max_tokens=150,
             temperature=0.2,
             response_format={"type": "json_object"},
@@ -803,7 +809,12 @@ JSON schema (respond with ONLY this object):
             ],
         )
         raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
+        result = json.loads(raw)
+        if isinstance(result, dict):
+            result.setdefault("model", selected_model)
+            result.setdefault("shadow", bool(shadow))
+        return result
     except Exception as e:
         return {"action": "HOLD", "conviction": 0.0,
-                "hold_minutes": 0, "rationale": f"llm_error: {str(e)[:50]}"}
+                "hold_minutes": 0, "rationale": f"llm_error: {str(e)[:50]}",
+                "model": model or GROQ_DECISION_MODEL, "shadow": bool(shadow)}

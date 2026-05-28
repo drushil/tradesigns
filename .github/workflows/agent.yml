@@ -113,6 +113,7 @@ jobs:
           ALPACA_BASE_URL:      https://paper-api.alpaca.markets
           GROQ_API_KEY:         "${{ secrets.GROQ_API_KEY }}"
           GROQ_DECISION_MODEL:  "${{ vars.GROQ_DECISION_MODEL }}"
+          GROQ_SHADOW_DECISION_MODEL: "${{ vars.GROQ_SHADOW_DECISION_MODEL }}"
           GROQ_DIGEST_MODEL:    "${{ vars.GROQ_DIGEST_MODEL }}"
           SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
           SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
@@ -126,6 +127,7 @@ jobs:
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           MAX_CAPITAL_DEPLOYED_EUR: "${{ vars.MAX_CAPITAL_DEPLOYED_EUR }}"
           LLM_CALLS_PER_HOUR_LIMIT: "${{ vars.LLM_CALLS_PER_HOUR_LIMIT }}"
+          LLM_SHADOW_DECISION_ENABLED: "${{ vars.LLM_SHADOW_DECISION_ENABLED }}"
           BROKER_ENV:           "${{ vars.BROKER_ENV }}"
           SWEEP_TICKER:         "${{ vars.SWEEP_TICKER }}"
           SWEEP_ENABLED:        "${{ vars.SWEEP_ENABLED }}"

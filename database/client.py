@@ -352,6 +352,7 @@ def insert_signal(signal: dict) -> dict:
             "yield_curve", "yield_curve_state",
             "action_hint", "exposure_direction", "strategy_family", "regime_debug_json",
             "setup_grade", "sector_confirmation", "orb_score", "percentile_rank",
+            "llm_shadow_json",
         }
         fallback = {k: v for k, v in signal.items() if k in base_columns}
         try:

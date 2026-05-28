@@ -718,7 +718,12 @@ alter table if exists signals
     add column if not exists setup_grade            text,
     add column if not exists sector_confirmation    numeric(4,3),
     add column if not exists orb_score              real,
-    add column if not exists percentile_rank        numeric(5,1);
+    add column if not exists percentile_rank        numeric(5,1),
+    add column if not exists llm_shadow_json        jsonb default '{}'::jsonb;
+
+create index if not exists idx_signals_llm_shadow
+    on signals (created_at desc)
+    where llm_shadow_json is not null and llm_shadow_json <> '{}'::jsonb;
 
 -- 4. trades — grade columns for post-trade analysis
 alter table if exists trades
