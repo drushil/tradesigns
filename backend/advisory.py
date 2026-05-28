@@ -33,46 +33,151 @@ from database.client import (
 
 
 ADVISORY_UNIVERSE = {
+    # Field guide:
+    #   category       — grouping for prioritisation and filtering
+    #   priority       — "high" | "medium" | "low"; high tickers are scanned first
+    #   trade_target   — False suppresses Discord trade cards (still computed for regime context)
+    #   benchmark_only — True means index/ETF used for market context only, never a trade alert
+    #   broker_tags    — platforms where this ticker can realistically be executed from Germany
+    #   liquidity_note — optional one-liner appended to the Discord card (thin markets etc.)
     "US": [
-        {"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "AMD", "broker_display_name": "AMD", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "AAPL", "broker_display_name": "Apple", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "MSFT", "broker_display_name": "Microsoft", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "META", "broker_display_name": "Meta Platforms", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "AMZN", "broker_display_name": "Amazon", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "TSLA", "broker_display_name": "Tesla", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "QQQ", "broker_display_name": "Invesco QQQ", "exchange": "NASDAQ", "currency": "USD"},
-        {"data_symbol": "SPY", "broker_display_name": "SPDR S&P 500 ETF", "exchange": "NYSE Arca", "currency": "USD"},
+        # --- Core momentum names (high priority, Trade Republic DE / Scalable DE) ---
+        {"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD",
+         "category": "semis", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "AMD", "broker_display_name": "AMD", "exchange": "NASDAQ", "currency": "USD",
+         "category": "semis", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "AAPL", "broker_display_name": "Apple", "exchange": "NASDAQ", "currency": "USD",
+         "category": "mega_tech", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "MSFT", "broker_display_name": "Microsoft", "exchange": "NASDAQ", "currency": "USD",
+         "category": "mega_tech", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "META", "broker_display_name": "Meta Platforms", "exchange": "NASDAQ", "currency": "USD",
+         "category": "mega_tech", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "AMZN", "broker_display_name": "Amazon", "exchange": "NASDAQ", "currency": "USD",
+         "category": "mega_tech", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "TSLA", "broker_display_name": "Tesla", "exchange": "NASDAQ", "currency": "USD",
+         "category": "ev_auto", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        # --- Expansion: diversification beyond mega-cap tech ---
+        {"data_symbol": "GOOGL", "broker_display_name": "Alphabet", "exchange": "NASDAQ", "currency": "USD",
+         "category": "mega_tech", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "NFLX", "broker_display_name": "Netflix", "exchange": "NASDAQ", "currency": "USD",
+         "category": "streaming", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "PLTR", "broker_display_name": "Palantir", "exchange": "NASDAQ", "currency": "USD",
+         "category": "ai_defence", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "AVGO", "broker_display_name": "Broadcom", "exchange": "NASDAQ", "currency": "USD",
+         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "MU", "broker_display_name": "Micron Technology", "exchange": "NASDAQ", "currency": "USD",
+         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        # --- Benchmark/context only: computed for regime signals, no trade alerts ---
+        {"data_symbol": "QQQ", "broker_display_name": "Invesco QQQ", "exchange": "NASDAQ", "currency": "USD",
+         "category": "etf_benchmark", "priority": "low", "trade_target": False, "benchmark_only": True,
+         "broker_tags": []},
+        {"data_symbol": "SPY", "broker_display_name": "SPDR S&P 500 ETF", "exchange": "NYSE Arca", "currency": "USD",
+         "category": "etf_benchmark", "priority": "low", "trade_target": False, "benchmark_only": True,
+         "broker_tags": []},
     ],
     "EU": [
-        {"data_symbol": "ASML.AS", "broker_display_name": "ASML", "exchange": "Euronext Amsterdam", "currency": "EUR"},
-        {"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR"},
-        {"data_symbol": "SIE.DE", "broker_display_name": "Siemens", "exchange": "Xetra", "currency": "EUR"},
-        {"data_symbol": "AIR.PA", "broker_display_name": "Airbus", "exchange": "Euronext Paris", "currency": "EUR"},
-        {"data_symbol": "MC.PA", "broker_display_name": "LVMH", "exchange": "Euronext Paris", "currency": "EUR"},
-        {"data_symbol": "ALV.DE", "broker_display_name": "Allianz", "exchange": "Xetra", "currency": "EUR"},
-        {"data_symbol": "DTE.DE", "broker_display_name": "Deutsche Telekom", "exchange": "Xetra", "currency": "EUR"},
-        {"data_symbol": "IFX.DE", "broker_display_name": "Infineon", "exchange": "Xetra", "currency": "EUR"},
+        # --- Native EU names (shadow mode; promoted to live when EU advisory goes live) ---
+        {"data_symbol": "ASML.AS", "broker_display_name": "ASML", "exchange": "Euronext Amsterdam", "currency": "EUR",
+         "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "ASM.AS", "broker_display_name": "ASM International", "exchange": "Euronext Amsterdam", "currency": "EUR",
+         "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "use limit orders — spread widens at open and close"},
+        {"data_symbol": "BESI.AS", "broker_display_name": "BE Semiconductor", "exchange": "Euronext Amsterdam", "currency": "EUR",
+         "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "high beta — spread can be wide; use limit orders"},
+        {"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR",
+         "category": "enterprise_software", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "SIE.DE", "broker_display_name": "Siemens", "exchange": "Xetra", "currency": "EUR",
+         "category": "industrial_tech", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "RHM.DE", "broker_display_name": "Rheinmetall", "exchange": "Xetra", "currency": "EUR",
+         "category": "defence", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "ENR.DE", "broker_display_name": "Siemens Energy", "exchange": "Xetra", "currency": "EUR",
+         "category": "energy_transition", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "AIR.PA", "broker_display_name": "Airbus", "exchange": "Euronext Paris", "currency": "EUR",
+         "category": "aerospace_defence", "priority": "high", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "MC.PA", "broker_display_name": "LVMH", "exchange": "Euronext Paris", "currency": "EUR",
+         "category": "luxury", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "ALV.DE", "broker_display_name": "Allianz", "exchange": "Xetra", "currency": "EUR",
+         "category": "insurance", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "IFX.DE", "broker_display_name": "Infineon", "exchange": "Xetra", "currency": "EUR",
+         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "DBK.DE", "broker_display_name": "Deutsche Bank", "exchange": "Xetra", "currency": "EUR",
+         "category": "financials", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        # --- EU mirrors: early-read on US momentum during eu_open window only ---
         {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "AMD.DE", "broker_display_name": "AMD (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMD", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMD",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "APC.DE", "broker_display_name": "Apple (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AAPL", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AAPL",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "MSF.DE", "broker_display_name": "Microsoft (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MSFT", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MSFT",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "AMZ.DE", "broker_display_name": "Amazon (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMZN", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMZN",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "TL0.DE", "broker_display_name": "Tesla (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "TSLA", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "TSLA",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "FB2A.DE", "broker_display_name": "Meta (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "META", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "META",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "ABEA.DE", "broker_display_name": "Alphabet A (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "GOOGL", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "GOOGL",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "PTX.DE", "broker_display_name": "Palantir (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "PLTR", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "PLTR",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "NFC.DE", "broker_display_name": "Netflix (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NFLX", "mirror_only_windows": ["eu_open"]},
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NFLX",
+         "mirror_only_windows": ["eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
     ],
 }
 
@@ -978,6 +1083,8 @@ def _format_trade_card(signal: dict) -> str:
     size_line = f"{size_label}: {notional} | Risk: ~€{signal['risk_eur']:.0f}"
     if signal.get("listing_type") == "eu_us_mirror":
         notes.append(f"Pre-Nasdaq mirror of {signal.get('primary_symbol')}: early EU read; execute on primary listing.")
+    if signal.get("liquidity_note"):
+        notes.append(f"Liquidity: {signal['liquidity_note']}")
     return (
         f"{first_line}\n"
         f"{entry_line}\n"
@@ -1013,6 +1120,9 @@ def _weights_for_market(market: str, listing_type: str = None) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
+    # benchmark_only tickers (SPY, QQQ) are logged for context but never get a Discord card
+    if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
+        return False
     if candidate.get("alert_stage") in WATCH_ALERT_STAGES:
         return candidate.get("mode") == "live"
     if candidate.get("mode") == "live":
@@ -1363,6 +1473,13 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "primary_symbol": primary_symbol,
         "origin_market": item.get("origin_market"),
         "side": side,
+        # Ticker metadata — carried through for display and gate logic
+        "category": item.get("category"),
+        "priority": item.get("priority", "medium"),
+        "trade_target": item.get("trade_target", True),
+        "benchmark_only": item.get("benchmark_only", False),
+        "broker_tags": item.get("broker_tags", []),
+        "liquidity_note": item.get("liquidity_note"),
         "grade": grade,
         "composite_score": round(composite, 4),
         "ev_net_pct": ev_net,
@@ -1438,6 +1555,22 @@ def run_advisory_cycle() -> dict:
         and _meets_min_grade(s.get("grade"), cfg.min_discord_grade)
     ])
     recent_trades = get_recent_trades(days=90)
+
+    # Build EU prior-composite cache from already-fetched recent_shadow (zero extra DB calls).
+    # First occurrence per symbol is most-recent because get_recent_advisory_signals orders DESC.
+    # Used by the EU shadow early gate below to skip full compute on tickers that were flat
+    # in the last cycle.  Default to None (= unknown = don't skip) for first-run-of-day safety.
+    eu_prior_composite: dict[str, float] = {}
+    eu_gate_lookback = timedelta(
+        minutes=max(1, _env_int("ADVISORY_EU_EARLY_GATE_LOOKBACK_MINUTES", 10))
+    )
+    eu_gate_cutoff = now_utc - eu_gate_lookback
+    for _s in (recent_shadow or []):
+        _sym = str(_s.get("data_symbol") or "").upper()
+        _created_at = _parse_dt(_s.get("created_at"))
+        if _sym and _sym not in eu_prior_composite and _created_at and _created_at >= eu_gate_cutoff:
+            eu_prior_composite[_sym] = abs(float(_s.get("composite_score") or 0))
+
     emitted = []
     blocked = []
     exit_alerts = []
@@ -1486,7 +1619,29 @@ def run_advisory_cycle() -> dict:
             })
             continue
         market_candidates = []
-        for item in ADVISORY_UNIVERSE[market]:
+        _priority_rank = {"high": 0, "medium": 1, "low": 2}
+        _sorted_items = sorted(
+            ADVISORY_UNIVERSE[market],
+            key=lambda it: _priority_rank.get(str(it.get("priority", "medium")), 1),
+        )
+        for item in _sorted_items:
+            # EU shadow early gate: skip full signal compute for tickers whose prior composite
+            # was very low, indicating no momentum.  Controlled by env var; default 0.15.
+            # Only applies to non-mirror EU shadow tickers (mirrors have their own window gate).
+            if (
+                mode == "shadow"
+                and market == "EU"
+                and item.get("listing_type") != "eu_us_mirror"
+            ):
+                _sym_key = item["data_symbol"].upper()
+                _prior_c = eu_prior_composite.get(_sym_key)
+                _gate = _env_float("ADVISORY_EU_EARLY_GATE_COMPOSITE", 0.15)
+                if _prior_c is not None and _prior_c < _gate:
+                    log_event("DEBUG", "advisory_eu_early_gate_skip", {
+                        "symbol": _sym_key, "prior_composite": round(_prior_c, 4), "gate": _gate,
+                    })
+                    continue
+
             if mode == "live" and _alerted_symbol_in_session(
                 recent_live, item["data_symbol"], market, now_cet
             ):
@@ -1498,6 +1653,11 @@ def run_advisory_cycle() -> dict:
                 )
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
             if not candidate:
+                continue
+            if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
+                candidate["status"] = "benchmark_logged"
+                insert_advisory_signal(candidate)
+                emitted.append(candidate)
                 continue
             if mode == "live" and _watch_repeat_blocked(recent_watch, candidate):
                 continue
