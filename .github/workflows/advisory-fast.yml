@@ -8,8 +8,9 @@ name: Trading Agent - Advisory Fast
 # compete with or cancel full signal cycles.
 #
 # Trigger setup (cron-job.org):
-#   EU open window:  every 2 min, 07:00-09:00 UTC, Mon-Fri
+#   EU full session: every 2 min, 07:00-15:30 UTC, Mon-Fri (XETRA/LSE close 15:30)
 #   US session:      every 2 min, 13:00-20:00 UTC, Mon-Fri
+#   Combined cron:   */2 7-20 * * 1-5 (single job covers both; Python gates the window)
 #   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
 #   Body: {"event_type": "advisory-fast-cycle"}
 #   OR workflow_dispatch via:
@@ -137,7 +138,7 @@ jobs:
               now = datetime.now(timezone.utc)
               in_window = (
                   now.weekday() < 5 and
-                  (7 <= now.hour <= 9 or 13 <= now.hour <= 20)
+                  7 <= now.hour <= 20  # EU open 07:00 → US close 20:00 UTC
               )
               dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
               if in_window or dispatch_mode == "advisory":
