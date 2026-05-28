@@ -30,7 +30,7 @@ env:
 
 concurrency:
   group: advisory-fast-cycle
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run-advisory-fast:
@@ -117,6 +117,7 @@ jobs:
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
           RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
+          DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
         run: |
           python << 'PY'
           import os
