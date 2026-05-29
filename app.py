@@ -49,6 +49,16 @@ PAGES = {
     "📋 Agent Logs":       "logs",
 }
 
+# Reverse map: module slug → full page label (for ?page= deep-links)
+_SLUG_TO_PAGE = {module: label for label, module in PAGES.items()}
+# Also accept short aliases
+_SLUG_TO_PAGE.update({
+    "eod":       "📅 EOD Review",
+    "blocked":   "🚧 Blocked Ops",
+    "portfolio": "📋 Portfolio Review",
+    "config":    "⚙️  Config",
+})
+
 def _query_param_present(name: str) -> bool:
     try:
         value = st.query_params.get(name)
@@ -57,6 +67,23 @@ def _query_param_present(name: str) -> bool:
         return bool(value)
     except Exception:
         return False
+
+def _page_from_query_params(page_names: list) -> str:
+    """Return the page label to select based on ?page= or ?mark_id= query params."""
+    try:
+        if _query_param_present("mark_id"):
+            return "🎯 Advisory"
+        slug = st.query_params.get("page", "")
+        if isinstance(slug, list):
+            slug = slug[0] if slug else ""
+        slug = str(slug).strip().lower()
+        if slug:
+            candidate = _SLUG_TO_PAGE.get(slug)
+            if candidate and candidate in page_names:
+                return candidate
+    except Exception:
+        pass
+    return page_names[0]
 
 
 with st.sidebar:
@@ -71,7 +98,7 @@ with st.sidebar:
     )
     st.markdown("---")
     page_names = list(PAGES.keys())
-    default_page = "🎯 Advisory" if _query_param_present("mark_id") else page_names[0]
+    default_page = _page_from_query_params(page_names)
     selection = st.radio(
         "Navigation",
         page_names,
