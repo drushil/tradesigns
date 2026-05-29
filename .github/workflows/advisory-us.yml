@@ -1,14 +1,13 @@
-name: Trading Agent - Advisory Fast (Full Scan / Manual)
+name: Trading Agent - Advisory US
 
-# Full-market advisory cycle — scans both EU + US universes.
-# Use for manual dispatch and debugging only.
-# Production cron-job.org triggers now use advisory-eu.yml and advisory-us.yml
-# which run market-isolated cycles (~60-80s each) in separate concurrency groups.
+# US-only advisory cycle. Scans ADVISORY_UNIVERSE["US"] only (14 tickers).
+# Triggered every 2 min by cron-job.org during NYSE/NASDAQ session hours.
+# Runs independently from advisory-eu.yml so EU and US cycles never compete.
 #
-# Manual dispatch:
-#   https://api.github.com/repos/drushil/tradesigns/actions/workflows/advisory-fast.yml/dispatches
-#   Body: {"ref": "main", "inputs": {"mode": ""}}
-#   OR via GitHub UI → Actions → Trading Agent - Advisory Fast (Full Scan / Manual) → Run workflow
+# Trigger setup (cron-job.org):
+#   Schedule: every 2 min, 13:00-20:00 UTC, Mon-Fri
+#   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
+#   Body: {"event_type": "advisory-us-cycle"}
 
 on:
   workflow_dispatch:
@@ -18,17 +17,17 @@ on:
         required: false
         default: ''
   repository_dispatch:
-    types: [advisory-fast-cycle]
+    types: [advisory-us-cycle]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: advisory-fast-cycle
+  group: advisory-us-cycle
   cancel-in-progress: false
 
 jobs:
-  run-advisory-fast:
+  run-advisory-us:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -61,7 +60,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-agent.txt
 
-      - name: Run advisory cycle
+      - name: Run US advisory cycle
         env:
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
           ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
@@ -75,7 +74,7 @@ jobs:
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
-          ADVISORY_MARKETS:     "${{ vars.ADVISORY_MARKETS }}"
+          ADVISORY_MARKETS:     "US"
           ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
           ADVISORY_SHADOW_MARKETS: "${{ vars.ADVISORY_SHADOW_MARKETS }}"
           ADVISORY_SHADOW_DISCORD_MARKETS: "${{ vars.ADVISORY_SHADOW_DISCORD_MARKETS }}"
@@ -136,13 +135,13 @@ jobs:
               now = datetime.now(timezone.utc)
               in_window = (
                   now.weekday() < 5 and
-                  7 <= now.hour <= 20  # EU open 07:00 → US close 20:00 UTC
+                  13 <= now.hour <= 20  # NYSE/NASDAQ: 13:30 open, 20:00 close UTC
               )
               dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
               if in_window or dispatch_mode == "advisory":
-                  print(f"Running advisory cycle at {now.strftime('%H:%M UTC')}...")
+                  print(f"Running US advisory cycle at {now.strftime('%H:%M UTC')}...")
                   result = run_advisory_cycle()
                   print(f"Advisory result: {result}")
               else:
-                  print(f"Outside advisory window ({now.strftime('%H:%M UTC')}) — skipping.")
+                  print(f"Outside US window ({now.strftime('%H:%M UTC')}) — skipping.")
           PY
