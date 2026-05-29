@@ -14,6 +14,25 @@ Depends on:
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import numpy as np
+import pandas as pd
+
+
+def _col_values(df_or_series, col: str) -> np.ndarray:
+    """
+    Extract a column from a yfinance result as a 1-D numpy array.
+
+    yfinance ≥0.2 with a single ticker returns MultiIndex columns
+    (Close, NVDA).  Calling ['Close'] on that gives a DataFrame not a Series,
+    and .squeeze() on a 1-row DataFrame collapses to a scalar which breaks
+    .iloc/.min()/.max().  This helper always returns a flat ndarray so callers
+    can use plain array indexing (arr[0], arr[-1], arr.min(), arr.max()).
+    """
+    obj = df_or_series[col]
+    if isinstance(obj, pd.DataFrame):
+        obj = obj.iloc[:, 0]   # take first (only) ticker column
+    arr = np.asarray(obj, dtype=float).ravel()
+    return arr
 
 from backend.runtime.env import _env_bool, _env_int, _env_float, _env_value
 from database.client import (
@@ -85,22 +104,22 @@ def _replay_price_window(ticker: str, action: str, start_at: datetime,
     if window.empty:
         return {}
 
-    close_series = window["Close"].squeeze()
-    high_series = window["High"].squeeze()
-    low_series = window["Low"].squeeze()
+    close_arr = _col_values(window, "Close")
+    high_arr  = _col_values(window, "High")
+    low_arr   = _col_values(window, "Low")
     if reference_price <= 0:
-        reference_price = float(close_series.iloc[0])
+        reference_price = float(close_arr[0])
     if reference_price <= 0:
         return {}
 
     if action == "SELL":
-        max_favorable = (reference_price - float(low_series.min())) / reference_price * 100
-        max_adverse = (reference_price - float(high_series.max())) / reference_price * 100
-        close_after = (reference_price - float(close_series.iloc[-1])) / reference_price * 100
+        max_favorable = (reference_price - float(low_arr.min()))  / reference_price * 100
+        max_adverse   = (reference_price - float(high_arr.max())) / reference_price * 100
+        close_after   = (reference_price - float(close_arr[-1]))  / reference_price * 100
     else:
-        max_favorable = (float(high_series.max()) - reference_price) / reference_price * 100
-        max_adverse = (float(low_series.min()) - reference_price) / reference_price * 100
-        close_after = (float(close_series.iloc[-1]) - reference_price) / reference_price * 100
+        max_favorable = (float(high_arr.max())  - reference_price) / reference_price * 100
+        max_adverse   = (float(low_arr.min())   - reference_price) / reference_price * 100
+        close_after   = (float(close_arr[-1])   - reference_price) / reference_price * 100
 
     return {
         "max_favorable_pct": round(max_favorable, 4),
@@ -188,9 +207,9 @@ def _advisory_price_window(ticker: str, side: str, start_at: datetime,
     if window.empty:
         return {}
 
-    close_series = window["Close"].squeeze()
-    high_series = window["High"].squeeze()
-    low_series = window["Low"].squeeze()
+    close_arr = _col_values(window, "Close")
+    high_arr  = _col_values(window, "High")
+    low_arr   = _col_values(window, "Low")
     forward_returns = {}
     bars_by_window = {}
     for minutes in elapsed_windows:
@@ -198,7 +217,7 @@ def _advisory_price_window(ticker: str, side: str, start_at: datetime,
         horizon_window = window[window.index <= horizon_end]
         if horizon_window.empty:
             continue
-        horizon_close = float(horizon_window["Close"].squeeze().iloc[-1])
+        horizon_close = float(_col_values(horizon_window, "Close")[-1])
         if side == "SELL":
             ret = (reference_price - horizon_close) / reference_price * 100
         else:
@@ -210,13 +229,13 @@ def _advisory_price_window(ticker: str, side: str, start_at: datetime,
         return {}
 
     if side == "SELL":
-        max_favorable = (reference_price - float(low_series.min())) / reference_price * 100
-        max_adverse = (reference_price - float(high_series.max())) / reference_price * 100
-        close_after = (reference_price - float(close_series.iloc[-1])) / reference_price * 100
+        max_favorable = (reference_price - float(low_arr.min()))  / reference_price * 100
+        max_adverse   = (reference_price - float(high_arr.max())) / reference_price * 100
+        close_after   = (reference_price - float(close_arr[-1]))  / reference_price * 100
     else:
-        max_favorable = (float(high_series.max()) - reference_price) / reference_price * 100
-        max_adverse = (float(low_series.min()) - reference_price) / reference_price * 100
-        close_after = (float(close_series.iloc[-1]) - reference_price) / reference_price * 100
+        max_favorable = (float(high_arr.max())  - reference_price) / reference_price * 100
+        max_adverse   = (float(low_arr.min())   - reference_price) / reference_price * 100
+        close_after   = (float(close_arr[-1])   - reference_price) / reference_price * 100
 
     return {
         "forward_returns": forward_returns,
@@ -327,6 +346,22 @@ def _replay_advisory_signals():
                 "symbol": signal.get("data_symbol"),
                 "error": str(e)[:160],
             })
+            # Mark as permanently failed so this signal stops being retried
+            # every cycle. Writes forward_scored_at with an error payload so
+            # get_unscored_advisory_signals() won't pick it up again.
+            now_utc = datetime.now(timezone.utc)
+            try:
+                update_advisory_signal_replay(signal.get("id"), {
+                    "forward_scored_at": now_utc.isoformat(),
+                    "advisory_replay_json": {
+                        "status": "error",
+                        "error": str(e)[:200],
+                        "symbol": signal.get("data_symbol"),
+                        "failed_at": now_utc.isoformat(),
+                    },
+                })
+            except Exception:
+                pass
     if checked:
         log_event("INFO", "advisory_replay_complete", {
             "checked": checked,
