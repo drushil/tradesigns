@@ -4,6 +4,27 @@ This captures the fuller design discussed after the 2026-05-28 AMD advisory case
 The current implementation should stay lean until trade volume justifies the
 larger lifecycle model.
 
+## Current Status — 2026-05-29
+
+Implemented:
+
+- Concise EUR-first advisory cards.
+- Mark-as-taken deep links from Discord into Streamlit.
+- Open advisory positions panel and manual close flow.
+- Replay scoreboard for signal-level forward returns.
+- Daily EUR/USD fetch with DB cache; fixed the fallback bug that caused stale
+  `EURUSD_RATE=1.08` to appear in cards.
+- Exit monitoring for manually entered advisory rows.
+- Guarded runner continuation context:
+  - Requires a prior same-day B+ watch/trade signal.
+  - Distinguishes fresh-entry risk from holder/active-trader continuation.
+  - Adds holder wording only when an open position is not materially underwater.
+- PLTR and MU 2026-05-29 manual outcomes backfilled into `advisory_signals`.
+
+Keep using the lightweight `advisory_signals` lifecycle model for now. Do not
+promote to separate position/event tables until trade volume or multi-leg
+complexity makes the extra model worth it.
+
 ## Lean Plan
 
 1. Concise Discord cards
@@ -29,6 +50,38 @@ larger lifecycle model.
    - Store `premium_setup=true` when MACD and relative strength are both strongly
      aligned. Track first, act later.
 
+## Near-Term Remaining Plan
+
+1. Verify FX in the next live advisory cycle
+   - Confirm cards use `yfinance_daily` or `daily_cache`, not `env_fallback`.
+   - Confirm EUR levels line up with Trade Republic / Scalable prices.
+   - If cache writes fail in GitHub Actions, inspect `fx_rate_cache` permissions
+     and workflow env propagation.
+
+2. Use the journaling flow consistently
+   - For every advisory trade taken, click `Mark as taken` or tell the assistant
+     the ticker, entry price, size, and later exit price.
+   - Treat existing-holding trims, such as MSFT on 2026-05-29, as journal notes
+     unless they map cleanly to a specific advisory row.
+
+3. Review runner continuation in live cards
+   - PLTR-like runners should read as continuation/holder context, not generic
+     "wait only" warnings.
+   - If runner cards become noisy, raise `ADVISORY_RUNNER_MIN_COMPOSITE` or
+     require stronger tape/ORB support.
+
+4. Backfill important manual trades while fresh
+   - For future days, backfill the same day if a trade was not recorded live.
+   - Store actual entry/exit prices and realised EUR P&L; do not rely only on
+     replay forward returns.
+
+5. Advisory vs autonomous trading alignment
+   - Keep autonomous trading defensive until its universe and gates are reviewed.
+   - Do not auto-execute advisory alerts directly yet.
+   - Later design an advisory-confirmation layer for overlapping tickers:
+     A/B advisory alignment can permit or size up trades; late-chase/weak
+     advisory context can block or reduce trades.
+
 ## V2+ Plan
 
 Adopt when manual advisory trading volume grows, multi-leg entries become common,
@@ -44,9 +97,11 @@ or position-level analytics become more important than simplicity.
    - Show current P&L, T1/T2/stop, and latest advisory thesis.
 
 3. Runner continuation alerts
-   - If a user holds a ticker and new same-direction advisories fire, send
-     holder-context messages instead of fresh-entry watch messages.
-   - Separate "hold runner" from "fresh chase".
+   - Initial lightweight runner context exists.
+   - V2 should thread related ignition/watch/trade/runner alerts into one setup
+     id so the dashboard can show the whole lifecycle.
+   - Add smarter continuation exits: trailing stop suggestions, trim prompts,
+     and "runner weakening" warnings.
 
 4. Discord interactions
    - Deep links from Discord into Streamlit forms.
@@ -69,3 +124,12 @@ or position-level analytics become more important than simplicity.
    - Validate premium setup over multiple weeks before using it for sizing.
    - Explore opening-gap recognition for MSFT-like bar-one momentum.
    - Consider cross-ticker confirmation for semiconductor and mega-cap clusters.
+   - Review NVDA-like false A cases where backward-looking trend signals overpower
+     weak real-time intraday structure.
+
+9. Autonomous trading convergence, cautiously
+   - Consider scanning the advisory universe inside autonomous trading.
+   - Add advisory-signal lookup as a confirmation layer before orders.
+   - Keep paper-only until replay and manual execution data show a reliable edge.
+   - Preserve separate horizons: advisory is human-in-the-loop intraday momentum;
+     autonomous trading needs stricter precision and lower tolerance for noise.
