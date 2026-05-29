@@ -49,6 +49,16 @@ PAGES = {
     "📋 Agent Logs":       "logs",
 }
 
+def _query_param_present(name: str) -> bool:
+    try:
+        value = st.query_params.get(name)
+        if isinstance(value, list):
+            return bool(value and value[0])
+        return bool(value)
+    except Exception:
+        return False
+
+
 with st.sidebar:
     st.markdown(
         """
@@ -60,9 +70,12 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.markdown("---")
+    page_names = list(PAGES.keys())
+    default_page = "🎯 Advisory" if _query_param_present("mark_id") else page_names[0]
     selection = st.radio(
         "Navigation",
-        list(PAGES.keys()),
+        page_names,
+        index=page_names.index(default_page),
         label_visibility="collapsed",
         help=help_text("Navigation"),
     )

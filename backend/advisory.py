@@ -1085,6 +1085,14 @@ def _format_trade_card(signal: dict) -> str:
         notes.append(f"Pre-Nasdaq mirror of {signal.get('primary_symbol')}: early EU read; execute on primary listing.")
     if signal.get("liquidity_note"):
         notes.append(f"Liquidity: {signal['liquidity_note']}")
+    if (
+        signal.get("mode") == "live"
+        and signal.get("alert_stage") == "trade"
+        and signal.get("id")
+        and not is_shadow
+    ):
+        base_url = _env_value("ADVISORY_DASHBOARD_URL", "https://tradesigns.streamlit.app").rstrip("/")
+        notes.append(f"Mark as taken: {base_url}/?mark_id={signal['id']}")
     return (
         f"{first_line}\n"
         f"{entry_line}\n"
@@ -1706,6 +1714,11 @@ def run_advisory_cycle() -> dict:
                     })
                     continue
             saved = insert_advisory_signal(candidate)
+            if "error" not in saved and saved.get("id"):
+                candidate["id"] = saved.get("id")
+                candidate["message_text"] = _format_trade_card(candidate)
+                if candidate.get("mode") == "live" and candidate.get("alert_stage") == "trade":
+                    update_advisory_exit_status(saved["id"], {"message_text": candidate["message_text"]})
             can_send_shadow = (
                 mode != "shadow"
                 or shadow_discord_sent_today < cfg.max_shadow_discord_alerts_per_day

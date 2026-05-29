@@ -76,6 +76,71 @@ def _format_time(ts) -> str:
         return str(ts) if ts else "—"
 
 
+def _query_param(name: str) -> Optional[str]:
+    try:
+        value = st.query_params.get(name)
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        return str(value) if value not in (None, "") else None
+    except Exception:
+        return None
+
+
+def _clear_query_params():
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+
+def _row_fx(row: dict) -> float:
+    try:
+        return float(row.get("fx_rate") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _native_to_eur(row: dict, value) -> Optional[float]:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    currency = str(row.get("currency") or "EUR").upper()
+    if currency == "USD":
+        return price / max(_row_fx(row), 0.0001)
+    return price
+
+
+def _eur_to_native(row: dict, value) -> Optional[float]:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    currency = str(row.get("currency") or "EUR").upper()
+    if currency == "USD":
+        return price * max(_row_fx(row), 0.0001)
+    return price
+
+
+def _entry_default_eur(row: dict) -> float:
+    monitor = _as_dict(row.get("exit_monitor_json"))
+    if monitor.get("manual_entry_price_eur"):
+        return float(monitor["manual_entry_price_eur"])
+    manual = _native_to_eur(row, row.get("manual_entry_price"))
+    if manual:
+        return manual
+    entry_min = _native_to_eur(row, row.get("entry_min")) or 0.0
+    entry_max = _native_to_eur(row, row.get("entry_max")) or entry_min
+    return (entry_min + entry_max) / 2.0 if entry_min and entry_max else entry_min or entry_max
+
+
+def _pnl_pct(row: dict, entry_eur: float, current_eur: float) -> float:
+    if not entry_eur:
+        return 0.0
+    direction = 1 if str(row.get("side") or "BUY").upper() == "BUY" else -1
+    return ((current_eur - entry_eur) / entry_eur) * 100.0 * direction
+
+
 def _symbol_catalog(advisory_mod, rows: list[dict] = None,
                     market: str = None) -> tuple[list[str], dict[str, str]]:
     labels: dict[str, str] = {}
@@ -112,7 +177,13 @@ def _select_index(options: list[str], preferred: str, fallback: str = None) -> i
 
 
 def render():
-    from database.client import get_recent_advisory_signals
+    from database.client import (
+        get_advisory_signal_by_id,
+        get_open_advisory_positions,
+        get_recent_advisory_signals,
+        mark_advisory_taken,
+        update_advisory_exit_status,
+    )
     try:
         from database.client import get_advisory_scoreboard as _get_advisory_scoreboard
     except (ImportError, AttributeError):
@@ -158,6 +229,11 @@ def render():
     metric_card(c2, "🔥 Ignitions", by_stage["ignition"], tone="info")
     metric_card(c3, "🟡 Watches", by_stage["watch"], tone="warning")
     metric_card(c4, "🟢 Trades", by_stage["trade"], tone="positive")
+
+    st.divider()
+
+    _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
+    _render_open_positions(get_open_advisory_positions, update_advisory_exit_status)
 
     st.divider()
 
@@ -305,6 +381,166 @@ def render():
             non_empty = {k: v for k, v in extras.items() if v not in (None, {}, "", False)}
             if non_empty:
                 st.json(non_empty)
+
+
+# ── Manual Entry / Open Position Tracking ───────────────────────────────────
+
+def _render_mark_taken_banner(fetch_signal_fn, mark_taken_fn):
+    mark_id = _query_param("mark_id")
+    if not mark_id:
+        return
+    try:
+        signal_id = int(mark_id)
+    except (TypeError, ValueError):
+        st.warning("The mark-as-taken link is invalid.")
+        return
+
+    row = fetch_signal_fn(signal_id) or {}
+    if not row:
+        st.warning(f"No advisory signal found for mark_id={signal_id}.")
+        return
+
+    entry_default = _entry_default_eur(row)
+    size_default = float(row.get("suggested_size_eur") or 0)
+    entry_min_eur = _native_to_eur(row, row.get("entry_min"))
+    entry_max_eur = _native_to_eur(row, row.get("entry_max"))
+    stop_eur = _native_to_eur(row, row.get("stop_price"))
+    t1_eur = _native_to_eur(row, row.get("target_1"))
+    t2_eur = _native_to_eur(row, row.get("target_2"))
+
+    with st.container(border=True):
+        st.markdown(
+            f"**Mark as taken: {row.get('data_symbol')} {row.get('side')} "
+            f"· grade {row.get('grade')} · {_format_time(row.get('created_at'))}**"
+        )
+        st.caption(
+            f"Suggested band €{entry_min_eur or 0:.2f}-€{entry_max_eur or 0:.2f} · "
+            f"stop €{stop_eur or 0:.2f} · T1 €{t1_eur or 0:.2f} · T2 €{t2_eur or 0:.2f}"
+        )
+        with st.form(f"mark_taken_{signal_id}"):
+            c_entry, c_size = st.columns(2)
+            with c_entry:
+                entry_price_eur = st.number_input(
+                    "Your entry price (€)",
+                    min_value=0.0,
+                    value=float(entry_default or 0.0),
+                    step=0.01,
+                    format="%.2f",
+                )
+            with c_size:
+                size_eur = st.number_input(
+                    "Position size (€)",
+                    min_value=0.0,
+                    value=float(size_default or 0.0),
+                    step=50.0,
+                    format="%.2f",
+                )
+            notes = st.text_input("Notes", value="", placeholder="Optional: why you took it")
+            submitted = st.form_submit_button("Confirm entry")
+
+        c_clear, _ = st.columns([1, 5])
+        with c_clear:
+            if st.button("Dismiss", key=f"dismiss_mark_{signal_id}"):
+                _clear_query_params()
+                st.rerun()
+
+        if submitted:
+            result = mark_taken_fn(
+                signal_id,
+                entry_price_eur=float(entry_price_eur),
+                size_eur=float(size_eur),
+                notes=notes or None,
+            )
+            if result.get("error"):
+                st.error(f"Could not mark advisory as taken: {result['error']}")
+            else:
+                st.success("Entry recorded. Exit monitoring will use this price.")
+                _clear_query_params()
+                st.rerun()
+
+
+def _render_open_positions(fetch_open_fn, update_exit_fn):
+    try:
+        positions = fetch_open_fn(max_age_days=7) or []
+    except Exception as exc:
+        st.warning(f"Open advisory positions unavailable: {exc}")
+        return
+    if not positions:
+        return
+
+    st.subheader("Open advisory positions")
+    rows = []
+    for pos in positions:
+        monitor = _as_dict(pos.get("exit_monitor_json"))
+        entry_eur = _entry_default_eur(pos)
+        current_eur = monitor.get("last_price_eur")
+        if current_eur is None and monitor.get("last_price_native") is not None:
+            current_eur = _native_to_eur(pos, monitor.get("last_price_native"))
+        current_eur = float(current_eur) if current_eur is not None else None
+        pnl_pct = _pnl_pct(pos, entry_eur, current_eur) if current_eur is not None else None
+        size_eur = float(monitor.get("size_eur") or pos.get("suggested_size_eur") or 0)
+        rows.append({
+            "symbol": pos.get("data_symbol"),
+            "side": pos.get("side"),
+            "grade": pos.get("grade"),
+            "entry": f"€{entry_eur:.2f}" if entry_eur else "—",
+            "last": f"€{current_eur:.2f}" if current_eur is not None else "pending",
+            "pnl": f"{pnl_pct:+.2f}%" if pnl_pct is not None else "—",
+            "size": f"€{size_eur:.0f}" if size_eur else "—",
+            "alerts": ", ".join(monitor.get("alerts") or []) or "—",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    for pos in positions:
+        signal_id = int(pos.get("id"))
+        monitor = _as_dict(pos.get("exit_monitor_json"))
+        entry_eur = _entry_default_eur(pos)
+        current_eur = monitor.get("last_price_eur")
+        if current_eur is None and monitor.get("last_price_native") is not None:
+            current_eur = _native_to_eur(pos, monitor.get("last_price_native"))
+        current_eur = float(current_eur) if current_eur is not None else float(entry_eur or 0)
+        size_eur = float(monitor.get("size_eur") or pos.get("suggested_size_eur") or 0)
+
+        with st.expander(f"Close {pos.get('data_symbol')} {pos.get('side')} from advisory #{signal_id}"):
+            with st.form(f"close_advisory_{signal_id}"):
+                c_exit, c_notes = st.columns([1, 2])
+                with c_exit:
+                    exit_price_eur = st.number_input(
+                        "Exit price (€)",
+                        min_value=0.0,
+                        value=float(current_eur or entry_eur or 0.0),
+                        step=0.01,
+                        format="%.2f",
+                        key=f"exit_price_{signal_id}",
+                    )
+                with c_notes:
+                    notes = st.text_input("Exit notes", key=f"exit_notes_{signal_id}")
+                close_submitted = st.form_submit_button("Record exit")
+
+            if close_submitted:
+                exit_native = _eur_to_native(pos, exit_price_eur)
+                pnl_pct = _pnl_pct(pos, float(entry_eur or 0), float(exit_price_eur or 0))
+                pnl_eur = size_eur * pnl_pct / 100.0
+                updated_monitor = {
+                    **monitor,
+                    "manual_exit_price_eur": round(float(exit_price_eur or 0), 4),
+                    "exited_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_notes": notes or None,
+                    "manual_pnl_pct": round(pnl_pct, 4),
+                }
+                result = update_exit_fn(signal_id, {
+                    "status": "expired",
+                    "manual_exit_price": round(float(exit_native or 0), 4),
+                    "manual_pnl_eur": round(float(pnl_eur), 2),
+                    "exit_alert_type": "manual_exit",
+                    "exit_alerted_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_monitor_json": updated_monitor,
+                })
+                if result.get("error"):
+                    st.error(f"Could not record exit: {result['error']}")
+                else:
+                    st.success(f"Exit recorded. Estimated P&L: €{pnl_eur:+.2f}")
+                    st.rerun()
 
 
 # ── Replay Scoreboard ───────────────────────────────────────────────────────

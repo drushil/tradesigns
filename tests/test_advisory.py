@@ -85,7 +85,9 @@ def test_trade_card_is_actionable_for_manual_execution():
     cfg = _cfg()
     plan = advisory._entry_plan(price=100.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
     signal = {
+        "id": 123,
         "mode": "live",
+        "alert_stage": "trade",
         "market": "US",
         "data_symbol": "NVDA",
         "broker_display_name": "NVIDIA",
@@ -113,6 +115,8 @@ def test_trade_card_is_actionable_for_manual_execution():
     assert "EUR/USD" not in card
     assert "Composite:" not in card
     assert "EV: +0.72%" in card
+    assert "Mark as taken:" in card
+    assert "mark_id=123" in card
 
 
 def test_shadow_trade_card_is_clearly_observation_only():
