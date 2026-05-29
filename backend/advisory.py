@@ -541,10 +541,106 @@ def _watch_had_late_chase(signal: Optional[dict]) -> bool:
     return bool(signal.get("late_chase_json") or signal_json.get("late_chase"))
 
 
+def _prior_runner_signal(recent_live: list, candidate: dict, now_cet: datetime) -> Optional[dict]:
+    """Return a same-session B+ watch/trade signal that can justify runner context."""
+    symbol = str(candidate.get("data_symbol") or "").upper()
+    market = str(candidate.get("market") or "").upper()
+    side = str(candidate.get("side") or "").upper()
+    if not symbol or not market or not side:
+        return None
+    for signal in recent_live or []:
+        if str(signal.get("market", "")).upper() != market:
+            continue
+        if str(signal.get("data_symbol", "")).upper() != symbol:
+            continue
+        if str(signal.get("side", "")).upper() != side:
+            continue
+        if not _is_signal_in_current_session(signal, now_cet):
+            continue
+        signal_json = signal.get("signal_json") or {}
+        stage = str(signal_json.get("alert_stage") or signal.get("alert_stage") or "").lower()
+        if stage not in {"watch", "trade"}:
+            continue
+        if not _meets_min_grade(signal.get("grade"), "B"):
+            continue
+        return signal
+    return None
+
+
+def _current_native_from_candidate(candidate: dict) -> float:
+    try:
+        return float((candidate.get("signal_json") or {}).get("atr_data", {}).get("current_price") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _position_context_for_candidate(candidate: dict, open_positions: list, cfg: AdvisoryConfig) -> dict:
+    symbol = str(candidate.get("data_symbol") or "").upper()
+    side = str(candidate.get("side") or "").upper()
+    current = _current_native_from_candidate(candidate)
+    if not symbol or not side or not current:
+        return {}
+    max_adverse_pct = _env_float("ADVISORY_HOLDER_CONTEXT_MAX_ADVERSE_PCT", 1.0)
+    for position in open_positions or []:
+        if str(position.get("data_symbol") or "").upper() != symbol:
+            continue
+        if str(position.get("side") or "").upper() != side:
+            continue
+        entry = _position_entry_native(position)
+        if not entry:
+            continue
+        direction = 1 if side == "BUY" else -1
+        pnl_pct = ((current - entry) / entry * 100 * direction)
+        meaningful = pnl_pct >= -max_adverse_pct
+        return {
+            "position_id": position.get("id"),
+            "entry_native": round(entry, 4),
+            "current_native": round(current, 4),
+            "pnl_pct": round(pnl_pct, 4),
+            "meaningful_holder_context": bool(meaningful),
+            "max_adverse_pct": max_adverse_pct,
+            "entry_eur": round(_display_price(entry, position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate), 4),
+            "current_eur": round(_display_price(current, position.get("currency", "EUR"), position.get("fx_rate") or cfg.fx_rate), 4),
+        }
+    return {}
+
+
+def _runner_context(candidate: dict, recent_live: list, now_cet: datetime,
+                    open_positions: list, cfg: AdvisoryConfig) -> dict:
+    """Classify extended same-day momentum separately from a fresh-entry alert."""
+    if candidate.get("mode") != "live":
+        return {}
+    if candidate.get("alert_stage") not in WATCH_ALERT_STAGES:
+        return {}
+    if not _watch_had_late_chase(candidate):
+        return {}
+    if float(candidate.get("composite_score") or 0) < _env_float("ADVISORY_RUNNER_MIN_COMPOSITE", 0.25):
+        return {}
+    trend = (candidate.get("signal_json") or {}).get("trend_1h") or candidate.get("trend_1h_json") or {}
+    if trend.get("aligned") is not True:
+        return {}
+    prior = _prior_runner_signal(recent_live, candidate, now_cet)
+    if not prior:
+        return {}
+    position = _position_context_for_candidate(candidate, open_positions, cfg)
+    prior_json = prior.get("signal_json") or {}
+    return {
+        "type": "runner_continuation",
+        "prior_signal_id": prior.get("id"),
+        "prior_created_at": prior.get("created_at"),
+        "prior_grade": prior.get("grade"),
+        "prior_stage": prior_json.get("alert_stage") or prior.get("alert_stage") or "watch",
+        "holder_context": position if position.get("meaningful_holder_context") else {},
+        "position_context": position,
+    }
+
+
 def _watch_repeat_blocked(recent_watch: dict, candidate: dict) -> bool:
     if not recent_watch or candidate.get("alert_stage") not in WATCH_ALERT_STAGES:
         return False
     signal_json = recent_watch.get("signal_json") or {}
+    if candidate.get("runner_context") and not signal_json.get("runner_context"):
+        return False
     old_stage = str(signal_json.get("alert_stage") or recent_watch.get("alert_stage") or "watch")
     new_stage = str(candidate.get("alert_stage") or "")
     if ALERT_STAGE_RANK.get(new_stage, -1) > ALERT_STAGE_RANK.get(old_stage, -1):
@@ -1015,6 +1111,7 @@ def _format_trade_card(signal: dict) -> str:
     is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
     is_ignition = signal.get("alert_stage") == "ignition"
     is_late_chase = bool(signal.get("late_chase_json"))
+    is_runner = bool(signal.get("runner_context"))
     is_holding = bool(signal.get("holding_context"))
     notional = f"€{signal['suggested_size_eur']:.0f}"
     range_action = (
@@ -1030,8 +1127,12 @@ def _format_trade_card(signal: dict) -> str:
     target_2_eur = _eur_price(signal, "target_2")
     quick_why = signal["rationale"].split(", window ")[0]
 
-    if is_holding:
+    if is_holding and is_runner:
+        prefix = "RUNNER HOLD"
+    elif is_holding:
         prefix = "HOLD"
+    elif is_runner:
+        prefix = "RUNNER WATCH"
     elif is_ignition:
         prefix = "MOMENTUM IGNITION"
     elif is_watch:
@@ -1056,6 +1157,13 @@ def _format_trade_card(signal: dict) -> str:
         if str(signal.get("grade", "")).upper() == "C":
             notes.append(f"LOW-GRADE SHADOW {side} OPPORTUNITY: log only.")
         notes.append("Action: log only; do not trade from shadow mode.")
+    elif is_holding and is_runner:
+        holder = signal.get("holding_context") or {}
+        notes.append(
+            "Why: same-day runner is still aligned; prior B+ advisory confirmed the move "
+            f"and open position is {holder.get('pnl_pct', 0):+.2f}% from recorded entry."
+        )
+        notes.append("Action: holder context; consider holding/trailing toward T1/T2, not a fresh chase.")
     elif is_holding:
         notes.append("Action: holder context; manage the open trade, not a fresh chase.")
     elif is_ignition:
@@ -1066,6 +1174,13 @@ def _format_trade_card(signal: dict) -> str:
             f"{detail.get('atr_multiple')}x ATR, {detail.get('volume_ratio')}x volume)."
         )
         notes.append("Action: watch for follow-through; use the band as tentative only.")
+    elif is_runner:
+        detail = signal.get("late_chase_json") or {}
+        notes.append(
+            "Why: same-day runner continuation; prior B+ advisory confirmed the move, "
+            f"but VWAP deviation is {detail.get('pct_deviation')}% vs {detail.get('threshold_pct')}%."
+        )
+        notes.append("Action: active-trader/holder context; fresh entry only on pullback.")
     elif is_watch:
         if is_ignition:
             pass
@@ -1608,11 +1723,20 @@ def run_advisory_cycle() -> dict:
     emitted = []
     blocked = []
     exit_alerts = []
-    if cfg.live_markets:
+    open_advisory_positions = []
+    # Only run exit monitor when this cycle is actually scanning a live market.
+    # Prevents duplicate Discord exit alerts when EU and US workflows run in
+    # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
+    # so the intersection is empty and it correctly skips exit monitoring.
+    if cfg.live_markets & cfg.markets:
         try:
             exit_alerts = _monitor_open_positions(cfg, now_cet)
         except Exception as exc:
             log_event("WARN", "advisory_exit_monitor_failed", {"error": str(exc)[:160]})
+        try:
+            open_advisory_positions = get_open_advisory_positions(max_age_days=7)
+        except Exception as exc:
+            log_event("WARN", "advisory_open_positions_read_failed", {"error": str(exc)[:160]})
 
     try:
         from backend.signals.engine import prefetch_newsapi_batch
@@ -1693,6 +1817,17 @@ def run_advisory_cycle() -> dict:
                 insert_advisory_signal(candidate)
                 emitted.append(candidate)
                 continue
+            if mode == "live":
+                runner = _runner_context(candidate, recent_live, now_cet, open_advisory_positions, cfg)
+                if runner:
+                    candidate["runner_context"] = runner
+                    if runner.get("holder_context"):
+                        candidate["holding_context"] = runner["holder_context"]
+                    candidate["signal_json"] = {
+                        **candidate.get("signal_json", {}),
+                        "runner_context": runner,
+                    }
+                    candidate["message_text"] = _format_trade_card(candidate)
             if mode == "live" and _watch_repeat_blocked(recent_watch, candidate):
                 continue
             if mode == "live" and candidate.get("alert_stage") == "trade" and _watch_had_late_chase(recent_watch):
