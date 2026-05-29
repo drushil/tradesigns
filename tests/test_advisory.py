@@ -250,6 +250,68 @@ def test_late_chase_watch_card_explains_pullback_needed():
     assert "EV:" not in card
 
 
+def test_runner_watch_card_distinguishes_fresh_entry_from_holder_context():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=150.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
+    signal = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "PLTR",
+        "broker_display_name": "Palantir",
+        "currency": "USD",
+        "side": "BUY",
+        "valid_until_cet": "16:31 Berlin",
+        "time_exit_cet": "20:55 Berlin",
+        "rationale": "A setup, VWAP +0.00, ORB +1.00",
+        "grade": "A",
+        "composite_score": 0.50,
+        "ev_net_pct": 0.70,
+        "fx_rate": 1.16,
+        "late_chase_json": {"pct_deviation": 8.02, "threshold_pct": 0.85},
+        "runner_context": {"prior_signal_id": 10, "prior_grade": "B", "prior_stage": "watch"},
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "RUNNER WATCH" in card
+    assert "same-day runner continuation" in card
+    assert "fresh entry only on pullback" in card
+    assert "wait for pullback into the band; no fresh chase" not in card
+
+
+def test_runner_hold_card_uses_open_position_context():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=150.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
+    signal = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "PLTR",
+        "broker_display_name": "Palantir",
+        "currency": "USD",
+        "side": "BUY",
+        "valid_until_cet": "16:31 Berlin",
+        "time_exit_cet": "20:55 Berlin",
+        "rationale": "A setup, VWAP +0.00, ORB +1.00",
+        "grade": "A",
+        "composite_score": 0.50,
+        "ev_net_pct": 0.70,
+        "fx_rate": 1.16,
+        "late_chase_json": {"pct_deviation": 8.02, "threshold_pct": 0.85},
+        "runner_context": {"prior_signal_id": 10, "prior_grade": "B", "prior_stage": "watch"},
+        "holding_context": {"pnl_pct": 4.25},
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "RUNNER HOLD" in card
+    assert "open position is +4.25%" in card
+    assert "consider holding/trailing" in card
+
+
 def test_pullback_confirmed_trade_card_closes_late_chase_loop():
     cfg = _cfg()
     plan = advisory._entry_plan(price=100.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
@@ -308,6 +370,94 @@ def test_mirror_trade_card_identifies_primary_us_symbol():
 
     assert "Pre-Nasdaq mirror of NVDA" in card
     assert "early EU read" in card
+
+
+def test_runner_context_requires_prior_b_plus_watch_or_trade():
+    now = datetime(2026, 5, 29, 16, 0, tzinfo=timezone(timedelta(hours=2)))
+    candidate = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "grade": "A",
+        "composite_score": 0.50,
+        "late_chase_json": {"pct_deviation": 8.0},
+        "signal_json": {
+            "trend_1h": {"aligned": True},
+            "atr_data": {"current_price": 157.0},
+        },
+    }
+    old_c_ignition = [{
+        "id": 9,
+        "market": "US",
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "grade": "C",
+        "status": "skipped",
+        "created_at": "2026-05-29T13:05:00+00:00",
+        "signal_json": {"alert_stage": "ignition"},
+    }]
+    b_watch = [{
+        "id": 10,
+        "market": "US",
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "grade": "B",
+        "status": "skipped",
+        "created_at": "2026-05-29T13:53:00+00:00",
+        "signal_json": {"alert_stage": "watch"},
+    }]
+
+    assert advisory._runner_context(candidate, old_c_ignition, now, [], _cfg()) == {}
+    runner = advisory._runner_context(candidate, b_watch, now, [], _cfg())
+    assert runner["type"] == "runner_continuation"
+    assert runner["prior_signal_id"] == 10
+
+
+def test_runner_context_adds_holder_only_when_position_not_deep_underwater():
+    now = datetime(2026, 5, 29, 16, 0, tzinfo=timezone(timedelta(hours=2)))
+    candidate = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "grade": "A",
+        "composite_score": 0.50,
+        "late_chase_json": {"pct_deviation": 8.0},
+        "signal_json": {
+            "trend_1h": {"aligned": True},
+            "atr_data": {"current_price": 157.0},
+        },
+    }
+    recent = [{
+        "id": 10,
+        "market": "US",
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "grade": "B",
+        "status": "skipped",
+        "created_at": "2026-05-29T13:53:00+00:00",
+        "signal_json": {"alert_stage": "watch"},
+    }]
+    open_position = {
+        "id": 22,
+        "data_symbol": "PLTR",
+        "side": "BUY",
+        "currency": "USD",
+        "fx_rate": 1.16,
+        "manual_entry_price": 150.0,
+    }
+    underwater_position = {**open_position, "manual_entry_price": 170.0}
+
+    runner = advisory._runner_context(candidate, recent, now, [open_position], _cfg())
+    underwater = advisory._runner_context(candidate, recent, now, [underwater_position], _cfg())
+
+    assert runner["holder_context"]["position_id"] == 22
+    assert runner["holder_context"]["pnl_pct"] == pytest.approx(4.6667)
+    assert underwater["holder_context"] == {}
+    assert underwater["position_context"]["meaningful_holder_context"] is False
 
 
 def test_discord_alert_requires_a_grade_or_better():
