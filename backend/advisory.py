@@ -273,23 +273,49 @@ def _today_utc_date() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _latest_close_from_bars(bars) -> Optional[float]:
+    """Extract a latest close from normal or yfinance MultiIndex OHLCV frames."""
+    if bars is None or getattr(bars, "empty", True):
+        return None
+    try:
+        close = bars["Close"]
+    except Exception:
+        try:
+            close = bars.xs("Close", axis=1, level=0)
+        except Exception:
+            return None
+    try:
+        if hasattr(close, "columns"):
+            close = close.iloc[:, 0]
+        if hasattr(close, "squeeze"):
+            close = close.squeeze()
+        if hasattr(close, "dropna"):
+            clean = close.dropna()
+            if len(clean) == 0:
+                return None
+            rate = float(clean.iloc[-1])
+        else:
+            rate = float(close)
+    except Exception:
+        return None
+    return rate if 0.8 <= rate <= 1.4 else None
+
+
 def _fetch_latest_eurusd_rate() -> Optional[float]:
     """Fetch EUR/USD once through the existing bars data path."""
+    bars = None
     try:
         if _get_bars is not None:
             bars = _get_bars("EURUSD=X", period="5d", interval="1d")
-        else:
-            import yfinance as yf
-            bars = yf.download("EURUSD=X", period="5d", interval="1d", progress=False, auto_adjust=True)
-        if bars is None or bars.empty:
-            return None
-        close = bars["Close"].squeeze()
-        if hasattr(close, "dropna"):
-            rate = float(close.dropna().iloc[-1])
-        else:
-            rate = float(close)
-        if 0.8 <= rate <= 1.4:
+        rate = _latest_close_from_bars(bars)
+        if rate is not None:
             return rate
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        bars = yf.download("EURUSD=X", period="5d", interval="1d", progress=False, auto_adjust=True)
+        return _latest_close_from_bars(bars)
     except Exception:
         return None
     return None

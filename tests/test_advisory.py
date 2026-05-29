@@ -455,6 +455,44 @@ def _make_fx_bars(rate=1.0923):
     }, index=idx)
 
 
+def _make_fx_multiindex_bars(rate=1.1664):
+    idx = pd.date_range(end=pd.Timestamp.now(tz="UTC"), periods=3, freq="D")
+    cols = pd.MultiIndex.from_tuples([
+        ("Close", "EURUSD=X"),
+        ("High", "EURUSD=X"),
+        ("Low", "EURUSD=X"),
+        ("Open", "EURUSD=X"),
+        ("Volume", "EURUSD=X"),
+    ])
+    return pd.DataFrame([
+        [rate - 0.002, rate, rate - 0.004, rate - 0.003, 0],
+        [rate - 0.001, rate, rate - 0.004, rate - 0.003, 0],
+        [rate, rate, rate - 0.004, rate - 0.003, 0],
+    ], columns=cols, index=idx)
+
+
+def test_fetch_latest_eurusd_rate_extracts_multiindex_close(monkeypatch):
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: _make_fx_multiindex_bars(1.1664))
+
+    rate = advisory._fetch_latest_eurusd_rate()
+
+    assert rate == pytest.approx(1.1664)
+
+
+def test_fetch_latest_eurusd_rate_falls_back_when_shared_bars_reject_fx(monkeypatch):
+    class FakeYf:
+        @staticmethod
+        def download(*args, **kwargs):
+            return _make_fx_bars(1.1652)
+
+    monkeypatch.setattr(advisory, "_get_bars", lambda *args, **kwargs: None)
+    monkeypatch.setitem(__import__("sys").modules, "yfinance", FakeYf)
+
+    rate = advisory._fetch_latest_eurusd_rate()
+
+    assert rate == pytest.approx(1.1652)
+
+
 def test_eu_mirror_data_quality_uses_relaxed_rows_but_volume_floor(monkeypatch):
     monkeypatch.setattr(advisory, "_get_bars", lambda *a, **kw: _make_fake_bars(25, 500))
 
