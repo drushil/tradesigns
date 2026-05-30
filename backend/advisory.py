@@ -8,6 +8,7 @@ to Discord while EU runs in shadow/observation mode by default.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -1674,6 +1675,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
 
 
 def run_advisory_cycle() -> dict:
+    cycle_started = time.perf_counter()
     cfg = load_config()
     now_cet = _now_cet()
     recent_live = get_recent_advisory_signals(days=1, mode="live")
@@ -1724,6 +1726,9 @@ def run_advisory_cycle() -> dict:
     blocked = []
     exit_alerts = []
     open_advisory_positions = []
+    discord_sent_this_cycle: set[tuple[str, str]] = set()
+    first_live_discord_elapsed_s = None
+    immediate_live_sent = 0
     # Only run exit monitor when this cycle is actually scanning a live market.
     # Prevents duplicate Discord exit alerts when EU and US workflows run in
     # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
@@ -1749,7 +1754,70 @@ def run_advisory_cycle() -> dict:
     except Exception:
         pass
 
+    def _persist_emit_candidate(candidate: dict, mode: str, *, immediate: bool = False) -> bool:
+        nonlocal live_sent_today, live_sent_this_window, open_live_count
+        nonlocal live_watch_this_window, shadow_discord_sent_today
+        nonlocal first_live_discord_elapsed_s, immediate_live_sent
+
+        symbol_key = (
+            str(candidate.get("market", "")).upper(),
+            str(candidate.get("data_symbol", "")).upper(),
+        )
+        if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES:
+            if watch_counts_by_symbol.get(symbol_key, 0) >= max_watch_per_symbol:
+                log_event("INFO", "advisory_watch_blocked_symbol_cap", {
+                    "symbol": symbol_key[1],
+                    "market": symbol_key[0],
+                    "max_watch_per_symbol": max_watch_per_symbol,
+                })
+                return False
+            if live_watch_this_window >= max_watch_per_session:
+                log_event("INFO", "advisory_watch_blocked_session_cap", {
+                    "max_watch_per_session": max_watch_per_session,
+                })
+                return False
+
+        saved = insert_advisory_signal(candidate)
+        if "error" not in saved and saved.get("id"):
+            candidate["id"] = saved.get("id")
+            candidate["message_text"] = _format_trade_card(candidate)
+            if candidate.get("mode") == "live" and candidate.get("alert_stage") == "trade":
+                update_advisory_exit_status(saved["id"], {"message_text": candidate["message_text"]})
+
+        can_send_shadow = (
+            mode != "shadow"
+            or shadow_discord_sent_today < cfg.max_shadow_discord_alerts_per_day
+        )
+        can_send_discord = (
+            can_send_shadow
+            and _should_send_discord(candidate, cfg)
+            and "error" not in saved
+            and symbol_key not in discord_sent_this_cycle
+        )
+        if can_send_discord:
+            _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+            discord_sent_this_cycle.add(symbol_key)
+            if mode == "live" and first_live_discord_elapsed_s is None:
+                first_live_discord_elapsed_s = round(time.perf_counter() - cycle_started, 3)
+            if mode == "shadow":
+                shadow_discord_sent_today += 1
+            if immediate:
+                immediate_live_sent += 1
+
+        if mode == "live" and candidate.get("status") in LIVE_SIGNAL_STATUSES and "error" not in saved:
+            live_sent_today += 1
+            live_sent_this_window += 1
+            open_live_count += 1
+        if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES and "error" not in saved:
+            watch_counts_by_symbol[symbol_key] = watch_counts_by_symbol.get(symbol_key, 0) + 1
+            live_watch_this_window += 1
+        emitted.append(candidate)
+        return "error" not in saved
+
+    market_timings = []
+
     for market in _ordered_markets(cfg):
+        market_started = time.perf_counter()
         if market not in ADVISORY_UNIVERSE:
             continue
         mode = "live" if market in cfg.live_markets else "shadow"
@@ -1782,7 +1850,28 @@ def run_advisory_cycle() -> dict:
             ADVISORY_UNIVERSE[market],
             key=lambda it: _priority_rank.get(str(it.get("priority", "medium")), 1),
         )
+        scanned_count = 0
+        high_priority_count = len([
+            it for it in _sorted_items
+            if str(it.get("priority", "medium")).lower() == "high"
+        ])
+        high_priority_logged = high_priority_count == 0
         for item in _sorted_items:
+            if (
+                not high_priority_logged
+                and str(item.get("priority", "medium")).lower() != "high"
+            ):
+                log_event("INFO", "advisory_high_priority_scan_complete", {
+                    "market": market,
+                    "elapsed_s": round(time.perf_counter() - market_started, 3),
+                    "cycle_elapsed_s": round(time.perf_counter() - cycle_started, 3),
+                    "high_priority_count": high_priority_count,
+                    "scanned": scanned_count,
+                    "immediate_live_sent": immediate_live_sent,
+                })
+                high_priority_logged = True
+
+            scanned_count += 1
             # EU shadow early gate: skip full signal compute for tickers whose prior composite
             # was very low, indicating no momentum.  Controlled by env var; default 0.15.
             # Only applies to non-mirror EU shadow tickers (mirrors have their own window gate).
@@ -1841,7 +1930,28 @@ def run_advisory_cycle() -> dict:
                 insert_advisory_signal(candidate)
                 blocked.append(candidate)
                 continue
+            if (
+                mode == "live"
+                and str(candidate.get("priority", "medium")).lower() == "high"
+                and _should_send_discord(candidate, cfg)
+                and min(
+                    cfg.max_live_alerts_per_day - live_sent_today,
+                    cfg.max_live_trades_per_session - live_sent_this_window,
+                ) > 0
+            ):
+                _persist_emit_candidate(candidate, mode, immediate=True)
+                continue
             market_candidates.append(candidate)
+
+        if not high_priority_logged:
+            log_event("INFO", "advisory_high_priority_scan_complete", {
+                "market": market,
+                "elapsed_s": round(time.perf_counter() - market_started, 3),
+                "cycle_elapsed_s": round(time.perf_counter() - cycle_started, 3),
+                "high_priority_count": high_priority_count,
+                "scanned": scanned_count,
+                "immediate_live_sent": immediate_live_sent,
+            })
 
         market_candidates.sort(
             key=lambda c: (
@@ -1860,44 +1970,23 @@ def run_advisory_cycle() -> dict:
         else:
             limit = cfg.max_shadow_signals_per_day
         for candidate in market_candidates[:max(0, limit)]:
-            if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES:
-                key = (str(candidate.get("market", "")).upper(), str(candidate.get("data_symbol", "")).upper())
-                if watch_counts_by_symbol.get(key, 0) >= max_watch_per_symbol:
-                    log_event("INFO", "advisory_watch_blocked_symbol_cap", {
-                        "symbol": key[1],
-                        "market": key[0],
-                        "max_watch_per_symbol": max_watch_per_symbol,
-                    })
-                    continue
-                if live_watch_this_window >= max_watch_per_session:
-                    log_event("INFO", "advisory_watch_blocked_session_cap", {
-                        "max_watch_per_session": max_watch_per_session,
-                    })
-                    continue
-            saved = insert_advisory_signal(candidate)
-            if "error" not in saved and saved.get("id"):
-                candidate["id"] = saved.get("id")
-                candidate["message_text"] = _format_trade_card(candidate)
-                if candidate.get("mode") == "live" and candidate.get("alert_stage") == "trade":
-                    update_advisory_exit_status(saved["id"], {"message_text": candidate["message_text"]})
-            can_send_shadow = (
-                mode != "shadow"
-                or shadow_discord_sent_today < cfg.max_shadow_discord_alerts_per_day
-            )
-            if can_send_shadow and _should_send_discord(candidate, cfg) and "error" not in saved:
-                _send_discord(candidate["message_text"], cfg.discord_webhook_url)
-                if mode == "shadow":
-                    shadow_discord_sent_today += 1
-            if mode == "live" and candidate.get("status") in LIVE_SIGNAL_STATUSES and "error" not in saved:
-                live_sent_today += 1
-                live_sent_this_window += 1
-                open_live_count += 1
-            if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES and "error" not in saved:
-                key = (str(candidate.get("market", "")).upper(), str(candidate.get("data_symbol", "")).upper())
-                watch_counts_by_symbol[key] = watch_counts_by_symbol.get(key, 0) + 1
-                live_watch_this_window += 1
-            emitted.append(candidate)
+            _persist_emit_candidate(candidate, mode)
 
+        market_timings.append({
+            "market": market,
+            "mode": mode,
+            "scanned": scanned_count,
+            "elapsed_s": round(time.perf_counter() - market_started, 3),
+        })
+
+    total_elapsed_s = round(time.perf_counter() - cycle_started, 3)
+    log_event("INFO", "advisory_cycle_timing", {
+        "total_elapsed_s": total_elapsed_s,
+        "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
+        "immediate_live_sent": immediate_live_sent,
+        "market_timings": market_timings,
+        "markets": sorted(cfg.markets),
+    })
     log_event("INFO", "advisory_cycle_complete", {
         "emitted": len(emitted),
         "blocked": len(blocked),
@@ -1905,6 +1994,9 @@ def run_advisory_cycle() -> dict:
         "live_sent_today": live_sent_today,
         "daily_live_pnl": daily_live_pnl,
         "markets": sorted(cfg.markets),
+        "total_elapsed_s": total_elapsed_s,
+        "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
+        "immediate_live_sent": immediate_live_sent,
     })
     return {
         "emitted": len(emitted),

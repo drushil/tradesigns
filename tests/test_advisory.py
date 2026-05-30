@@ -960,6 +960,115 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert "NVDA" in sent[0]
 
 
+def test_run_advisory_cycle_sends_high_priority_live_before_rest_of_scan(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    sent = []
+    scan_events = []
+    logs = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [
+            {"data_symbol": "PLTR", "broker_display_name": "Palantir", "exchange": "NASDAQ", "currency": "USD", "priority": "high"},
+            {"data_symbol": "SLOW", "broker_display_name": "Slow Co", "exchange": "NASDAQ", "currency": "USD", "priority": "medium"},
+        ]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+
+    def candidate(symbol):
+        return {
+            "market": "US",
+            "mode": "live",
+            "status": "skipped",
+            "alert_stage": "watch",
+            "data_symbol": symbol,
+            "broker_display_name": symbol,
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "side": "BUY",
+            "priority": "high" if symbol == "PLTR" else "medium",
+            "trade_target": True,
+            "benchmark_only": False,
+            "grade": "A",
+            "composite_score": 0.48,
+            "ev_net_pct": 0.4,
+            "breakout_quality": 0.7,
+            "valid_until": "2026-05-15T14:30:00+00:00",
+            "time_exit_at": "2026-05-15T18:55:00+00:00",
+            "signal_json": {},
+        }
+
+    def fake_scan(item, *args, **kwargs):
+        symbol = item["data_symbol"]
+        scan_events.append((symbol, len(sent)))
+        return candidate(symbol)
+
+    monkeypatch.setattr(advisory, "_scan_candidate", fake_scan)
+    monkeypatch.setattr(advisory, "_format_trade_card", lambda signal: f"CARD {signal['data_symbol']}")
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: {"id": 100 + len(scan_events)})
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "log_event", lambda level, event, detail=None: logs.append((event, detail or {})))
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 2
+    assert scan_events == [("PLTR", 0), ("SLOW", 1)]
+    assert sent == ["CARD PLTR", "CARD SLOW"]
+    assert any(event == "advisory_high_priority_scan_complete" for event, _ in logs)
+    timing = next(detail for event, detail in logs if event == "advisory_cycle_timing")
+    assert timing["immediate_live_sent"] == 1
+    assert timing["first_live_discord_elapsed_s"] is not None
+
+
+def test_run_advisory_cycle_dedups_discord_within_cycle(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    sent = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [
+            {"data_symbol": "PLTR", "broker_display_name": "Palantir", "exchange": "NASDAQ", "currency": "USD", "priority": "high"},
+            {"data_symbol": "PLTR", "broker_display_name": "Palantir duplicate", "exchange": "NASDAQ", "currency": "USD", "priority": "high"},
+        ]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_scan_candidate", lambda item, *args, **kwargs: {
+        "market": "US",
+        "mode": "live",
+        "status": "skipped",
+        "alert_stage": "watch",
+        "data_symbol": item["data_symbol"],
+        "broker_display_name": item["broker_display_name"],
+        "exchange": "NASDAQ",
+        "currency": "USD",
+        "side": "BUY",
+        "priority": item.get("priority", "medium"),
+        "trade_target": True,
+        "benchmark_only": False,
+        "grade": "A",
+        "composite_score": 0.48,
+        "ev_net_pct": 0.4,
+        "breakout_quality": 0.7,
+        "valid_until": "2026-05-15T14:30:00+00:00",
+        "time_exit_at": "2026-05-15T18:55:00+00:00",
+        "signal_json": {},
+    })
+    monkeypatch.setattr(advisory, "_format_trade_card", lambda signal: f"CARD {signal['broker_display_name']}")
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: {"id": 100})
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 2
+    assert sent == ["CARD Palantir"]
+
+
 def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
