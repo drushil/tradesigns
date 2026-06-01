@@ -1566,7 +1566,7 @@ def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfi
         "cycle_started_at": cycle_started_at.astimezone(timezone.utc).isoformat(),
         "market": market,
         "mode": mode,
-        "window": window,
+        "session_window": window,
         "broker_profile": cfg.broker_profile,
         "data_symbol": candidate.get("data_symbol") or item.get("data_symbol"),
         "primary_symbol": candidate.get("primary_symbol") or item.get("primary_symbol"),

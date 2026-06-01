@@ -701,7 +701,7 @@ def upsert_advisory_scan_snapshot(snapshot: dict) -> dict:
             "cycle_started_at": snapshot.get("cycle_started_at"),
             "market": snapshot.get("market"),
             "mode": snapshot.get("mode"),
-            "window": snapshot.get("window"),
+            "session_window": snapshot.get("session_window"),
             "broker_profile": snapshot.get("broker_profile"),
             "data_symbol": snapshot.get("data_symbol"),
             "primary_symbol": snapshot.get("primary_symbol"),
