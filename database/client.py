@@ -787,6 +787,84 @@ def get_advisory_scoreboard(
         return []
 
 
+# ── Advisory scan log ─────────────────────────────────────────────────────────
+
+def insert_advisory_scan_log(record: dict) -> dict:
+    """Write one per-cycle scan state row for a ticker (diagnostics only)."""
+    try:
+        db = get_client(write=True)
+        safe = _json_safe(record)
+        result = db.table("advisory_scan_log").insert(safe).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_LOG_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 200) -> list:
+    """Return the most recent scan log rows for a market, for the live scan dashboard table."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(hours=hours_back)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_scan_log")
+                  .select("*")
+                  .eq("market", market)
+                  .gte("scanned_at", cutoff)
+                  .order("scanned_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_LOG_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+# ── Advisory virtual positions ────────────────────────────────────────────────
+
+def create_virtual_position(record: dict) -> dict:
+    """Create a virtual assumed-entry position for an A/A+ advisory alert."""
+    try:
+        db = get_client(write=True)
+        result = db.table("advisory_virtual_positions").insert(_json_safe(record)).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[VIRTUAL_POSITION_CREATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_open_virtual_positions(max_age_days: int = 5) -> list:
+    """Return open virtual positions for exit monitoring."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=max_age_days)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_virtual_positions")
+                  .select("*")
+                  .eq("status", "open")
+                  .gte("created_at", cutoff)
+                  .order("created_at", desc=True)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[VIRTUAL_POSITION_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_virtual_position(position_id: int, updates: dict) -> dict:
+    """Update a virtual position (exit status, pnl, monitor json)."""
+    try:
+        safe = {k: v for k, v in _json_safe(updates).items() if v is not None}
+        if not safe:
+            return {}
+        db = get_client(write=True)
+        result = (db.table("advisory_virtual_positions")
+                  .update(safe)
+                  .eq("id", position_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[VIRTUAL_POSITION_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
 # ── FX rate cache ─────────────────────────────────────────────────────────────
 
 def get_fx_rate_cache(pair: str = "EURUSD", rate_date: str = None,
