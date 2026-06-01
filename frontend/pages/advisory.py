@@ -231,7 +231,7 @@ def _render_live_scan_log(fetch_fn):
         table_rows.append({
             "Scanned At": _format_time(r.get("scanned_at")),
             "Symbol": r.get("data_symbol") or "—",
-            "Window": r.get("window") or "—",
+            "Window": r.get("session_window") or "—",
             "Grade": r.get("grade") or "—",
             "Side": r.get("side") or "—",
             "Composite": float(r.get("composite_score") or 0),
