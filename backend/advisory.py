@@ -28,6 +28,7 @@ from database.client import (
     get_fx_rate_cache,
     insert_advisory_signal,
     log_event,
+    upsert_advisory_scan_snapshot,
     upsert_fx_rate_cache,
     update_advisory_exit_status,
 )
@@ -131,54 +132,66 @@ ADVISORY_UNIVERSE = {
         # --- EU mirrors: early-read on US momentum during eu_open window only ---
         {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "AMD.DE", "broker_display_name": "AMD (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMD",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "APC.DE", "broker_display_name": "Apple (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AAPL",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "MSF.DE", "broker_display_name": "Microsoft (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MSFT",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "AMZ.DE", "broker_display_name": "Amazon (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMZN",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "TL0.DE", "broker_display_name": "Tesla (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "TSLA",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "FB2A.DE", "broker_display_name": "Meta (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "META",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "ABEA.DE", "broker_display_name": "Alphabet A (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "GOOGL",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "PTX.DE", "broker_display_name": "Palantir (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "PLTR",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "NFC.DE", "broker_display_name": "Netflix (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NFLX",
-         "mirror_only_windows": ["eu_open"],
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
          "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "1YD.DE", "broker_display_name": "Broadcom (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AVGO",
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "morning mirror can be thin — use limit orders only"},
+        {"data_symbol": "MTE.DE", "broker_display_name": "Micron Technology (Xetra)", "exchange": "Xetra", "currency": "EUR",
+         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MU",
+         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
+         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "morning mirror can be thin — use limit orders only"},
     ],
 }
 
@@ -210,7 +223,8 @@ LIVE_SIGNAL_STATUSES = {"sent", "entered", "hit_stop", "hit_target"}
 OPEN_LIVE_STATUSES = {"sent", "entered"}
 WATCH_SIGNAL_STATUSES = {"skipped"}
 WATCH_ALERT_STAGES = {"watch", "ignition"}
-ALERT_STAGE_RANK = {"ignition": 0, "watch": 1, "trade": 2}
+INFO_ALERT_STAGES = {"downside"}
+ALERT_STAGE_RANK = {"ignition": 0, "downside": 0, "watch": 1, "trade": 2}
 
 
 @dataclass
@@ -242,6 +256,8 @@ class AdvisoryConfig:
     fx_rate: float
     fx_rate_source: str = "unknown"
     fx_rate_fetched_at: str = ""
+    broker_profile: str = "trade_republic"
+    broker_tag: str = "trade_republic_de"
 
 
 def _env_value(key: str, default: str) -> str:
@@ -417,6 +433,8 @@ def load_config() -> AdvisoryConfig:
         fx_rate=fx["rate"],
         fx_rate_source=fx["source"],
         fx_rate_fetched_at=fx.get("fetched_at", ""),
+        broker_profile=_env_value("BROKER_PROFILE", "trade_republic").lower(),
+        broker_tag=_env_value("ADVISORY_BROKER_TAG", "trade_republic_de").lower(),
     )
 
 
@@ -436,6 +454,10 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
     now_cet = now_cet or _now_cet()
     minutes = now_cet.hour * 60 + now_cet.minute
     if market == "EU":
+        if _env_value("BROKER_PROFILE", "trade_republic").lower() == "trade_republic":
+            start = _env_int("ADVISORY_TR_MORNING_START_MINUTES", 9 * 60)
+            if start <= minutes < 9 * 60 + 15:
+                return "tr_morning_watch"
         if 9 * 60 + 15 <= minutes <= 11 * 60:
             return "eu_open"
         if 14 * 60 <= minutes <= 16 * 60:
@@ -446,16 +468,26 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
             return "us_premarket"
         if 15 * 60 + 30 <= minutes <= 17 * 60:
             return "us_open"
-        if 20 * 60 <= minutes <= 21 * 60:
+        if 17 * 60 < minutes < 20 * 60:
+            return "us_midday"
+        if 20 * 60 <= minutes < 21 * 60:
             return "us_afternoon"
+        if 21 * 60 <= minutes <= 22 * 60:
+            return "us_close"
         return None
     return None
 
 
 def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
     starts = {
-        "EU": {"eu_open": (9, 15), "eu_catalyst_only": (14, 0)},
-        "US": {"us_premarket": (15, 0), "us_open": (15, 30), "us_afternoon": (20, 0)},
+        "EU": {"tr_morning_watch": (7, 30), "eu_open": (9, 15), "eu_catalyst_only": (14, 0)},
+        "US": {
+            "us_premarket": (15, 0),
+            "us_open": (15, 30),
+            "us_midday": (17, 1),
+            "us_afternoon": (20, 0),
+            "us_close": (21, 0),
+        },
     }
     hour, minute = starts.get(market, {}).get(window, (now_cet.hour, now_cet.minute))
     return now_cet.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -487,12 +519,19 @@ def _is_expired_signal(signal: dict, now_utc: datetime) -> bool:
 
 
 def _is_open_live_signal(signal: dict, now_utc: datetime) -> bool:
+    if _is_virtual_advisory_position(signal):
+        return False
     status = str(signal.get("status"))
     if status == "entered":
         return True
     if status == "sent":
         return not _is_expired_signal(signal, now_utc)
     return False
+
+
+def _is_virtual_advisory_position(signal: dict) -> bool:
+    monitor = signal.get("exit_monitor_json") or {}
+    return isinstance(monitor, dict) and bool(monitor.get("virtual_entry"))
 
 
 def _recent_watch_signal_in_session(recent_live: list, symbol: str, market: str,
@@ -777,6 +816,7 @@ def _breakout_quality(side: str, composite: float, signals: dict, market_regime:
 
 
 def _grade(composite: float, breakout_quality: float, orb_active: bool) -> str:
+    composite = abs(float(composite or 0))
     if composite >= 0.55 and breakout_quality >= 0.60:
         return "A+"
     if composite >= 0.45 and (breakout_quality >= 0.45 or orb_active):
@@ -1038,6 +1078,11 @@ def _ordered_markets(cfg: AdvisoryConfig) -> list[str]:
     return live + shadow + other
 
 
+def _is_broker_supported(item: dict, cfg: AdvisoryConfig) -> bool:
+    tags = {str(tag).lower() for tag in (item.get("broker_tags") or [])}
+    return not tags or cfg.broker_tag in tags
+
+
 def _compact_signal_payload(signal_result: dict) -> dict:
     signals = signal_result.get("signals") or {}
     return {
@@ -1111,9 +1156,11 @@ def _format_trade_card(signal: dict) -> str:
     is_shadow = signal["mode"] != "live"
     is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
     is_ignition = signal.get("alert_stage") == "ignition"
+    is_downside = signal.get("alert_stage") == "downside"
     is_late_chase = bool(signal.get("late_chase_json"))
     is_runner = bool(signal.get("runner_context"))
     is_holding = bool(signal.get("holding_context"))
+    signal_json = signal.get("signal_json") or {}
     notional = f"€{signal['suggested_size_eur']:.0f}"
     range_action = (
         "sell/short only inside range; avoid chasing below max extension."
@@ -1128,7 +1175,15 @@ def _format_trade_card(signal: dict) -> str:
     target_2_eur = _eur_price(signal, "target_2")
     quick_why = signal["rationale"].split(", window ")[0]
 
-    if is_holding and is_runner:
+    if is_downside:
+        prefix = "DOWNSIDE RISK"
+    elif (
+        signal_json.get("broker_profile") == "trade_republic"
+        and signal_json.get("window") == "tr_morning_watch"
+        and signal.get("alert_stage") in WATCH_ALERT_STAGES
+    ):
+        prefix = "TRADE REPUBLIC MORNING WATCH"
+    elif is_holding and is_runner:
         prefix = "RUNNER HOLD"
     elif is_holding:
         prefix = "HOLD"
@@ -1144,7 +1199,9 @@ def _format_trade_card(signal: dict) -> str:
         prefix = "LIVE TRADE ALERT"
 
     qualifier = ""
-    if is_late_chase:
+    if is_downside:
+        qualifier = " - protect longs"
+    elif is_late_chase:
         qualifier = " - extended"
     elif signal.get("pullback_confirmed"):
         qualifier = " - pullback confirmed"
@@ -1154,7 +1211,12 @@ def _format_trade_card(signal: dict) -> str:
     first_line = f"**{prefix} - {side} {sym} - {signal['grade']} - {signal['market']}{qualifier}**"
 
     notes = []
-    if is_shadow:
+    if is_downside:
+        notes.append(
+            "Why: bearish pressure detected; this is risk/exit context, not a short-trade recommendation."
+        )
+        notes.append("Action: check any long exposure, tighten stops, and avoid fresh long entries until structure improves.")
+    elif is_shadow:
         if str(signal.get("grade", "")).upper() == "C":
             notes.append(f"LOW-GRADE SHADOW {side} OPPORTUNITY: log only.")
         notes.append("Action: log only; do not trade from shadow mode.")
@@ -1207,7 +1269,9 @@ def _format_trade_card(signal: dict) -> str:
         except (TypeError, ValueError):
             pass
 
-    if is_watch:
+    if is_downside:
+        entry_line = f"Risk line: €{entry_min_eur:.2f}-€{entry_max_eur:.2f} | Valid: {signal['valid_until_cet']}"
+    elif is_watch:
         if is_ignition:
             entry_line = f"Watch band: €{entry_min_eur:.2f}-€{entry_max_eur:.2f} | Valid: {signal['valid_until_cet']}"
         else:
@@ -1221,7 +1285,7 @@ def _format_trade_card(signal: dict) -> str:
         f"Levels: stop €{stop_eur:.2f} | T1 €{target_1_eur:.2f} | "
         f"T2 €{target_2_eur:.2f} | Exit by {signal['time_exit_cet']}"
     )
-    size_label = "Tentative size" if is_watch else "Size"
+    size_label = "Reference size" if is_downside else ("Tentative size" if is_watch else "Size")
     size_line = f"{size_label}: {notional} | Risk: ~€{signal['risk_eur']:.0f}"
     if signal.get("listing_type") == "eu_us_mirror":
         notes.append(f"Pre-Nasdaq mirror of {signal.get('primary_symbol')}: early EU read; execute on primary listing.")
@@ -1273,6 +1337,8 @@ def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
     # benchmark_only tickers (SPY, QQQ) are logged for context but never get a Discord card
     if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
         return False
+    if candidate.get("alert_stage") in INFO_ALERT_STAGES:
+        return candidate.get("mode") == "live"
     if candidate.get("alert_stage") in WATCH_ALERT_STAGES:
         return candidate.get("mode") == "live"
     if candidate.get("mode") == "live":
@@ -1446,6 +1512,92 @@ def _monitor_open_positions(cfg: AdvisoryConfig, now_cet: datetime) -> list[dict
     return emitted
 
 
+def _should_virtual_enter(candidate: dict) -> bool:
+    """Auto-track A/A+ trade alerts as hypothetical advisory positions."""
+    if not _env_bool("ADVISORY_VIRTUAL_A_GRADE_ENTRIES", True):
+        return False
+    return (
+        candidate.get("mode") == "live"
+        and candidate.get("alert_stage") == "trade"
+        and str(candidate.get("side") or "").upper() == "BUY"
+        and _meets_min_grade(candidate.get("grade"), "A")
+    )
+
+
+def _virtual_entry_native(candidate: dict) -> float:
+    try:
+        entry_min = float(candidate.get("entry_min") or 0)
+        entry_max = float(candidate.get("entry_max") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if entry_min and entry_max:
+        return (entry_min + entry_max) / 2.0
+    return entry_min or entry_max
+
+
+def _virtual_entry_monitor(candidate: dict, entry_native: float, cfg: AdvisoryConfig) -> dict:
+    return {
+        "virtual_entry": True,
+        "entry_assumption": "midpoint_of_advisory_band",
+        "manual_entry_price_eur": round(
+            _display_price(entry_native, candidate.get("currency", "EUR"), candidate.get("fx_rate") or cfg.fx_rate),
+            4,
+        ),
+        "size_eur": round(float(candidate.get("suggested_size_eur") or 0), 2),
+        "entered_at": datetime.utcnow().isoformat() + "Z",
+        "alerts": [],
+    }
+
+
+def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfig,
+                   item: dict, market: str, mode: str, window: str,
+                   gate_reason: str, candidate: dict = None) -> dict:
+    candidate = candidate or {}
+    quality = candidate.get("data_quality_json") or {}
+    signal_json = candidate.get("signal_json") or {}
+    meta = {
+        "trade_target": item.get("trade_target", True),
+        "benchmark_only": item.get("benchmark_only", False),
+        "priority": item.get("priority", "medium"),
+        "category": item.get("category"),
+    }
+    return {
+        "cycle_id": cycle_id,
+        "cycle_started_at": cycle_started_at.astimezone(timezone.utc).isoformat(),
+        "market": market,
+        "mode": mode,
+        "window": window,
+        "broker_profile": cfg.broker_profile,
+        "data_symbol": candidate.get("data_symbol") or item.get("data_symbol"),
+        "primary_symbol": candidate.get("primary_symbol") or item.get("primary_symbol"),
+        "broker_display_name": candidate.get("broker_display_name") or item.get("broker_display_name"),
+        "exchange": candidate.get("exchange") or item.get("exchange"),
+        "currency": candidate.get("currency") or item.get("currency"),
+        "listing_type": candidate.get("listing_type") or item.get("listing_type"),
+        "side": candidate.get("side"),
+        "grade": candidate.get("grade"),
+        "alert_stage": candidate.get("alert_stage"),
+        "status": candidate.get("status") or gate_reason,
+        "gate_reason": gate_reason,
+        "composite_score": candidate.get("composite_score"),
+        "ev_net_pct": candidate.get("ev_net_pct"),
+        "breakout_quality": candidate.get("breakout_quality"),
+        "last_price": quality.get("last_price") or (signal_json.get("atr_data") or {}).get("current_price"),
+        "volume": quality.get("avg_recent_volume"),
+        "signal_json": signal_json,
+        "data_quality_json": quality,
+        "meta_json": meta,
+    }
+
+
+def _record_scan_snapshot(snapshot: dict) -> None:
+    if not _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True):
+        return
+    result = upsert_advisory_scan_snapshot(snapshot)
+    if result.get("error"):
+        log_event("WARN", "advisory_scan_snapshot_write_failed", {"error": str(result["error"])[:160]})
+
+
 def _eu_catalyst_score(item: dict, signals: dict) -> float:
     scores = [abs(_signal_score(signals, "news_sentiment"))]
     aliases = [
@@ -1515,11 +1667,9 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
             pass
     composite = float(signal_result.get("composite_score") or 0)
     is_live_market = market in cfg.live_markets
-    if composite <= 0:
+    if composite == 0:
         return None
     side = "BUY" if composite > 0 else "SELL"
-    if side == "SELL" and not cfg.allow_short:
-        return None
 
     signals = signal_result.get("signals") or {}
     breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
@@ -1545,25 +1695,37 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     )
     ignition = _ignition_check(symbol, side, composite, atr_data) if is_live_market else {}
 
+    strength = abs(composite)
+    downside_ready = (
+        is_live_market
+        and side == "SELL"
+        and not cfg.allow_short
+        and strength >= _env_float("ADVISORY_DOWNSIDE_MIN_COMPOSITE", 0.25)
+        and (breakout >= _env_float("ADVISORY_DOWNSIDE_MIN_BREAKOUT_QUALITY", 0.25) or orb_active)
+    )
     trade_ready = (
         not is_live_market
         or (
-            composite >= cfg.min_composite
+            strength >= cfg.min_composite
             and grade in {"A+", "A"}
             and breakout >= cfg.min_breakout_quality
+            and (side != "SELL" or cfg.allow_short)
         )
     )
     watch_ready = (
         is_live_market
+        and side == "BUY"
         and (grade != "C" or bool(late_chase))
-        and composite >= cfg.min_watch_composite
+        and strength >= cfg.min_watch_composite
         and (breakout >= cfg.min_watch_breakout_quality or orb_active)
     )
     ignition_ready = bool(ignition) and not trade_ready
-    if is_live_market and not (trade_ready or watch_ready or ignition_ready):
+    if is_live_market and not (trade_ready or watch_ready or ignition_ready or downside_ready):
         return None
 
-    if trade_ready and not late_chase:
+    if downside_ready:
+        alert_stage = "downside"
+    elif trade_ready and not late_chase:
         alert_stage = "trade"
     elif ignition_ready and not watch_ready:
         alert_stage = "ignition"
@@ -1587,7 +1749,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         profile={"ev_breakout_probe_min_quality": 0.65},
     )
     ev_net = ev.get("net_ev_pct")
-    if is_live_market and ev_net is not None and float(ev_net) < cfg.min_ev_pct:
+    if is_live_market and alert_stage != "downside" and ev_net is not None and float(ev_net) < cfg.min_ev_pct:
         if not (watch_ready or ignition_ready):
             return None
         alert_stage = "ignition" if ignition_ready and not watch_ready else "watch"
@@ -1596,9 +1758,9 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         if catalyst_score < 0.35:
             return None
 
-    validity_minutes = 45 if alert_stage in WATCH_ALERT_STAGES and market == "US" else (15 if market == "US" else 12)
+    validity_minutes = 45 if alert_stage in WATCH_ALERT_STAGES and market == "US" else (30 if alert_stage == "downside" else (15 if market == "US" else 12))
     valid_until = now_cet.astimezone(timezone.utc) + timedelta(minutes=validity_minutes)
-    time_exit = now_cet.replace(hour=20, minute=55, second=0, microsecond=0) if market == "US" else now_cet.replace(hour=16, minute=45, second=0, microsecond=0)
+    time_exit = now_cet.replace(hour=21, minute=55, second=0, microsecond=0) if market == "US" else now_cet.replace(hour=16, minute=45, second=0, microsecond=0)
     rationale_bits = [
         f"{grade} setup",
         f"VWAP {signals.get('vwap_deviation', {}).get('score', 0):+.2f}",
@@ -1656,6 +1818,8 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     record["signal_json"] = {
         **record.get("signal_json", {}),
         "alert_stage": alert_stage,
+        "window": window,
+        "broker_profile": cfg.broker_profile,
         "late_chase": late_chase or {},
         "ignition": ignition or {},
         "trend_1h": trend_1h,
@@ -1678,6 +1842,7 @@ def run_advisory_cycle() -> dict:
     cycle_started = time.perf_counter()
     cfg = load_config()
     now_cet = _now_cet()
+    cycle_id = now_cet.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     recent_live = get_recent_advisory_signals(days=1, mode="live")
     recent_shadow = get_recent_advisory_signals(days=1, mode="shadow")
     now_utc = now_cet.astimezone(timezone.utc)
@@ -1782,7 +1947,17 @@ def run_advisory_cycle() -> dict:
             candidate["id"] = saved.get("id")
             candidate["message_text"] = _format_trade_card(candidate)
             if candidate.get("mode") == "live" and candidate.get("alert_stage") == "trade":
-                update_advisory_exit_status(saved["id"], {"message_text": candidate["message_text"]})
+                updates = {"message_text": candidate["message_text"]}
+                if _should_virtual_enter(candidate):
+                    entry_native = _virtual_entry_native(candidate)
+                    if entry_native:
+                        updates.update({
+                            "entry_triggered": True,
+                            "manual_entry_price": round(entry_native, 4),
+                            "status": "entered",
+                            "exit_monitor_json": _virtual_entry_monitor(candidate, entry_native, cfg),
+                        })
+                update_advisory_exit_status(saved["id"], updates)
 
         can_send_shadow = (
             mode != "shadow"
@@ -1824,6 +1999,12 @@ def run_advisory_cycle() -> dict:
         if market not in cfg.live_markets and market not in cfg.shadow_markets:
             continue
         window = _window_name(market, now_cet)
+        if not window:
+            for item in ADVISORY_UNIVERSE.get(market, []):
+                _record_scan_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, "", "outside_advisory_window"
+                ))
+            continue
         if mode == "live" and market == "US" and window == "us_open":
             minutes_since_open = _minutes_since_session_start(market, window, now_cet)
             if minutes_since_open < cfg.us_min_minutes_after_open:
@@ -1831,6 +2012,10 @@ def run_advisory_cycle() -> dict:
                     "minutes_since_open": round(minutes_since_open, 1),
                     "required_minutes": cfg.us_min_minutes_after_open,
                 })
+                for item in ADVISORY_UNIVERSE.get(market, []):
+                    _record_scan_snapshot(_scan_snapshot(
+                        cycle_id, now_cet, cfg, item, market, mode, window, "waiting_for_us_open_bars"
+                    ))
                 continue
         if mode == "live" and daily_live_pnl <= -abs(cfg.max_daily_loss_eur):
             log_event("INFO", "advisory_live_blocked_daily_loss_cap", {
@@ -1872,6 +2057,11 @@ def run_advisory_cycle() -> dict:
                 high_priority_logged = True
 
             scanned_count += 1
+            if not _is_broker_supported(item, cfg):
+                _record_scan_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, "broker_not_supported"
+                ))
+                continue
             # EU shadow early gate: skip full signal compute for tickers whose prior composite
             # was very low, indicating no momentum.  Controlled by env var; default 0.15.
             # Only applies to non-mirror EU shadow tickers (mirrors have their own window gate).
@@ -1887,11 +2077,17 @@ def run_advisory_cycle() -> dict:
                     log_event("DEBUG", "advisory_eu_early_gate_skip", {
                         "symbol": _sym_key, "prior_composite": round(_prior_c, 4), "gate": _gate,
                     })
+                    _record_scan_snapshot(_scan_snapshot(
+                        cycle_id, now_cet, cfg, item, market, mode, window, "eu_early_gate_skip"
+                    ))
                     continue
 
             if mode == "live" and _alerted_symbol_in_session(
                 recent_live, item["data_symbol"], market, now_cet
             ):
+                _record_scan_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, "already_alerted_in_session"
+                ))
                 continue
             recent_watch = None
             if mode == "live":
@@ -1900,7 +2096,13 @@ def run_advisory_cycle() -> dict:
                 )
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
             if not candidate:
+                _record_scan_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, "no_candidate"
+                ))
                 continue
+            _record_scan_snapshot(_scan_snapshot(
+                cycle_id, now_cet, cfg, item, market, mode, window, "candidate", candidate
+            ))
             if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
                 candidate["status"] = "benchmark_logged"
                 insert_advisory_signal(candidate)
@@ -1918,6 +2120,9 @@ def run_advisory_cycle() -> dict:
                     }
                     candidate["message_text"] = _format_trade_card(candidate)
             if mode == "live" and _watch_repeat_blocked(recent_watch, candidate):
+                _record_scan_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, "watch_repeat_blocked", candidate
+                ))
                 continue
             if mode == "live" and candidate.get("alert_stage") == "trade" and _watch_had_late_chase(recent_watch):
                 candidate["pullback_confirmed"] = True
@@ -1929,6 +2134,13 @@ def run_advisory_cycle() -> dict:
             if candidate.get("status", "").startswith("blocked"):
                 insert_advisory_signal(candidate)
                 blocked.append(candidate)
+                continue
+            if (
+                mode == "live"
+                and candidate.get("alert_stage") in INFO_ALERT_STAGES
+                and _should_send_discord(candidate, cfg)
+            ):
+                _persist_emit_candidate(candidate, mode)
                 continue
             if (
                 mode == "live"

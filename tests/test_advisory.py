@@ -34,6 +34,8 @@ def _cfg(**overrides):
         "allow_short": False,
         "discord_webhook_url": "https://discord.invalid/webhook",
         "fx_rate": 1.08,
+        "broker_profile": "trade_republic",
+        "broker_tag": "trade_republic_de",
     }
     values.update(overrides)
     return advisory.AdvisoryConfig(**values)
@@ -42,13 +44,25 @@ def _cfg(**overrides):
 def test_window_name_enforces_trade_republic_friendly_sessions():
     berlin = timezone(timedelta(hours=2))
 
-    assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 29, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 0, tzinfo=berlin)) == "tr_morning_watch"
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 15, tzinfo=berlin)) == "eu_open"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 14, 30, tzinfo=berlin)) == "eu_catalyst_only"
     assert advisory._window_name("US", datetime(2026, 5, 15, 14, 59, tzinfo=berlin)) is None
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 15, tzinfo=berlin)) == "us_premarket"
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 30, tzinfo=berlin)) == "us_open"
+    assert advisory._window_name("US", datetime(2026, 5, 15, 17, 30, tzinfo=berlin)) == "us_midday"
     assert advisory._window_name("US", datetime(2026, 5, 15, 20, 30, tzinfo=berlin)) == "us_afternoon"
+    assert advisory._window_name("US", datetime(2026, 5, 15, 21, 30, tzinfo=berlin)) == "us_close"
+
+
+def test_trade_republic_morning_start_can_be_lowered_after_data_verification(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    monkeypatch.setenv("ADVISORY_TR_MORNING_START_MINUTES", "450")
+
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) == "tr_morning_watch"
 
 
 def test_entry_plan_caps_size_by_risk_and_capital():
@@ -212,6 +226,35 @@ def test_sell_trade_card_uses_direction_aware_action():
     assert "LIMIT SELL" in card
     assert "sell/short only inside range" in card
     assert "buy only inside range" not in card
+
+
+def test_downside_risk_card_is_not_short_recommendation():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=100.0, side="SELL", atr_pct=1.0, currency="USD", cfg=cfg, grade="B")
+    signal = {
+        "mode": "live",
+        "alert_stage": "downside",
+        "market": "US",
+        "data_symbol": "AMD",
+        "broker_display_name": "AMD",
+        "currency": "USD",
+        "side": "SELL",
+        "valid_until_cet": "18:00 Berlin",
+        "time_exit_cet": "21:55 Berlin",
+        "rationale": "B setup, VWAP -0.60, ORB -0.40",
+        "grade": "B",
+        "composite_score": -0.34,
+        "ev_net_pct": None,
+        "fx_rate": 1.08,
+        "signal_json": {"alert_stage": "downside"},
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "DOWNSIDE RISK" in card
+    assert "not a short-trade recommendation" in card
+    assert "protect longs" in card
 
 
 def test_late_chase_watch_card_explains_pullback_needed():
@@ -515,11 +558,12 @@ def test_eu_mirror_universe_is_metadata_tagged():
         if item.get("listing_type") == "eu_us_mirror"
     ]
 
-    assert len(advisory.ADVISORY_UNIVERSE["EU"]) == 22  # 12 native + 10 mirrors
-    assert len(mirrors) == 10
+    assert len(advisory.ADVISORY_UNIVERSE["EU"]) == 24  # 12 native + 12 mirrors
+    assert len(mirrors) == 12
     assert all(item.get("origin_market") == "US" for item in mirrors)
     assert all(item.get("primary_symbol") for item in mirrors)
-    assert all(item.get("mirror_only_windows") == ["eu_open"] for item in mirrors)
+    assert all(item.get("mirror_only_windows") == ["tr_morning_watch", "eu_open"] for item in mirrors)
+    assert {"AVGO", "MU"}.issubset({item.get("primary_symbol") for item in mirrors})
     assert abs(sum(advisory.EU_MIRROR_WEIGHTS.values()) - 1.0) < 0.001
 
 
@@ -946,6 +990,7 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     })
     monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: update)
     monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
     monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
 
@@ -958,6 +1003,53 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert advisory._parse_dt(saved[0]["valid_until"]) == datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
     assert len(sent) == 1
     assert "NVDA" in sent[0]
+
+
+def test_trade_alert_creates_virtual_a_grade_entry(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    saved = []
+    updates = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
+        "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
+        "composite_score": 0.62,
+        "signals": {
+            "vwap_deviation": {"score": 0.55},
+            "macd_crossover": {"score": 0.55},
+            "relative_strength": {"score": 0.50},
+            "orb": {"score": 0.65, "meta": {"active": True}},
+            "news_sentiment": {"score": 0.10},
+        },
+        "atr_data": {"atr_pct": 1.0},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": 0.82, "confidence": 0.74,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 77})
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: updates.append((signal_id, update)) or update)
+    monkeypatch.setattr(advisory, "_send_discord", lambda *args, **kwargs: True)
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 1
+    assert updates[0][0] == 77
+    assert updates[0][1]["status"] == "entered"
+    assert updates[0][1]["entry_triggered"] is True
+    assert updates[0][1]["exit_monitor_json"]["virtual_entry"] is True
 
 
 def test_run_advisory_cycle_sends_high_priority_live_before_rest_of_scan(monkeypatch):
@@ -1147,6 +1239,33 @@ def test_run_advisory_cycle_waits_for_us_open_bars(monkeypatch):
     assert result["emitted"] == 0
     assert saved == []
     assert any(event == "advisory_live_waiting_for_us_open_bars" for _, event, _ in logs)
+
+
+def test_run_advisory_cycle_skips_entries_not_supported_by_active_broker(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    snapshots = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(broker_tag="trade_republic_de"))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{
+            "data_symbol": "ONLYSCALABLE",
+            "broker_display_name": "Only Scalable",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "broker_tags": ["scalable_de"],
+        }]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: pytest.fail("unsupported broker entry should not scan"))
+    monkeypatch.setattr(advisory, "upsert_advisory_scan_snapshot", lambda snapshot: snapshots.append(snapshot) or {})
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["emitted"] == 0
+    assert snapshots[0]["gate_reason"] == "broker_not_supported"
 
 
 def test_us_premarket_window_can_emit_watch_without_open_wait(monkeypatch):
@@ -1643,6 +1762,48 @@ def test_live_scan_allows_c_grade_late_chase_watch(monkeypatch):
     assert candidate["alert_stage"] == "watch"
     assert candidate["late_chase_json"]["reason"] == "late_chase"
     assert "WATCH ONLY" in candidate["message_text"]
+
+
+def test_live_scan_emits_downside_risk_without_short_permission(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
+        "ok": True, "last_price": 100.0, "rows": 60, "age_minutes": 1.0,
+        "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bear", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
+        "composite_score": -0.38,
+        "signals": {
+            "vwap_deviation": {"score": -0.55},
+            "macd_crossover": {"score": -0.45},
+            "relative_strength": {"score": -0.35},
+            "orb": {"score": -0.30, "meta": {"active": False}},
+            "news_sentiment": {"score": -0.10},
+        },
+        "atr_data": {"atr_pct": 0.70},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": -0.10, "confidence": 0.30,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+
+    candidate = advisory._scan_candidate(
+        {"data_symbol": "AMD", "broker_display_name": "AMD", "exchange": "NASDAQ", "currency": "USD"},
+        "US",
+        "live",
+        _cfg(allow_short=False),
+        [],
+        datetime(2026, 5, 15, 17, 30, tzinfo=berlin),
+    )
+
+    assert candidate is not None
+    assert candidate["side"] == "SELL"
+    assert candidate["alert_stage"] == "downside"
+    assert candidate["status"] == "skipped"
+    assert "DOWNSIDE RISK" in candidate["message_text"]
 
 
 def test_live_scan_emits_momentum_ignition_below_watch_threshold(monkeypatch):

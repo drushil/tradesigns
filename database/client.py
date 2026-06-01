@@ -692,6 +692,66 @@ def update_advisory_exit_status(signal_id: int, updates: dict) -> dict:
         return {"error": str(e)}
 
 
+def upsert_advisory_scan_snapshot(snapshot: dict) -> dict:
+    """Persist the latest per-cycle advisory scan state for one ticker."""
+    try:
+        db = get_client(write=True)
+        record = {
+            "cycle_id": snapshot.get("cycle_id"),
+            "cycle_started_at": snapshot.get("cycle_started_at"),
+            "market": snapshot.get("market"),
+            "mode": snapshot.get("mode"),
+            "window": snapshot.get("window"),
+            "broker_profile": snapshot.get("broker_profile"),
+            "data_symbol": snapshot.get("data_symbol"),
+            "primary_symbol": snapshot.get("primary_symbol"),
+            "broker_display_name": snapshot.get("broker_display_name"),
+            "exchange": snapshot.get("exchange"),
+            "currency": snapshot.get("currency"),
+            "listing_type": snapshot.get("listing_type"),
+            "side": snapshot.get("side"),
+            "grade": snapshot.get("grade"),
+            "alert_stage": snapshot.get("alert_stage"),
+            "status": snapshot.get("status"),
+            "gate_reason": snapshot.get("gate_reason"),
+            "composite_score": snapshot.get("composite_score"),
+            "ev_net_pct": snapshot.get("ev_net_pct"),
+            "breakout_quality": snapshot.get("breakout_quality"),
+            "last_price": snapshot.get("last_price"),
+            "move_pct": snapshot.get("move_pct"),
+            "volume": snapshot.get("volume"),
+            "signal_json": _json_safe(snapshot.get("signal_json") or {}),
+            "data_quality_json": _json_safe(snapshot.get("data_quality_json") or {}),
+            "meta_json": _json_safe(snapshot.get("meta_json") or {}),
+        }
+        record = {key: value for key, value in record.items() if value is not None}
+        result = db.table("advisory_scan_snapshots").upsert(
+            record,
+            on_conflict="cycle_id,market,data_symbol",
+        ).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_SNAPSHOT_WRITE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_latest_advisory_scan_snapshots(market: str = "US", limit: int = 100) -> list:
+    """Fetch newest advisory scan snapshots for dashboard visibility."""
+    try:
+        db = get_client()
+        q = (db.table("advisory_scan_snapshots")
+             .select("*")
+             .order("cycle_started_at", desc=True)
+             .limit(limit))
+        if market and market.lower() != "all":
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_SNAPSHOT_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 def get_unscored_advisory_signals(min_age_minutes: int = 5, limit: int = 25,
                                   max_age_days: int = 4) -> list:
     """Fetch advisory rows eligible for forward-return replay."""
