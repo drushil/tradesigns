@@ -54,6 +54,7 @@ from backend.learning.engine     import (RegimeAwareWeightEngine, attribute_sign
                                           build_weight_engine_from_trades,
                                           compute_hold_score)
 from database.client             import (insert_trade, insert_signal, get_recent_trades,
+                                          get_recent_advisory_signals,
                                           save_signal_weights, get_latest_weights,
                                           save_snapshot, save_learning, log_event, get_logs,
                                           save_open_trade, get_open_trade_records,
@@ -371,6 +372,7 @@ def run_signal_cycle():
     )
     weights          = _learning_engine.get_weights(regime)
     recent_trades    = get_recent_trades(days=30)
+    recent_live_advisories = get_recent_advisory_signals(days=1, mode="live", market="US")
     _hydrate_open_trades(portfolio_state.get("positions", []))
     try:
         _replay_advisory_signals()
@@ -457,6 +459,7 @@ def run_signal_cycle():
                     ticker, regime, weights, effective_profile,
                     portfolio_state, recent_trades,
                     regime_state, shock_result,
+                    recent_live_advisories,
                 )
                 if candidate:
                     candidates.append(candidate)

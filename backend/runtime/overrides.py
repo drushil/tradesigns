@@ -37,6 +37,8 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("event_risk_min_stop_pct", 0.25)
     p.setdefault("event_risk_latest_entry_utc_hour", 19)
     p.setdefault("max_new_intraday_trades_per_cycle", 2)
+    p.setdefault("autonomous_min_composite_for_entry", 0.30)
+    p.setdefault("ranging_min_composite_for_entry", 0.45)
     p.setdefault("pdt_protection_enabled", True)
     p.setdefault("pdt_max_day_trades_5d", 3)
     p.setdefault("pdt_min_equity_usd", 25000)
@@ -58,7 +60,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("ranging_a_plus_min_ev_pct", 0.20)
     p.setdefault("ranging_max_notional_eur", 1200)
     p.setdefault("ranging_leveraged_min_ev_pct", 0.25)
-    p.setdefault("ranging_probe_enabled", True)
+    p.setdefault("ranging_probe_enabled", False)
     p.setdefault("ranging_probe_allowed_grades", "A+,A")
     p.setdefault("ranging_probe_shadow_grades", "B")
     p.setdefault("ranging_probe_size_multiplier", 0.35)
@@ -136,11 +138,29 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("context_quality_outside_hours_multiplier", 0.0)
     p.setdefault("context_quality_unknown_multiplier", 0.50)
     p.setdefault("advisory_chase_block_enabled", True)
+    p.setdefault("advisory_confirmation_enabled", True)
+    p.setdefault("advisory_confirmation_min_grade", "B")
+    p.setdefault("advisory_confirmation_min_composite", 0.35)
+    p.setdefault("advisory_confirmation_lookback_minutes", 90)
+    p.setdefault(
+        "advisory_confirmation_tickers",
+        "NVDA,AMD,AAPL,MSFT,META,AMZN,TSLA,GOOGL,NFLX,PLTR,MU,AVGO",
+    )
     if state.IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
             p[key] = value
     if os.getenv("MIN_GRADE_REQUIRED"):
         p["min_grade_required"] = os.getenv("MIN_GRADE_REQUIRED", "").strip().upper()
+    if os.getenv("AUTONOMOUS_MIN_COMPOSITE_FOR_ENTRY"):
+        p["autonomous_min_composite_for_entry"] = _env_float(
+            "AUTONOMOUS_MIN_COMPOSITE_FOR_ENTRY",
+            p["autonomous_min_composite_for_entry"],
+        )
+    if os.getenv("RANGING_MIN_COMPOSITE_FOR_ENTRY"):
+        p["ranging_min_composite_for_entry"] = _env_float(
+            "RANGING_MIN_COMPOSITE_FOR_ENTRY",
+            p["ranging_min_composite_for_entry"],
+        )
     if os.getenv("ALLOW_B_GRADE_EXPLORATION") is not None:
         p["allow_b_grade_exploration"] = _env_bool("ALLOW_B_GRADE_EXPLORATION", False)
     if os.getenv("B_GRADE_SIZE_MULTIPLIER"):
@@ -353,6 +373,28 @@ def _apply_execution_overrides(profile: dict) -> dict:
         )
     if os.getenv("DYNAMIC_UNIVERSE_SHADOW_ENABLED") is not None:
         p["dynamic_universe_shadow_enabled"] = _env_bool("DYNAMIC_UNIVERSE_SHADOW_ENABLED", True)
+    if os.getenv("ADVISORY_CONFIRMATION_ENABLED") is not None:
+        p["advisory_confirmation_enabled"] = _env_bool("ADVISORY_CONFIRMATION_ENABLED", True)
+    if os.getenv("ADVISORY_CONFIRMATION_MIN_GRADE"):
+        p["advisory_confirmation_min_grade"] = _env_value(
+            "ADVISORY_CONFIRMATION_MIN_GRADE",
+            str(p["advisory_confirmation_min_grade"]),
+        ).strip().upper()
+    if os.getenv("ADVISORY_CONFIRMATION_MIN_COMPOSITE"):
+        p["advisory_confirmation_min_composite"] = _env_float(
+            "ADVISORY_CONFIRMATION_MIN_COMPOSITE",
+            p["advisory_confirmation_min_composite"],
+        )
+    if os.getenv("ADVISORY_CONFIRMATION_LOOKBACK_MINUTES"):
+        p["advisory_confirmation_lookback_minutes"] = _env_int(
+            "ADVISORY_CONFIRMATION_LOOKBACK_MINUTES",
+            int(p["advisory_confirmation_lookback_minutes"]),
+        )
+    if os.getenv("ADVISORY_CONFIRMATION_TICKERS"):
+        p["advisory_confirmation_tickers"] = _env_value(
+            "ADVISORY_CONFIRMATION_TICKERS",
+            str(p["advisory_confirmation_tickers"]),
+        )
     short_override = os.getenv("ALLOW_SHORT_SELLING")
     if short_override is not None and short_override.strip():
         p["allow_short_selling"] = short_override.strip().lower() == "true"

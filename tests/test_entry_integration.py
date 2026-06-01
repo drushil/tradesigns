@@ -32,6 +32,7 @@ from __future__ import annotations
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,109 @@ def test_context_quality_blocks_opening_noise():
     assert decision["allowed"] is False
     assert decision["multiplier"] == pytest.approx(0.0)
     assert decision["reason"] == "session_window_opening_noise_blocked"
+
+
+def test_autonomous_composite_floor_blocks_weak_ranging_entries():
+    """Ranging autonomous trades need a much stronger score than ordinary entries."""
+    import backend.execution.entry as entry
+
+    block = entry._entry_composite_floor_block(
+        0.31,
+        "ranging",
+        {
+            "autonomous_min_composite_for_entry": 0.30,
+            "ranging_min_composite_for_entry": 0.45,
+        },
+    )
+
+    assert block["reason"] == "autonomous_composite_floor"
+    assert block["min_composite"] == pytest.approx(0.45)
+
+
+def test_autonomous_composite_floor_allows_strong_ranging_entries():
+    import backend.execution.entry as entry
+
+    block = entry._entry_composite_floor_block(
+        -0.48,
+        "ranging",
+        {
+            "autonomous_min_composite_for_entry": 0.30,
+            "ranging_min_composite_for_entry": 0.45,
+        },
+    )
+
+    assert block is None
+
+
+def test_advisory_alignment_blocks_opposite_recent_strong_advisory():
+    import backend.execution.entry as entry
+
+    block = entry._advisory_alignment_block(
+        "NVDA",
+        "SELL",
+        [
+            {
+                "id": 123,
+                "data_symbol": "NVDA",
+                "mode": "live",
+                "market": "US",
+                "side": "BUY",
+                "grade": "A",
+                "composite_score": 0.52,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ],
+        {
+            "advisory_confirmation_enabled": True,
+            "advisory_confirmation_tickers": "NVDA,MU",
+            "advisory_confirmation_min_grade": "B",
+            "advisory_confirmation_min_composite": 0.35,
+            "advisory_confirmation_lookback_minutes": 90,
+        },
+    )
+
+    assert block["reason"] == "advisory_confirmation_opposes_trade"
+    assert block["advisory_side"] == "BUY"
+    assert block["action"] == "SELL"
+
+
+def test_advisory_alignment_allows_same_direction_or_uncovered_ticker():
+    import backend.execution.entry as entry
+
+    recent = [{
+        "data_symbol": "NVDA",
+        "mode": "live",
+        "market": "US",
+        "side": "BUY",
+        "grade": "A",
+        "composite_score": 0.52,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }]
+
+    assert entry._advisory_alignment_block(
+        "NVDA",
+        "BUY",
+        recent,
+        {
+            "advisory_confirmation_enabled": True,
+            "advisory_confirmation_tickers": "NVDA,MU",
+            "advisory_confirmation_min_grade": "B",
+            "advisory_confirmation_min_composite": 0.35,
+            "advisory_confirmation_lookback_minutes": 90,
+        },
+    ) is None
+    assert entry._advisory_alignment_block(
+        "TLT",
+        "BUY",
+        recent,
+        {
+            "advisory_confirmation_enabled": True,
+            "advisory_confirmation_tickers": "NVDA,MU",
+            "advisory_confirmation_min_grade": "B",
+            "advisory_confirmation_min_composite": 0.35,
+            "advisory_confirmation_lookback_minutes": 90,
+        },
+    ) is None
 
 
 def test_horizon_order_blocks_shadow_only_before_price_fetch(monkeypatch):

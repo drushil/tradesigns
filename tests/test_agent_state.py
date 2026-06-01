@@ -633,6 +633,17 @@ def test_ranging_probe_macd_default_is_ranging_sized():
     assert profile["ranging_probe_min_macd"] == pytest.approx(0.10)
 
 
+def test_execution_overrides_default_to_defensive_autonomous_entries():
+    import backend.agent as agent
+
+    profile = agent._apply_execution_overrides({})
+
+    assert profile["autonomous_min_composite_for_entry"] == pytest.approx(0.30)
+    assert profile["ranging_min_composite_for_entry"] == pytest.approx(0.45)
+    assert profile["ranging_probe_enabled"] is False
+    assert profile["advisory_confirmation_enabled"] is True
+
+
 def test_trade_setup_context_carries_composite_for_ranging_gates(monkeypatch):
     import backend.agent as agent
 
