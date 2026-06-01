@@ -19,7 +19,7 @@ detect_regime to:
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import backend.runtime.state as state
@@ -164,12 +164,99 @@ def _candidate_reference_price(signal_result: dict, atr_data: dict = None) -> Op
     return None
 
 
+def _entry_composite_floor_block(composite: float, ticker_regime: str, profile: dict) -> Optional[dict]:
+    """Hard floor for autonomous entries before LLM/order routing."""
+    try:
+        strength = abs(float(composite or 0))
+    except (TypeError, ValueError):
+        strength = 0.0
+    is_ranging = str(ticker_regime or "").lower() == "ranging"
+    min_strength = float(profile.get("autonomous_min_composite_for_entry", 0.30))
+    if is_ranging:
+        min_strength = max(
+            min_strength,
+            float(profile.get("ranging_min_composite_for_entry", 0.45)),
+        )
+    if min_strength <= 0 or strength >= min_strength:
+        return None
+    return {
+        "reason": "autonomous_composite_floor",
+        "composite": round(strength, 4),
+        "min_composite": min_strength,
+        "intraday_regime": ticker_regime,
+    }
+
+
+def _advisory_alignment_block(ticker: str, action: str, recent_advisories: list,
+                              profile: dict) -> Optional[dict]:
+    """Block autonomous entries that contradict a recent strong live advisory."""
+    if not bool(profile.get("advisory_confirmation_enabled", True)):
+        return None
+    action = str(action or "").upper()
+    if action not in {"BUY", "SELL"}:
+        return None
+
+    tickers = {
+        t.strip().upper()
+        for t in str(profile.get("advisory_confirmation_tickers", "")).split(",")
+        if t.strip()
+    }
+    ticker_key = str(ticker or "").upper()
+    if tickers and ticker_key not in tickers:
+        return None
+
+    min_grade = str(profile.get("advisory_confirmation_min_grade", "B")).upper()
+    min_composite = float(profile.get("advisory_confirmation_min_composite", 0.35))
+    lookback_minutes = int(profile.get("advisory_confirmation_lookback_minutes", 90))
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, lookback_minutes))
+
+    def _grade_rank(grade: str) -> int:
+        return {"C": 0, "B": 1, "A": 2, "A+": 3}.get(str(grade or "").upper(), -1)
+
+    for row in recent_advisories or []:
+        if str(row.get("data_symbol") or row.get("ticker") or "").upper() != ticker_key:
+            continue
+        if str(row.get("mode") or "").lower() != "live":
+            continue
+        if str(row.get("market") or "").upper() not in {"", "US"}:
+            continue
+        created_at = row.get("created_at")
+        try:
+            created_dt = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+        except Exception:
+            created_dt = None
+        if created_dt and created_dt < cutoff:
+            continue
+        if _grade_rank(row.get("grade")) < _grade_rank(min_grade):
+            continue
+        try:
+            advisory_strength = abs(float(row.get("composite_score") or 0))
+        except (TypeError, ValueError):
+            advisory_strength = 0.0
+        if advisory_strength < min_composite:
+            continue
+        advisory_side = str(row.get("side") or "BUY").upper()
+        if advisory_side and advisory_side != action:
+            return {
+                "reason": "advisory_confirmation_opposes_trade",
+                "advisory_signal_id": row.get("id"),
+                "advisory_side": advisory_side,
+                "action": action,
+                "advisory_grade": row.get("grade"),
+                "advisory_composite": round(advisory_strength, 4),
+                "advisory_created_at": created_at,
+                "lookback_minutes": lookback_minutes,
+            }
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker evaluation
 # ---------------------------------------------------------------------------
 
 def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state,
-                                recent_trades, regime_state, shock_result):
+                                recent_trades, regime_state, shock_result,
+                                recent_advisories=None):
     """Signal → gate → EV. Returns a ranked candidate dict if execution should be considered."""
     # Lazy import to break circular dep and preserve monkeypatch on agent.detect_regime
     from backend.agent import detect_regime
@@ -285,6 +372,38 @@ def _evaluate_ticker_candidate(ticker, regime, weights, profile, portfolio_state
         ticker_regime_state, gate_reason=gate_reason,
     )
     strategy_family_hint = setup_context["strategy_family"]
+    composite_floor_block = _entry_composite_floor_block(composite, ticker_regime, profile)
+    if composite_floor_block:
+        reason = composite_floor_block["reason"]
+        log_event("INFO", "autonomous_composite_floor_block", {
+            "ticker": ticker,
+            "action": action_hint,
+            **composite_floor_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "entry_quality", reason,
+            block_detail=composite_floor_block,
+        )
+        return
+
+    advisory_block = _advisory_alignment_block(
+        ticker, action_hint, recent_advisories or [], profile
+    )
+    if advisory_block:
+        reason = advisory_block["reason"]
+        log_event("INFO", "advisory_confirmation_entry_block", {
+            "ticker": ticker,
+            "composite": round(composite, 4),
+            **advisory_block,
+        })
+        _record_blocked_opportunity(
+            ticker, action_hint, composite, signals_snap, setup_context,
+            ticker_regime, "advisory_confirmation", reason,
+            block_detail=advisory_block,
+        )
+        return
+
     alignment_veto = _alignment_veto(ticker, action_hint, signals_snap, profile)
     if alignment_veto:
         reason = alignment_veto["reason"]

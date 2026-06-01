@@ -8,7 +8,7 @@ create table if not exists advisory_scan_snapshots (
     cycle_started_at    timestamptz not null,
     market              text not null check (market in ('US','EU')),
     mode                text not null check (mode in ('live','shadow')),
-    window              text,
+    session_window      text,
     broker_profile      text,
     data_symbol         text not null,
     primary_symbol      text,
