@@ -801,3 +801,83 @@ create index if not exists idx_advisory_signals_forward_pending
 
 create index if not exists idx_advisory_signals_forward_scorecard
     on advisory_signals (market, mode, status, grade, created_at desc);
+
+-- ============================================================
+-- MIGRATION v6 - Advisory scan log + virtual positions
+-- ============================================================
+
+-- Advisory scan log: one row per ticker per advisory cycle, for diagnostics
+create table if not exists advisory_scan_log (
+    id              bigint generated always as identity primary key,
+    scanned_at      timestamptz not null default now(),
+    data_symbol     text not null,
+    primary_symbol  text,
+    market          text not null,
+    window          text,
+    listing_type    text,
+    composite_score numeric(6,4),
+    grade           text,
+    side            text,
+    alert_stage     text,
+    alerted         boolean not null default false,
+    gate_reason     text,
+    gate_detail     jsonb default '{}'::jsonb,
+    ev_net_pct      numeric(8,4),
+    breakout_quality numeric(6,4),
+    price_native    numeric(12,4),
+    move_pct_open   numeric(8,4),
+    vwap_score      real,
+    macd_score      real,
+    rel_strength_score real,
+    tape_score      real,
+    rsi_score       real,
+    orb_active      boolean,
+    downside_risk   boolean default false
+);
+
+create index if not exists idx_advisory_scan_log_time
+    on advisory_scan_log (scanned_at desc);
+create index if not exists idx_advisory_scan_log_symbol_time
+    on advisory_scan_log (data_symbol, scanned_at desc);
+create index if not exists idx_advisory_scan_log_market_time
+    on advisory_scan_log (market, scanned_at desc);
+
+alter table advisory_scan_log enable row level security;
+create policy "anon read advisory_scan_log"
+    on advisory_scan_log for select to anon using (true);
+
+-- Virtual positions: assumed entries for A/A+ advisory alerts (auto-tracked exits)
+create table if not exists advisory_virtual_positions (
+    id                  bigint generated always as identity primary key,
+    created_at          timestamptz not null default now(),
+    advisory_signal_id  bigint,
+    data_symbol         text not null,
+    market              text not null,
+    side                text not null,
+    window              text,
+    grade               text,
+    entry_price_native  numeric(12,4),
+    entry_assumed_at    timestamptz not null default now(),
+    stop_price          numeric(12,4),
+    target_1            numeric(12,4),
+    target_2            numeric(12,4),
+    currency            text default 'USD',
+    fx_rate             numeric(8,4),
+    suggested_size_eur  numeric(10,2),
+    status              text not null default 'open'
+                        check (status in ('open','hit_stop','hit_t1','hit_t2','time_exit','dismissed','signal_reversal')),
+    dismissed_at        timestamptz,
+    closed_at           timestamptz,
+    close_price_native  numeric(12,4),
+    pnl_pct             numeric(8,4),
+    exit_monitor_json   jsonb default '{}'::jsonb
+);
+
+create index if not exists idx_advisory_virt_pos_status
+    on advisory_virtual_positions (status, created_at desc);
+create index if not exists idx_advisory_virt_pos_symbol
+    on advisory_virtual_positions (data_symbol, status);
+
+alter table advisory_virtual_positions enable row level security;
+create policy "anon read advisory_virtual_positions"
+    on advisory_virtual_positions for select to anon using (true);
