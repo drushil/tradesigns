@@ -30,12 +30,14 @@ STAGE_TONE = {
     "trade": "positive",
     "watch": "warning",
     "ignition": "info",
+    "downside": "negative",
 }
 
 STAGE_LABEL = {
     "trade": "🟢 TRADE",
     "watch": "🟡 WATCH",
     "ignition": "🔥 IGNITION",
+    "downside": "🔻 DOWNSIDE",
 }
 
 
@@ -188,6 +190,10 @@ def render():
         from database.client import get_advisory_scoreboard as _get_advisory_scoreboard
     except (ImportError, AttributeError):
         _get_advisory_scoreboard = None
+    try:
+        from database.client import get_latest_advisory_scan_snapshots as _get_latest_scan_snapshots
+    except (ImportError, AttributeError):
+        _get_latest_scan_snapshots = None
     from backend import advisory
 
     cfg = advisory.load_config()
@@ -234,6 +240,11 @@ def render():
 
     _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
     _render_open_positions(get_open_advisory_positions, update_advisory_exit_status)
+
+    st.divider()
+
+    if _get_latest_scan_snapshots is not None:
+        _render_live_scan_table(_get_latest_scan_snapshots)
 
     st.divider()
 
@@ -541,6 +552,56 @@ def _render_open_positions(fetch_open_fn, update_exit_fn):
                 else:
                     st.success(f"Exit recorded. Estimated P&L: €{pnl_eur:+.2f}")
                     st.rerun()
+
+
+# ── Live Scan Table ─────────────────────────────────────────────────────────
+
+def _render_live_scan_table(fetch_fn):
+    st.subheader("All US live scan")
+    st.caption("Latest per-cycle advisory state for each scanned ticker, including non-alert gate reasons.")
+
+    c_market, c_limit, _ = st.columns([2, 2, 6])
+    with c_market:
+        market = st.radio("Scan market", ["US", "EU", "all"], index=0, horizontal=True,
+                          key="advisory_scan_market")
+    with c_limit:
+        limit = st.selectbox("Rows", [25, 50, 100], index=1, key="advisory_scan_limit")
+
+    rows = fetch_fn(market=market, limit=limit) or []
+    if not rows:
+        st.info("No scan snapshots yet. Run one advisory cycle after applying the scan snapshot migration.")
+        return
+
+    latest_cycle = rows[0].get("cycle_id")
+    latest_rows = [r for r in rows if r.get("cycle_id") == latest_cycle] or rows
+    table = pd.DataFrame([
+        {
+            "updated": _format_time(r.get("cycle_started_at") or r.get("created_at")),
+            "window": r.get("window"),
+            "symbol": r.get("data_symbol"),
+            "primary": r.get("primary_symbol") or r.get("data_symbol"),
+            "name": r.get("broker_display_name"),
+            "stage": STAGE_LABEL.get(str(r.get("alert_stage") or ""), r.get("alert_stage") or "—"),
+            "side": r.get("side") or "—",
+            "grade": r.get("grade") or "—",
+            "composite": float(r.get("composite_score") or 0),
+            "ev_pct": float(r.get("ev_net_pct") or 0) if r.get("ev_net_pct") is not None else None,
+            "breakout": float(r.get("breakout_quality") or 0) if r.get("breakout_quality") is not None else None,
+            "price": float(r.get("last_price") or 0) if r.get("last_price") is not None else None,
+            "gate": r.get("gate_reason") or r.get("status"),
+        }
+        for r in latest_rows
+    ])
+    if "composite" in table:
+        table = table.assign(abs_composite=table["composite"].abs()).sort_values(
+            ["abs_composite", "breakout"], ascending=[False, False]
+        ).drop(columns=["abs_composite"])
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config=column_config(table.columns),
+    )
 
 
 # ── Replay Scoreboard ───────────────────────────────────────────────────────
