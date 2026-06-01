@@ -31,6 +31,10 @@ from database.client import (
     upsert_advisory_scan_snapshot,
     upsert_fx_rate_cache,
     update_advisory_exit_status,
+    insert_advisory_scan_log,
+    create_virtual_position,
+    get_open_virtual_positions,
+    update_virtual_position,
 )
 
 
@@ -129,7 +133,7 @@ ADVISORY_UNIVERSE = {
         {"data_symbol": "DBK.DE", "broker_display_name": "Deutsche Bank", "exchange": "Xetra", "currency": "EUR",
          "category": "financials", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
-        # --- EU mirrors: early-read on US momentum during eu_open window only ---
+        # --- EU mirrors: early-read on US momentum via TR morning watch (L&S) + eu_open (Xetra) ---
         {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA",
          "mirror_only_windows": ["tr_morning_watch", "eu_open"],
@@ -222,9 +226,9 @@ EU_MIRROR_WEIGHTS = {
 LIVE_SIGNAL_STATUSES = {"sent", "entered", "hit_stop", "hit_target"}
 OPEN_LIVE_STATUSES = {"sent", "entered"}
 WATCH_SIGNAL_STATUSES = {"skipped"}
-WATCH_ALERT_STAGES = {"watch", "ignition"}
+WATCH_ALERT_STAGES = {"watch", "ignition", "tr_morning_watch"}
 INFO_ALERT_STAGES = {"downside"}
-ALERT_STAGE_RANK = {"ignition": 0, "downside": 0, "watch": 1, "trade": 2}
+ALERT_STAGE_RANK = {"ignition": 0, "downside": 0, "watch": 1, "tr_morning_watch": 1, "trade": 2}
 
 
 @dataclass
@@ -454,10 +458,8 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
     now_cet = now_cet or _now_cet()
     minutes = now_cet.hour * 60 + now_cet.minute
     if market == "EU":
-        if _env_value("BROKER_PROFILE", "trade_republic").lower() == "trade_republic":
-            start = _env_int("ADVISORY_TR_MORNING_START_MINUTES", 9 * 60)
-            if start <= minutes < 9 * 60 + 15:
-                return "tr_morning_watch"
+        if 7 * 60 + 30 <= minutes < 9 * 60 + 15:
+            return "tr_morning_watch"
         if 9 * 60 + 15 <= minutes <= 11 * 60:
             return "eu_open"
         if 14 * 60 <= minutes <= 16 * 60:
@@ -466,13 +468,13 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
     if market == "US":
         if 15 * 60 <= minutes < 15 * 60 + 30:
             return "us_premarket"
-        if 15 * 60 + 30 <= minutes <= 17 * 60:
+        if 15 * 60 + 30 <= minutes < 17 * 60:
             return "us_open"
-        if 17 * 60 < minutes < 20 * 60:
+        if 17 * 60 <= minutes < 20 * 60:
             return "us_midday"
         if 20 * 60 <= minutes < 21 * 60:
-            return "us_afternoon"
-        if 21 * 60 <= minutes <= 22 * 60:
+            return "us_power_hour"
+        if 21 * 60 <= minutes < 22 * 60:
             return "us_close"
         return None
     return None
@@ -480,13 +482,17 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
 
 def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
     starts = {
-        "EU": {"tr_morning_watch": (7, 30), "eu_open": (9, 15), "eu_catalyst_only": (14, 0)},
+        "EU": {
+            "tr_morning_watch": (7, 30),
+            "eu_open":          (9, 15),
+            "eu_catalyst_only": (14, 0),
+        },
         "US": {
-            "us_premarket": (15, 0),
-            "us_open": (15, 30),
-            "us_midday": (17, 1),
-            "us_afternoon": (20, 0),
-            "us_close": (21, 0),
+            "us_premarket":   (15, 0),
+            "us_open":        (15, 30),
+            "us_midday":      (17, 0),
+            "us_power_hour":  (20, 0),
+            "us_close":       (21, 0),
         },
     }
     hour, minute = starts.get(market, {}).get(window, (now_cet.hour, now_cet.minute))
@@ -826,24 +832,48 @@ def _grade(composite: float, breakout_quality: float, orb_active: bool) -> str:
     return "C"
 
 
+_US_LATE_PHASE_WINDOWS = {"us_midday", "us_power_hour", "us_close"}
+
+
 def _intraday_grade_cap(grade: str, side: str, signals: dict, window: str) -> tuple[str, Optional[dict]]:
-    """Cap open-window grades when real-time ORB and VWAP both oppose the setup."""
-    if window != "us_open" or grade not in {"A", "A+"}:
-        return grade, None
+    """Cap open-window grades when real-time ORB and VWAP both strongly oppose the setup.
+
+    For us_open: cap A+ → B and A → B when ORB + VWAP both oppose.
+    For later phases (us_midday, us_power_hour, us_close): only cap A+ → A (softer cap),
+    and only when both ORB and VWAP strongly oppose (stricter thresholds).
+    """
     direction = 1 if side == "BUY" else -1
     orb_score = _signal_score(signals, "orb")
     vwap_score = _signal_score(signals, "vwap_deviation")
-    intraday_weak = (orb_score * direction < -0.5) and (vwap_score * direction < -0.3)
-    if not intraday_weak:
-        return grade, None
-    return "B", {
-        "reason": "orb_vwap_intraday_grade_cap",
-        "original_grade": grade,
-        "capped_grade": "B",
-        "orb_score": round(orb_score, 4),
-        "vwap_score": round(vwap_score, 4),
-        "window": window,
-    }
+
+    if window == "us_open" and grade in {"A", "A+"}:
+        intraday_weak = (orb_score * direction < -0.5) and (vwap_score * direction < -0.3)
+        if not intraday_weak:
+            return grade, None
+        return "B", {
+            "reason": "orb_vwap_intraday_grade_cap",
+            "original_grade": grade,
+            "capped_grade": "B",
+            "orb_score": round(orb_score, 4),
+            "vwap_score": round(vwap_score, 4),
+            "window": window,
+        }
+
+    if window in _US_LATE_PHASE_WINDOWS and grade == "A+":
+        # Softer cap for off-peak phases: A+ → A only when ORB and VWAP strongly oppose
+        late_phase_weak = (orb_score * direction < -0.65) and (vwap_score * direction < -0.45)
+        if not late_phase_weak:
+            return grade, None
+        return "A", {
+            "reason": "orb_vwap_late_phase_grade_cap",
+            "original_grade": "A+",
+            "capped_grade": "A",
+            "orb_score": round(orb_score, 4),
+            "vwap_score": round(vwap_score, 4),
+            "window": window,
+        }
+
+    return grade, None
 
 
 def _premium_setup_flag(side: str, signals: dict) -> dict:
@@ -867,7 +897,7 @@ def _meets_min_grade(grade: str, min_grade: str) -> bool:
     return _grade_rank(grade) >= _grade_rank(min_grade)
 
 
-def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
+def _data_quality(symbol: str, market: str, listing_type: str = None, window: str = None) -> dict:
     try:
         if _get_bars is not None:
             bars = _get_bars(symbol, period="1d", interval="1m")
@@ -895,6 +925,18 @@ def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
             min_rows = 30
         early_us_min_rows = _env_int("ADVISORY_US_EARLY_MIN_ROWS", 10)
         if rows < min_rows:
+            # TR morning watch: accept thin pre-Xetra bars from L&S Exchange
+            if listing_type == "eu_us_mirror" and window == "tr_morning_watch" and rows >= 3 and age_min <= 30:
+                close = float(bars["Close"].squeeze().iloc[-1])
+                return {
+                    "ok": True,
+                    "rows": rows,
+                    "age_minutes": round(age_min, 1),
+                    "avg_recent_volume": round(avg_volume, 2),
+                    "last_price": round(close, 4),
+                    "tr_early_relaxed": True,
+                    "required_rows": min_rows,
+                }
             if market == "US" and rows >= early_us_min_rows and age_min <= 5:
                 close = float(bars["Close"].squeeze().iloc[-1])
                 return {
@@ -911,7 +953,7 @@ def _data_quality(symbol: str, market: str, listing_type: str = None) -> dict:
             return {"ok": False, "reason": "stale_bars", "age_minutes": round(age_min, 1), "rows": rows}
         if avg_volume <= 0:
             return {"ok": False, "reason": "zero_recent_volume", "rows": rows}
-        if listing_type == "eu_us_mirror" and avg_volume < 300:
+        if listing_type == "eu_us_mirror" and avg_volume < 300 and window != "tr_morning_watch":
             return {
                 "ok": False,
                 "reason": "eu_mirror_thin_volume",
@@ -1151,9 +1193,24 @@ def _trend_1h_alignment(symbol: str, side: str, composite: float) -> dict:
 
 
 def _format_trade_card(signal: dict) -> str:
+    # Special formatting for downside-risk informational alerts
+    if signal.get("downside_risk"):
+        sym = signal["data_symbol"]
+        composite = float(signal.get("composite_score") or 0)
+        sig_json = signal.get("signal_json") or {}
+        sigs = sig_json.get("signals") or {}
+        vwap = (sigs.get("vwap_deviation") or {}).get("score", 0)
+        macd = (sigs.get("macd_crossover") or {}).get("score", 0)
+        rsi = (sigs.get("rsi_divergence") or {}).get("score", 0)
+        return (
+            f"**DOWNSIDE RISK - {sym} - {signal.get('grade', '?')} - {signal.get('market', '?')}**\n"
+            f"Composite: {composite:+.3f} | VWAP: {vwap:+.2f} | MACD: {macd:+.2f} | RSI: {rsi:+.2f}\n"
+            f"No position recommended — monitor for stop-zone or exit if holding."
+        )
+
     sym = signal["data_symbol"]
     side = str(signal.get("side") or "BUY").upper()
-    is_shadow = signal["mode"] != "live"
+    is_shadow = signal.get("mode") != "live"
     is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
     is_ignition = signal.get("alert_stage") == "ignition"
     is_downside = signal.get("alert_stage") == "downside"
@@ -1334,6 +1391,9 @@ def _weights_for_market(market: str, listing_type: str = None) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
+    # Downside-risk alerts always send if live — bypass grade gate
+    if candidate.get("downside_risk"):
+        return candidate.get("mode") == "live"
     # benchmark_only tickers (SPY, QQQ) are logged for context but never get a Discord card
     if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
         return False
@@ -1566,7 +1626,7 @@ def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfi
         "cycle_started_at": cycle_started_at.astimezone(timezone.utc).isoformat(),
         "market": market,
         "mode": mode,
-        "window": window,
+        "session_window": window,
         "broker_profile": cfg.broker_profile,
         "data_symbol": candidate.get("data_symbol") or item.get("data_symbol"),
         "primary_symbol": candidate.get("primary_symbol") or item.get("primary_symbol"),
@@ -1598,6 +1658,82 @@ def _record_scan_snapshot(snapshot: dict) -> None:
         log_event("WARN", "advisory_scan_snapshot_write_failed", {"error": str(result["error"])[:160]})
 
 
+def _monitor_virtual_positions(cfg: "AdvisoryConfig", now_cet: datetime) -> list:
+    """Monitor open virtual positions for exit level hits and send alerts."""
+    if not cfg.discord_webhook_url:
+        return []
+    emitted = []
+    for position in get_open_virtual_positions(max_age_days=3):
+        symbol = position.get("data_symbol")
+        if not symbol:
+            continue
+        current = _latest_native_price(symbol)
+        if not current:
+            continue
+        side = str(position.get("side") or "BUY").upper()
+        entry = float(position.get("entry_price_native") or 0)
+        if not entry:
+            continue
+        direction = 1 if side == "BUY" else -1
+        pnl_pct = (current - entry) / entry * 100 * direction
+        stop = float(position.get("stop_price") or 0)
+        t1 = float(position.get("target_1") or 0)
+        t2 = float(position.get("target_2") or 0)
+        grade = position.get("grade") or "?"
+        currency = position.get("currency") or "USD"
+        fx = float(position.get("fx_rate") or cfg.fx_rate or 1.0)
+        monitor_json = position.get("exit_monitor_json") or {}
+        if not isinstance(monitor_json, dict):
+            monitor_json = {}
+        alerts_sent = set(monitor_json.get("alerts") or [])
+
+        hit_level = None
+        new_status = None
+        if stop and direction * (current - stop) <= 0 and "stop" not in alerts_sent:
+            hit_level = "stop"
+            new_status = "hit_stop"
+        elif t2 and direction * (current - t2) >= 0 and "t2" not in alerts_sent:
+            hit_level = "t2"
+            new_status = "hit_t2"
+        elif t1 and direction * (current - t1) >= 0 and "t1" not in alerts_sent:
+            hit_level = "t1"
+            new_status = "hit_t1"
+
+        if not hit_level:
+            continue
+
+        current_eur = _display_price(current, currency, fx)
+        entry_eur = _display_price(entry, currency, fx)
+        message = (
+            f"**VIRTUAL EXIT - {grade} - {symbol} {side}**\n"
+            f"Level: {hit_level.upper()} hit | Current: €{current_eur:.2f} | "
+            f"Entry: €{entry_eur:.2f} | P&L: {pnl_pct:+.2f}%\n"
+            f"Virtual position (auto-assumed entry on {grade} alert) — no real position tracked."
+        )
+        _send_discord(message, cfg.discord_webhook_url)
+        alerts_sent.add(hit_level)
+        monitor_json["alerts"] = list(alerts_sent)
+        monitor_json["last_alert"] = hit_level
+        monitor_json["last_checked_at"] = datetime.utcnow().isoformat() + "Z"
+
+        updates = {
+            "exit_monitor_json": monitor_json,
+            "pnl_pct": round(pnl_pct, 4),
+            "close_price_native": round(current, 4),
+        }
+        if new_status in {"hit_stop", "hit_t2"}:
+            updates["status"] = new_status
+            updates["closed_at"] = datetime.utcnow().isoformat() + "Z"
+        elif new_status == "hit_t1":
+            updates["status"] = "hit_t1"
+        try:
+            update_virtual_position(position["id"], updates)
+        except Exception:
+            pass
+        emitted.append({"symbol": symbol, "alert_type": hit_level, "virtual": True})
+    return emitted
+
+
 def _eu_catalyst_score(item: dict, signals: dict) -> float:
     scores = [abs(_signal_score(signals, "news_sentiment"))]
     aliases = [
@@ -1616,6 +1752,50 @@ def _eu_catalyst_score(item: dict, signals: dict) -> float:
     return max(scores) if scores else 0.0
 
 
+def _build_downside_candidate(
+    symbol: str, item: dict, market: str, mode: str,
+    composite: float, signal_result: dict, regime_state, window: str,
+    cfg: "AdvisoryConfig",
+) -> Optional[dict]:
+    """Build an informational downside-risk candidate when composite is strongly negative."""
+    signals = signal_result.get("signals") or {}
+    side = "SELL"
+    breakout = _breakout_quality(side, abs(composite), signals, getattr(regime_state, "market_regime", ""))
+    orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
+    grade = _grade(abs(composite), breakout, orb_active)
+    listing_type = item.get("listing_type")
+    primary_symbol = item.get("primary_symbol")
+    return {
+        "data_symbol": symbol,
+        "broker_display_name": item.get("broker_display_name"),
+        "exchange": item.get("exchange"),
+        "currency": item.get("currency", "USD" if market == "US" else "EUR"),
+        "market": market,
+        "mode": mode,
+        "window": window,
+        "side": side,
+        "composite_score": round(composite, 4),
+        "grade": grade,
+        "alert_stage": "watch",
+        "status": "sent",
+        "downside_risk": True,
+        "rationale": (
+            f"Bearish pressure: composite={composite:.3f} | "
+            f"VWAP {signals.get('vwap_deviation', {}).get('score', 0):+.2f} | "
+            f"MACD {signals.get('macd_crossover', {}).get('score', 0):+.2f} | "
+            f"RSI {signals.get('rsi_divergence', {}).get('score', 0):+.2f}"
+        ),
+        "suggested_size_eur": 0,
+        "listing_type": listing_type,
+        "primary_symbol": primary_symbol,
+        "benchmark_only": item.get("benchmark_only", False),
+        "trade_target": item.get("trade_target", True),
+        "priority": item.get("priority", "medium"),
+        "breakout_quality": breakout,
+        "signal_json": _compact_signal_payload(signal_result),
+    }
+
+
 def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
                     recent_trades: list, now_cet: datetime) -> Optional[dict]:
     symbol = item["data_symbol"]
@@ -1627,7 +1807,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         return None
     listing_type = item.get("listing_type")
     primary_symbol = item.get("primary_symbol")
-    quality = _data_quality(symbol, market, listing_type=listing_type)
+    quality = _data_quality(symbol, market, listing_type=listing_type, window=window)
     if not quality.get("ok"):
         return {
             "market": market, "mode": mode, "status": "blocked_data_quality",
@@ -1667,14 +1847,25 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
             pass
     composite = float(signal_result.get("composite_score") or 0)
     is_live_market = market in cfg.live_markets
-    if composite == 0:
+
+    if composite <= 0:
+        min_downside = _env_float("ADVISORY_MIN_DOWNSIDE_COMPOSITE", 0.35)
+        if abs(composite) >= min_downside and is_live_market:
+            return _build_downside_candidate(
+                symbol=symbol, item=item, market=market, mode=mode,
+                composite=composite, signal_result=signal_result,
+                regime_state=regime_state, window=window, cfg=cfg,
+            )
         return None
+
     side = "BUY" if composite > 0 else "SELL"
 
     signals = signal_result.get("signals") or {}
     breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
     orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
     grade = _grade(composite, breakout, orb_active)
+    # TR morning watch: cap alert_stage to "watch" — no trade alerts during pre-Xetra window
+    _tr_morning_watch = (window == "tr_morning_watch")
     grade_cap = None
     if is_live_market:
         grade, grade_cap = _intraday_grade_cap(grade, side, signals, window)
@@ -1733,6 +1924,9 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         alert_stage = "watch"
     if window == "us_premarket":
         alert_stage = "ignition" if ignition_ready and not watch_ready else "watch"
+    # TR morning watch: always cap to "watch" — pre-Xetra, informational only
+    if _tr_morning_watch:
+        alert_stage = "watch"
     plan = _entry_plan(
         quality["last_price"], side, atr_data.get("atr_pct"),
         item.get("currency", "EUR"), cfg, grade,
@@ -1904,6 +2098,11 @@ def run_advisory_cycle() -> dict:
         except Exception as exc:
             log_event("WARN", "advisory_exit_monitor_failed", {"error": str(exc)[:160]})
         try:
+            virtual_exit_alerts = _monitor_virtual_positions(cfg, now_cet)
+            exit_alerts.extend(virtual_exit_alerts)
+        except Exception as exc:
+            log_event("WARN", "advisory_virtual_exit_monitor_failed", {"error": str(exc)[:160]})
+        try:
             open_advisory_positions = get_open_advisory_positions(max_age_days=7)
         except Exception as exc:
             log_event("WARN", "advisory_open_positions_read_failed", {"error": str(exc)[:160]})
@@ -1986,6 +2185,40 @@ def run_advisory_cycle() -> dict:
         if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES and "error" not in saved:
             watch_counts_by_symbol[symbol_key] = watch_counts_by_symbol.get(symbol_key, 0) + 1
             live_watch_this_window += 1
+
+        # Auto-create virtual position for live A/A+ trade-stage alerts
+        if (
+            mode == "live"
+            and candidate.get("alert_stage") == "trade"
+            and candidate.get("grade") in {"A", "A+"}
+            and "error" not in saved
+            and not candidate.get("downside_risk")
+        ):
+            try:
+                _candidate_market = str(candidate.get("market", "")).upper()
+                virt_entry = (
+                    ((float(candidate.get("entry_min") or 0) + float(candidate.get("entry_max") or 0)) / 2.0)
+                    or float(candidate.get("reference_price") or 0)
+                )
+                create_virtual_position({
+                    "advisory_signal_id": saved.get("id"),
+                    "data_symbol": candidate["data_symbol"],
+                    "market": _candidate_market,
+                    "side": candidate.get("side", "BUY"),
+                    "session_window": candidate.get("window"),
+                    "grade": candidate.get("grade"),
+                    "entry_price_native": round(virt_entry, 4) if virt_entry else None,
+                    "stop_price": candidate.get("stop_price"),
+                    "target_1": candidate.get("target_1"),
+                    "target_2": candidate.get("target_2"),
+                    "currency": candidate.get("currency", "USD"),
+                    "fx_rate": candidate.get("fx_rate") or cfg.fx_rate,
+                    "suggested_size_eur": candidate.get("suggested_size_eur"),
+                    "status": "open",
+                })
+            except Exception:
+                pass
+
         emitted.append(candidate)
         return "error" not in saved
 
@@ -2088,6 +2321,18 @@ def run_advisory_cycle() -> dict:
                 _record_scan_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "already_alerted_in_session"
                 ))
+                try:
+                    insert_advisory_scan_log({
+                        "data_symbol": item["data_symbol"],
+                        "primary_symbol": item.get("primary_symbol"),
+                        "market": market,
+                        "session_window": window,
+                        "listing_type": item.get("listing_type"),
+                        "alerted": False,
+                        "gate_reason": "already_alerted_session",
+                    })
+                except Exception:
+                    pass
                 continue
             recent_watch = None
             if mode == "live":
@@ -2095,10 +2340,49 @@ def run_advisory_cycle() -> dict:
                     recent_live, item["data_symbol"], market, now_cet
                 )
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
+
+            # --- build scan log base ---
+            _scan_log_base = {
+                "data_symbol": item["data_symbol"],
+                "primary_symbol": item.get("primary_symbol"),
+                "market": market,
+                "session_window": window,
+                "listing_type": item.get("listing_type"),
+                "alerted": False,
+                "gate_reason": "no_candidate" if not candidate else (
+                    candidate.get("status", "") if candidate.get("status", "").startswith("blocked") else None
+                ),
+            }
+            if candidate:
+                _scan_log_base.update({
+                    "composite_score": candidate.get("composite_score"),
+                    "grade": candidate.get("grade"),
+                    "side": candidate.get("side"),
+                    "alert_stage": candidate.get("alert_stage"),
+                    "ev_net_pct": candidate.get("ev_net_pct"),
+                    "breakout_quality": candidate.get("breakout_quality"),
+                    "price_native": candidate.get("reference_price") or (candidate.get("signal_json") or {}).get("atr_data", {}).get("current_price"),
+                    "downside_risk": candidate.get("downside_risk", False),
+                    "gate_detail": candidate.get("block_detail") or {},
+                })
+                _sig_scores = (candidate.get("signal_json") or {}).get("signals") or {}
+                _scan_log_base.update({
+                    "vwap_score": (_sig_scores.get("vwap_deviation") or {}).get("score"),
+                    "macd_score": (_sig_scores.get("macd_crossover") or {}).get("score"),
+                    "rel_strength_score": (_sig_scores.get("relative_strength") or {}).get("score"),
+                    "tape_score": (_sig_scores.get("tape_aggression") or {}).get("score"),
+                    "rsi_score": (_sig_scores.get("rsi_divergence") or {}).get("score"),
+                    "orb_active": bool((_sig_scores.get("orb") or {}).get("meta", {}).get("active")),
+                })
+
             if not candidate:
                 _record_scan_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "no_candidate"
                 ))
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             _record_scan_snapshot(_scan_snapshot(
                 cycle_id, now_cet, cfg, item, market, mode, window, "candidate", candidate
@@ -2107,6 +2391,11 @@ def run_advisory_cycle() -> dict:
                 candidate["status"] = "benchmark_logged"
                 insert_advisory_signal(candidate)
                 emitted.append(candidate)
+                _scan_log_base["gate_reason"] = "benchmark_only"
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             if mode == "live":
                 runner = _runner_context(candidate, recent_live, now_cet, open_advisory_positions, cfg)
@@ -2123,6 +2412,11 @@ def run_advisory_cycle() -> dict:
                 _record_scan_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "watch_repeat_blocked", candidate
                 ))
+                _scan_log_base["gate_reason"] = "watch_repeat_blocked"
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             if mode == "live" and candidate.get("alert_stage") == "trade" and _watch_had_late_chase(recent_watch):
                 candidate["pullback_confirmed"] = True
@@ -2134,6 +2428,11 @@ def run_advisory_cycle() -> dict:
             if candidate.get("status", "").startswith("blocked"):
                 insert_advisory_signal(candidate)
                 blocked.append(candidate)
+                _scan_log_base["gate_reason"] = candidate.get("status")
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             if (
                 mode == "live"
@@ -2151,9 +2450,16 @@ def run_advisory_cycle() -> dict:
                     cfg.max_live_trades_per_session - live_sent_this_window,
                 ) > 0
             ):
-                _persist_emit_candidate(candidate, mode, immediate=True)
+                _emitted_ok = _persist_emit_candidate(candidate, mode, immediate=True)
+                _scan_log_base["alerted"] = _emitted_ok
+                _scan_log_base["gate_reason"] = "alerted" if _emitted_ok else "emit_failed"
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             market_candidates.append(candidate)
+            # scan log for queued candidates is written after emit decision below
 
         if not high_priority_logged:
             log_event("INFO", "advisory_high_priority_scan_complete", {
@@ -2181,8 +2487,37 @@ def run_advisory_cycle() -> dict:
             limit = min(day_limit, session_limit)
         else:
             limit = cfg.max_shadow_signals_per_day
-        for candidate in market_candidates[:max(0, limit)]:
-            _persist_emit_candidate(candidate, mode)
+        for idx, candidate in enumerate(market_candidates):
+            will_emit = idx < max(0, limit)
+            _emitted_ok = _persist_emit_candidate(candidate, mode) if will_emit else False
+            try:
+                _sig_scores_q = (candidate.get("signal_json") or {}).get("signals") or {}
+                insert_advisory_scan_log({
+                    "data_symbol": candidate.get("data_symbol"),
+                    "primary_symbol": candidate.get("primary_symbol"),
+                    "market": market,
+                    "session_window": window,
+                    "listing_type": candidate.get("listing_type"),
+                    "composite_score": candidate.get("composite_score"),
+                    "grade": candidate.get("grade"),
+                    "side": candidate.get("side"),
+                    "alert_stage": candidate.get("alert_stage"),
+                    "alerted": _emitted_ok,
+                    "gate_reason": "alerted" if _emitted_ok else ("capped_by_limit" if not will_emit else "emit_failed"),
+                    "ev_net_pct": candidate.get("ev_net_pct"),
+                    "breakout_quality": candidate.get("breakout_quality"),
+                    "price_native": candidate.get("reference_price") or (candidate.get("signal_json") or {}).get("atr_data", {}).get("current_price"),
+                    "downside_risk": candidate.get("downside_risk", False),
+                    "gate_detail": candidate.get("block_detail") or {},
+                    "vwap_score": (_sig_scores_q.get("vwap_deviation") or {}).get("score"),
+                    "macd_score": (_sig_scores_q.get("macd_crossover") or {}).get("score"),
+                    "rel_strength_score": (_sig_scores_q.get("relative_strength") or {}).get("score"),
+                    "tape_score": (_sig_scores_q.get("tape_aggression") or {}).get("score"),
+                    "rsi_score": (_sig_scores_q.get("rsi_divergence") or {}).get("score"),
+                    "orb_active": bool((_sig_scores_q.get("orb") or {}).get("meta", {}).get("active")),
+                })
+            except Exception:
+                pass
 
         market_timings.append({
             "market": market,

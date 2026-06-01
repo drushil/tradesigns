@@ -178,9 +178,105 @@ def _select_index(options: list[str], preferred: str, fallback: str = None) -> i
     return 0
 
 
+# Gate reason descriptions for the legend
+_GATE_REASON_LABELS = {
+    "no_candidate":          "Signal below threshold or composite ≤ 0 (no downside path either)",
+    "already_alerted_session": "Symbol already alerted this session — duplicate suppressed",
+    "watch_repeat_blocked":  "Watch alert recently sent for this symbol — repeat suppressed",
+    "benchmark_only":        "Benchmark ticker (SPY/QQQ) — logged for context, no trade card",
+    "blocked_data_quality":  "Data quality gate failed (stale bars, too few bars, etc.)",
+    "blocked_filter":        "FX rate unavailable — EUR display blocked",
+    "alerted":               "Alert successfully sent to Discord",
+    "emit_failed":           "Emit failed (DB write error or discord send issue)",
+    "capped_by_limit":       "Queued but not sent — daily/session alert cap reached",
+}
+
+
+def _render_live_scan_log(fetch_fn):
+    """Render the All US Live Scan tab with per-ticker gate reasons."""
+    st.subheader("📋 Live Scan Log (last 4h)")
+    st.caption(
+        "Every ticker scanned in the last 4 hours with its gate reason. "
+        "Green = alerted to Discord. Red = downside risk. Grey = blocked."
+    )
+
+    c_mkt, c_hrs, c_refresh = st.columns([2, 2, 2])
+    with c_mkt:
+        scan_market = st.selectbox("Market", ["US", "EU"], index=0, key="scan_log_market")
+    with c_hrs:
+        scan_hours = st.selectbox("Hours back", [1, 2, 4, 8], index=2, key="scan_log_hours")
+    with c_refresh:
+        st.write("")
+        st.write("")
+        refresh_clicked = st.button("Refresh", key="scan_log_refresh")
+
+    try:
+        scan_rows = fetch_fn(market=scan_market, hours_back=scan_hours, limit=300)
+    except Exception as exc:
+        st.warning(f"Could not load scan log: {exc}")
+        return
+
+    if refresh_clicked:
+        st.rerun()
+
+    if not scan_rows:
+        st.info(
+            f"No scan log entries for {scan_market} in the last {scan_hours}h. "
+            "Scan log is written during advisory cycles."
+        )
+        return
+
+    st.caption(f"Last refresh: {_format_time(scan_rows[0].get('scanned_at'))} · {len(scan_rows)} rows")
+
+    table_rows = []
+    for r in scan_rows:
+        table_rows.append({
+            "Scanned At": _format_time(r.get("scanned_at")),
+            "Symbol": r.get("data_symbol") or "—",
+            "Window": r.get("session_window") or "—",
+            "Grade": r.get("grade") or "—",
+            "Side": r.get("side") or "—",
+            "Composite": float(r.get("composite_score") or 0),
+            "Breakout": float(r.get("breakout_quality") or 0) if r.get("breakout_quality") is not None else None,
+            "EV%": float(r.get("ev_net_pct") or 0) if r.get("ev_net_pct") is not None else None,
+            "VWAP": float(r.get("vwap_score") or 0) if r.get("vwap_score") is not None else None,
+            "MACD": float(r.get("macd_score") or 0) if r.get("macd_score") is not None else None,
+            "RS": float(r.get("rel_strength_score") or 0) if r.get("rel_strength_score") is not None else None,
+            "Tape": float(r.get("tape_score") or 0) if r.get("tape_score") is not None else None,
+            "RSI": float(r.get("rsi_score") or 0) if r.get("rsi_score") is not None else None,
+            "ORB": bool(r.get("orb_active")) if r.get("orb_active") is not None else None,
+            "Gate Reason": r.get("gate_reason") or "—",
+            "Alerted": bool(r.get("alerted")),
+            "Downside": bool(r.get("downside_risk")),
+        })
+
+    df = pd.DataFrame(table_rows)
+
+    def _row_color(row):
+        if row.get("Alerted"):
+            return ["background-color: #14532d22"] * len(row)
+        if row.get("Downside"):
+            return ["background-color: #7f1d1d22"] * len(row)
+        gate = str(row.get("Gate Reason") or "")
+        if "blocked" in gate or gate in {"no_candidate", "capped_by_limit", "watch_repeat_blocked", "already_alerted_session"}:
+            return ["background-color: #1f1f1f"] * len(row)
+        return [""] * len(row)
+
+    try:
+        styled = df.style.apply(_row_color, axis=1)
+        st.dataframe(styled, hide_index=True, use_container_width=True)
+    except Exception:
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+    with st.expander("Gate Reason Legend", expanded=False):
+        for reason, desc in _GATE_REASON_LABELS.items():
+            st.markdown(f"- **`{reason}`**: {desc}")
+
+
 def render():
     from database.client import (
         get_advisory_signal_by_id,
+        get_advisory_scan_log,
         get_open_advisory_positions,
         get_recent_advisory_signals,
         mark_advisory_taken,
@@ -251,6 +347,11 @@ def render():
     # ── Replay Scoreboard ──────────────────────────────────────────────────
     if _get_advisory_scoreboard is not None:
         _render_scoreboard(_get_advisory_scoreboard)
+
+    st.divider()
+
+    # ── Live Scan log ──────────────────────────────────────────────────────
+    _render_live_scan_log(get_advisory_scan_log)
 
     st.divider()
 
