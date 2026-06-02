@@ -38,4 +38,4 @@ skills/
 
 # Nested local copies/worktrees should not be committed as submodules
 tradesigns/
-.mcp.json
+# .mcp.json intentionally tracked — contains only project ref (no credentials; uses OAuth)
