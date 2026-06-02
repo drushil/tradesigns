@@ -96,7 +96,7 @@ ADVISORY_UNIVERSE = {
          "category": "ai_defence", "priority": "high", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "AVGO", "broker_display_name": "Broadcom", "exchange": "NASDAQ", "currency": "USD",
-         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "category": "semis", "priority": "high", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "MU", "broker_display_name": "Micron Technology", "exchange": "NASDAQ", "currency": "USD",
          "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,

@@ -567,6 +567,13 @@ def test_eu_mirror_universe_is_metadata_tagged():
     assert abs(sum(advisory.EU_MIRROR_WEIGHTS.values()) - 1.0) < 0.001
 
 
+def test_us_avgo_is_high_priority_for_immediate_send():
+    avgo = next(item for item in advisory.ADVISORY_UNIVERSE["US"] if item.get("data_symbol") == "AVGO")
+
+    assert avgo["priority"] == "high"
+    assert avgo["trade_target"] is True
+
+
 def _make_fake_bars(n_rows, volume):
     """Build a MagicMock that satisfies all _data_quality access patterns."""
     from unittest.mock import MagicMock
