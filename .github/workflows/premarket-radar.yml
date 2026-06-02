@@ -1,0 +1,100 @@
+name: Trading Agent - Pre-Market Radar
+
+# Read-only radar: no broker orders, no advisory-auto execution.
+# Free-stack path uses extended-hours yfinance bars, news cache, earnings guard,
+# spread when Alpaca quote data is available, and opening-playbook classification.
+
+on:
+  schedule:
+    # US pre-market briefing window, anchored in Python to New York time.
+    # Hours 8-14 UTC cover both DST regimes (cash open is 13:30 UTC in summer
+    # / 14:30 UTC in winter). Python session_window returns "closed" on any
+    # fire that lands outside the actual NY pre-market, so off-window runs
+    # cost only ~30s of CI each. Extending to hour 14 ensures the 08:30-09:30
+    # ET winter pre-market window is actually covered.
+    - cron: '*/30 8-14 * * 1-5'
+    # Sunday futures/watch preview (NY futures open 18:00 ET).
+    # 22:05 UTC Sun = 18:05 ET summer / 17:05 ET winter (skipped in winter).
+    # 23:05 UTC Sun = 19:05 ET summer / 18:05 ET winter.
+    # 00:05 UTC Mon = 20:05 ET Sun summer / 19:05 ET Sun winter.
+    # Together these give 2 samples year-round in the Sunday-evening window.
+    - cron: '5 22,23 * * 0'
+    - cron: '5 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Run even outside pre-market window'
+        required: false
+        default: 'false'
+  repository_dispatch:
+    types: [premarket-radar-cycle]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: premarket-radar-cycle
+  cancel-in-progress: true
+
+jobs:
+  run-premarket-radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        run: |
+          for attempt in 1 2 3; do
+            echo "Checkout attempt $attempt..."
+            curl -fsSL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -o repo.tar.gz && \
+            file repo.tar.gz | grep -q "gzip" && \
+            tar -xzf repo.tar.gz --strip-components=1 && \
+            rm repo.tar.gz && \
+            echo "Checkout succeeded on attempt $attempt" && break
+            echo "Attempt $attempt failed, retrying in 15s..."
+            rm -f repo.tar.gz
+            sleep 15
+          done
+          [ -f requirements-agent.txt ] || { echo "Checkout failed after 3 attempts"; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements-agent.txt
+
+      - name: Run radar
+        env:
+          ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
+          ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
+          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
+          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
+          NEWSAPI_KEY:          "${{ secrets.NEWSAPI_KEY }}"
+          DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
+          PREMARKET_EXTRA_TICKERS: "${{ vars.PREMARKET_EXTRA_TICKERS }}"
+          PREMARKET_RADAR_DISCORD_ENABLED: "${{ vars.PREMARKET_RADAR_DISCORD_ENABLED }}"
+          PREMARKET_MAX_TICKERS: "${{ vars.PREMARKET_MAX_TICKERS }}"
+          PREMARKET_MIN_GAP_PCT: "${{ vars.PREMARKET_MIN_GAP_PCT }}"
+          PREMARKET_STRONG_GAP_PCT: "${{ vars.PREMARKET_STRONG_GAP_PCT }}"
+          PREMARKET_MIN_VOLUME: "${{ vars.PREMARKET_MIN_VOLUME }}"
+          PREMARKET_MIN_RVOL: "${{ vars.PREMARKET_MIN_RVOL }}"
+          PREMARKET_MAX_SPREAD_PCT: "${{ vars.PREMARKET_MAX_SPREAD_PCT }}"
+          FORCE_RADAR: "${{ github.event.inputs.force || github.event.client_payload.force }}"
+        run: |
+          python - <<'PY'
+          import os
+          from backend.premarket.radar import run_premarket_radar
+
+          force = str(os.getenv("FORCE_RADAR", "")).lower() in {"1", "true", "yes", "on"}
+          result = run_premarket_radar(force=force)
+          print(result)
+          PY

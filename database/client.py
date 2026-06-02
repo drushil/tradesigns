@@ -874,6 +874,71 @@ def get_latest_advisory_scan_snapshots(market: str = "US", limit: int = 100) -> 
         return []
 
 
+def upsert_premarket_radar_snapshots(cycle: dict) -> list:
+    """Persist one read-only pre-market radar cycle."""
+    rows = []
+    cycle_started_at = cycle.get("cycle_started_at")
+    session_window = cycle.get("session_window")
+    for item in cycle.get("candidates") or []:
+        features = item.get("features") or {}
+        playbook = item.get("playbook") or {}
+        ticker = features.get("ticker")
+        if not ticker:
+            continue
+        rows.append({
+            "cycle_started_at": cycle_started_at,
+            "session_window": session_window,
+            "ticker": ticker,
+            "last_price": features.get("last_price"),
+            "prior_close": features.get("prior_close"),
+            "gap_pct": features.get("gap_pct"),
+            "premarket_high": features.get("premarket_high"),
+            "premarket_low": features.get("premarket_low"),
+            "premarket_vwap": features.get("premarket_vwap"),
+            "premarket_volume": features.get("premarket_volume"),
+            "premarket_rvol": features.get("premarket_rvol"),
+            "spread_pct": features.get("spread_pct"),
+            "news_score": features.get("news_score"),
+            "catalyst_label": features.get("catalyst_label"),
+            "latest_headline": features.get("latest_headline"),
+            "classification": playbook.get("classification"),
+            "direction": playbook.get("direction"),
+            "radar_score": playbook.get("score"),
+            "opening_plan": playbook.get("opening_plan"),
+            "reasons_json": _json_safe(playbook.get("reasons") or []),
+            "earnings_json": _json_safe(features.get("earnings_context") or {}),
+            "data_quality_json": _json_safe(features.get("data_quality") or {}),
+            "playbook_json": _json_safe(playbook),
+        })
+    if not rows:
+        return []
+    try:
+        db = get_client(write=True)
+        result = db.table("premarket_radar_snapshots").upsert(
+            rows,
+            on_conflict="cycle_started_at,ticker",
+        ).execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[PREMARKET_RADAR_WRITE_FAILED] {str(e)[:200]}")
+        return [{"error": str(e)}]
+
+
+def get_latest_premarket_radar_snapshots(limit: int = 100) -> list:
+    """Fetch recent pre-market radar rows for dashboards and reviews."""
+    try:
+        db = get_client()
+        result = (db.table("premarket_radar_snapshots")
+                  .select("*")
+                  .order("cycle_started_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[PREMARKET_RADAR_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 def get_unscored_advisory_signals(min_age_minutes: int = 5, limit: int = 25,
                                   max_age_days: int = 4) -> list:
     """Fetch advisory rows eligible for forward-return replay."""
