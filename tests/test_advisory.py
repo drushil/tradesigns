@@ -45,7 +45,7 @@ def test_window_name_enforces_trade_republic_friendly_sessions():
     berlin = timezone(timedelta(hours=2))
 
     assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 29, tzinfo=berlin)) is None
-    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 0, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 15, tzinfo=berlin)) == "eu_open"
@@ -54,7 +54,7 @@ def test_window_name_enforces_trade_republic_friendly_sessions():
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 15, tzinfo=berlin)) == "us_premarket"
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 30, tzinfo=berlin)) == "us_open"
     assert advisory._window_name("US", datetime(2026, 5, 15, 17, 30, tzinfo=berlin)) == "us_midday"
-    assert advisory._window_name("US", datetime(2026, 5, 15, 20, 30, tzinfo=berlin)) == "us_afternoon"
+    assert advisory._window_name("US", datetime(2026, 5, 15, 20, 30, tzinfo=berlin)) == "us_power_hour"
     assert advisory._window_name("US", datetime(2026, 5, 15, 21, 30, tzinfo=berlin)) == "us_close"
 
 
@@ -565,6 +565,13 @@ def test_eu_mirror_universe_is_metadata_tagged():
     assert all(item.get("mirror_only_windows") == ["tr_morning_watch", "eu_open"] for item in mirrors)
     assert {"AVGO", "MU"}.issubset({item.get("primary_symbol") for item in mirrors})
     assert abs(sum(advisory.EU_MIRROR_WEIGHTS.values()) - 1.0) < 0.001
+
+
+def test_us_avgo_is_high_priority_for_immediate_send():
+    avgo = next(item for item in advisory.ADVISORY_UNIVERSE["US"] if item.get("data_symbol") == "AVGO")
+
+    assert avgo["priority"] == "high"
+    assert avgo["trade_target"] is True
 
 
 def _make_fake_bars(n_rows, volume):
@@ -1165,6 +1172,7 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
     sent = []
+    virtual_positions = []
 
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg(max_live_alerts_per_day=1, max_live_trades_per_session=1))
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
@@ -1206,6 +1214,7 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     })
     monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": len(saved)})
+    monkeypatch.setattr(advisory, "create_virtual_position", lambda record: virtual_positions.append(record) or {"id": 1})
     monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
     monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
 
@@ -1217,6 +1226,8 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     assert saved[1]["status"] == "sent"
     assert len(sent) == 1
     assert "AMD" in sent[0]
+    assert virtual_positions[0]["data_symbol"] == "AMD"
+    assert virtual_positions[0]["session_window"] == "us_open"
 
 
 def test_run_advisory_cycle_waits_for_us_open_bars(monkeypatch):
