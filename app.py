@@ -38,6 +38,7 @@ PAGES = {
     "📅 EOD Review":       "eod_review",
     "🚧 Blocked Ops":      "blocked_opportunities",
     "📡 Live Signals":     "signals",
+    "🌅 Pre-Market":       "premarket",
     "🎯 Advisory":         "advisory",
     "🔄 Trades":           "trades",
     "📈 Performance":      "performance",
