@@ -192,11 +192,14 @@ _GATE_REASON_LABELS = {
 }
 
 
+_GRADE_RANK = {"A+": 0, "A": 1, "B": 2, "C": 3}
+
+
 def _render_live_scan_log(fetch_fn):
-    """Render the All US Live Scan tab with per-ticker gate reasons."""
-    st.subheader("📋 Live Scan Log (last 4h)")
+    """Render the live scan log — shown at the top of the page, sorted by grade."""
+    st.subheader("📋 Live Scan Log")
     st.caption(
-        "Every ticker scanned in the last 4 hours with its gate reason. "
+        "Every ticker scanned this cycle with its gate reason. "
         "Green = alerted to Discord. Red = downside risk. Grey = blocked."
     )
     if fetch_fn is None:
@@ -207,7 +210,7 @@ def _render_live_scan_log(fetch_fn):
     with c_mkt:
         scan_market = st.selectbox("Market", ["US", "EU"], index=0, key="scan_log_market")
     with c_hrs:
-        scan_hours = st.selectbox("Hours back", [1, 2, 4, 8], index=2, key="scan_log_hours")
+        scan_hours = st.selectbox("Hours back", [1, 2, 4, 8], index=0, key="scan_log_hours")
     with c_refresh:
         st.write("")
         st.write("")
@@ -233,11 +236,14 @@ def _render_live_scan_log(fetch_fn):
 
     table_rows = []
     for r in scan_rows:
+        grade = r.get("grade") or "—"
         table_rows.append({
-            "Scanned At": _format_time(r.get("scanned_at")),
+            "_grade_rank": _GRADE_RANK.get(grade, 9),
+            "_alerted": bool(r.get("alerted")),
+            "Time": _format_time(r.get("scanned_at")),
             "Symbol": r.get("data_symbol") or "—",
             "Window": r.get("session_window") or "—",
-            "Grade": r.get("grade") or "—",
+            "Grade": grade,
             "Side": r.get("side") or "—",
             "Composite": float(r.get("composite_score") or 0),
             "Breakout": float(r.get("breakout_quality") or 0) if r.get("breakout_quality") is not None else None,
@@ -248,19 +254,24 @@ def _render_live_scan_log(fetch_fn):
             "Tape": float(r.get("tape_score") or 0) if r.get("tape_score") is not None else None,
             "RSI": float(r.get("rsi_score") or 0) if r.get("rsi_score") is not None else None,
             "ORB": bool(r.get("orb_active")) if r.get("orb_active") is not None else None,
-            "Gate Reason": r.get("gate_reason") or "—",
+            "Gate": r.get("gate_reason") or "—",
             "Alerted": bool(r.get("alerted")),
             "Downside": bool(r.get("downside_risk")),
         })
 
     df = pd.DataFrame(table_rows)
+    # Sort: alerted first, then by grade rank (A+→A→B→C→ungraded), then composite desc
+    df = df.sort_values(
+        ["_alerted", "_grade_rank", "Composite"],
+        ascending=[False, True, False],
+    ).drop(columns=["_grade_rank", "_alerted"])
 
     def _row_color(row):
         if row.get("Alerted"):
             return ["background-color: #14532d22"] * len(row)
         if row.get("Downside"):
             return ["background-color: #7f1d1d22"] * len(row)
-        gate = str(row.get("Gate Reason") or "")
+        gate = str(row.get("Gate") or "")
         if "blocked" in gate or gate in {"no_candidate", "capped_by_limit", "watch_repeat_blocked", "already_alerted_session"}:
             return ["background-color: #1f1f1f"] * len(row)
         return [""] * len(row)
@@ -342,6 +353,11 @@ def render():
 
     st.divider()
 
+    # ── Live Scan log — first thing visible after stats ───────────────────
+    _render_live_scan_log(_get_advisory_scan_log)
+
+    st.divider()
+
     _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
     _render_open_positions(get_open_advisory_positions, record_advisory_manual_trade)
     _render_closed_advisory_trades(get_advisory_trades)
@@ -356,11 +372,6 @@ def render():
     # ── Replay Scoreboard ──────────────────────────────────────────────────
     if _get_advisory_scoreboard is not None:
         _render_scoreboard(_get_advisory_scoreboard)
-
-    st.divider()
-
-    # ── Live Scan log ──────────────────────────────────────────────────────
-    _render_live_scan_log(_get_advisory_scan_log)
 
     st.divider()
 
