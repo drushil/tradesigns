@@ -2152,3 +2152,91 @@ def test_exit_monitor_throttles_checked_heartbeat(monkeypatch):
 
     assert emitted == []
     assert updates == []
+
+
+def test_virtual_monitor_sends_runner_weakening_before_levels(monkeypatch):
+    sent = []
+    updates = []
+    position = {
+        "id": 77,
+        "data_symbol": "NVDA",
+        "side": "BUY",
+        "grade": "A",
+        "market": "US",
+        "currency": "USD",
+        "fx_rate": 1.10,
+        "entry_price_native": 100.0,
+        "stop_price": 95.0,
+        "target_1": 110.0,
+        "target_2": 120.0,
+        "exit_monitor_json": {"size_eur": 1000.0, "alerts": []},
+    }
+
+    monkeypatch.setattr(advisory, "get_open_virtual_positions", lambda max_age_days=3: [position])
+    monkeypatch.setattr(advisory, "_latest_native_price", lambda symbol: 104.0)
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "update_virtual_position", lambda position_id, update: updates.append((position_id, update)) or update)
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(market_regime="bull", intraday_regime="trending"))
+    monkeypatch.setattr(advisory, "_trend_1h_alignment", lambda symbol, side, composite: {"aligned": False, "direction": "down"})
+    monkeypatch.setattr(
+        advisory,
+        "compute_all_signals",
+        lambda symbol, weights, regime_state=None: {
+            "composite_score": 0.12,
+            "signals": {
+                "vwap_deviation": {"score": -0.25},
+                "tape_aggression": {"score": -0.20},
+                "macd_crossover": {"score": -0.30},
+                "relative_strength": {"score": 0.10},
+                "orb": {"score": 0.0, "meta": {"active": False}},
+            },
+        },
+    )
+
+    emitted = advisory._monitor_virtual_positions(
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 6, 2, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted == [{"symbol": "NVDA", "alert_type": "runner_weakening", "virtual": True}]
+    assert "RUNNER WEAKENING" in sent[0]
+    assert "consider trimming" in sent[0]
+    assert updates[0][0] == 77
+    assert "status" not in updates[0][1]
+    assert "closed_at" not in updates[0][1]
+    assert "runner_weakening" in updates[0][1]["exit_monitor_json"]["alerts"]
+    assert updates[0][1]["exit_monitor_json"]["runner_weakening_json"]["status"] == "weakening"
+
+
+def test_virtual_monitor_does_not_repeat_runner_weakening(monkeypatch):
+    sent = []
+    updates = []
+    position = {
+        "id": 77,
+        "data_symbol": "NVDA",
+        "side": "BUY",
+        "grade": "A",
+        "market": "US",
+        "currency": "USD",
+        "fx_rate": 1.10,
+        "entry_price_native": 100.0,
+        "stop_price": 95.0,
+        "target_1": 110.0,
+        "target_2": 120.0,
+        "exit_monitor_json": {"alerts": ["runner_weakening"]},
+    }
+
+    monkeypatch.setattr(advisory, "get_open_virtual_positions", lambda max_age_days=3: [position])
+    monkeypatch.setattr(advisory, "_latest_native_price", lambda symbol: 104.0)
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
+    monkeypatch.setattr(advisory, "update_virtual_position", lambda position_id, update: updates.append((position_id, update)) or update)
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: pytest.fail("weakening check should be skipped"))
+
+    emitted = advisory._monitor_virtual_positions(
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 6, 2, 16, 0, tzinfo=timezone.utc),
+    )
+
+    assert emitted == []
+    assert sent == []
+    assert updates == []

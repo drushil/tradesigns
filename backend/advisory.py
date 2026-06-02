@@ -1625,6 +1625,91 @@ def _virtual_entry_monitor(candidate: dict, entry_native: float, cfg: AdvisoryCo
     }
 
 
+def _runner_weakening_check(position: dict, current_native: float, cfg: AdvisoryConfig) -> dict:
+    """Detect fading momentum on an open virtual runner before hard levels are touched."""
+    if not _env_bool("ADVISORY_RUNNER_WEAKENING_ENABLED", True):
+        return {}
+    side = str(position.get("side") or "BUY").upper()
+    if side != "BUY":
+        return {}
+    symbol = position.get("data_symbol")
+    if not symbol:
+        return {}
+    try:
+        regime_state = detect_regime(symbol)
+        signal_result = compute_all_signals(
+            symbol,
+            _weights_for_market(str(position.get("market") or "US").upper()),
+            regime_state=regime_state,
+        )
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc)[:80]}
+
+    signals = signal_result.get("signals") or {}
+    composite = float(signal_result.get("composite_score") or 0)
+    direction = 1
+    breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
+    orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
+    grade = _grade(composite, breakout, orb_active)
+    trend = _trend_1h_alignment(symbol, side, composite)
+    vwap = _signal_score(signals, "vwap_deviation") * direction
+    tape = _signal_score(signals, "tape_aggression") * direction
+    macd = _signal_score(signals, "macd_crossover") * direction
+
+    reasons = []
+    min_composite = _env_float("ADVISORY_RUNNER_WEAKENING_COMPOSITE", 0.20)
+    if composite < min_composite:
+        reasons.append(f"composite faded to {composite:+.3f}")
+    if grade == "C":
+        reasons.append("grade fell to C")
+    if trend.get("aligned") is False:
+        reasons.append("1h trend no longer aligned")
+    if vwap <= _env_float("ADVISORY_RUNNER_WEAKENING_VWAP_MAX", -0.15) and tape <= _env_float("ADVISORY_RUNNER_WEAKENING_TAPE_MAX", -0.10):
+        reasons.append(f"VWAP/tape weakened ({vwap:+.2f}/{tape:+.2f})")
+    if macd <= _env_float("ADVISORY_RUNNER_WEAKENING_MACD_MAX", -0.25):
+        reasons.append(f"MACD turned down ({macd:+.2f})")
+
+    if not reasons:
+        return {
+            "status": "ok",
+            "composite": round(composite, 4),
+            "grade": grade,
+            "breakout_quality": breakout,
+            "trend_1h": trend,
+        }
+    return {
+        "status": "weakening",
+        "reasons": reasons,
+        "composite": round(composite, 4),
+        "grade": grade,
+        "breakout_quality": breakout,
+        "trend_1h": trend,
+        "current_native": round(float(current_native or 0), 4),
+        "scores": {
+            "vwap": round(vwap, 4),
+            "tape": round(tape, 4),
+            "macd": round(macd, 4),
+        },
+    }
+
+
+def _format_virtual_runner_weakening_alert(position: dict, current_native: float, weakening: dict, cfg: AdvisoryConfig) -> str:
+    symbol = position.get("data_symbol")
+    entry = float(position.get("entry_price_native") or 0)
+    currency = position.get("currency") or "USD"
+    fx = float(position.get("fx_rate") or cfg.fx_rate or 1.0)
+    entry_eur = _display_price(entry, currency, fx)
+    current_eur = _display_price(current_native, currency, fx)
+    pnl_pct = ((current_native - entry) / entry * 100) if entry else 0.0
+    reason = "; ".join((weakening.get("reasons") or [])[:3])
+    return (
+        f"**RUNNER WEAKENING - {symbol} BUY - virtual**\n"
+        f"Current: €{current_eur:.2f} | Entry: €{entry_eur:.2f} | P&L: {pnl_pct:+.2f}%\n"
+        f"Reason: {reason}.\n"
+        "Action: consider trimming, tightening the stop, or waiting for renewed momentum before adding."
+    )
+
+
 def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfig,
                    item: dict, market: str, mode: str, window: str,
                    gate_reason: str, candidate: dict = None) -> dict:
@@ -1716,6 +1801,30 @@ def _monitor_virtual_positions(cfg: "AdvisoryConfig", now_cet: datetime) -> list
             new_status = "hit_t1"
 
         if not hit_level:
+            if "runner_weakening" in alerts_sent:
+                continue
+            weakening = _runner_weakening_check(position, current, cfg)
+            if weakening.get("status") != "weakening":
+                continue
+            message = _format_virtual_runner_weakening_alert(position, current, weakening, cfg)
+            _send_discord(message, cfg.discord_webhook_url)
+            alerts_sent.add("runner_weakening")
+            monitor_json["alerts"] = list(alerts_sent)
+            monitor_json["last_alert"] = "runner_weakening"
+            monitor_json["runner_weakening_json"] = weakening
+            monitor_json["last_checked_at"] = datetime.utcnow().isoformat() + "Z"
+            monitor_json["last_price_native"] = round(current, 4)
+            monitor_json["last_price_eur"] = round(_display_price(current, currency, fx), 4)
+            updates = {
+                "exit_monitor_json": monitor_json,
+                "pnl_pct": round(pnl_pct, 4),
+                "close_price_native": round(current, 4),
+            }
+            try:
+                update_virtual_position(position["id"], updates)
+            except Exception:
+                pass
+            emitted.append({"symbol": symbol, "alert_type": "runner_weakening", "virtual": True})
             continue
 
         current_eur = _display_price(current, currency, fx)
