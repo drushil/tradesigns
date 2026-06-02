@@ -378,11 +378,12 @@ def run_signal_cycle():
         _replay_advisory_signals()
     except Exception as e:
         log_event("WARN", "advisory_replay_cycle_failed", {"error": str(e)[:160]})
-    try:
-        from backend.advisory_auto.executor import run_advisory_auto_cycle
-        run_advisory_auto_cycle()
-    except Exception as e:
-        log_event("WARN", "advisory_auto_cycle_failed", {"error": str(e)[:160]})
+    if os.getenv("ADVISORY_AUTO_RUN", "").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from backend.advisory_auto.executor import run_advisory_auto_cycle
+            run_advisory_auto_cycle()
+        except Exception as e:
+            log_event("WARN", "advisory_auto_cycle_failed", {"error": str(e)[:160]})
 
     # Staleness guard: if this cycle started too late (queued behind a cancelled
     # run), skip signal computation and only run exit checks. Bracket orders
