@@ -2230,7 +2230,7 @@ def run_advisory_cycle() -> dict:
                     "data_symbol": candidate["data_symbol"],
                     "market": _candidate_market,
                     "side": candidate.get("side", "BUY"),
-                    "session_window": candidate.get("window"),
+                    "session_window": (candidate.get("signal_json") or {}).get("window") or candidate.get("window"),
                     "grade": candidate.get("grade"),
                     "entry_price_native": round(virt_entry, 4) if virt_entry else None,
                     "stop_price": candidate.get("stop_price"),

@@ -1165,6 +1165,7 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
     sent = []
+    virtual_positions = []
 
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg(max_live_alerts_per_day=1, max_live_trades_per_session=1))
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
@@ -1206,6 +1207,7 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     })
     monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": len(saved)})
+    monkeypatch.setattr(advisory, "create_virtual_position", lambda record: virtual_positions.append(record) or {"id": 1})
     monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
     monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
 
@@ -1217,6 +1219,8 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
     assert saved[1]["status"] == "sent"
     assert len(sent) == 1
     assert "AMD" in sent[0]
+    assert virtual_positions[0]["data_symbol"] == "AMD"
+    assert virtual_positions[0]["session_window"] == "us_open"
 
 
 def test_run_advisory_cycle_waits_for_us_open_bars(monkeypatch):
