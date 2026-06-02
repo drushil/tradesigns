@@ -199,6 +199,9 @@ def _render_live_scan_log(fetch_fn):
         "Every ticker scanned in the last 4 hours with its gate reason. "
         "Green = alerted to Discord. Red = downside risk. Grey = blocked."
     )
+    if fetch_fn is None:
+        st.info("Live scan log is not available in this deployment yet.")
+        return
 
     c_mkt, c_hrs, c_refresh = st.columns([2, 2, 2])
     with c_mkt:
@@ -274,22 +277,25 @@ def _render_live_scan_log(fetch_fn):
 
 
 def render():
-    from database.client import (
-        get_advisory_signal_by_id,
-        get_advisory_scan_log,
-        get_open_advisory_positions,
-        get_recent_advisory_signals,
-        mark_advisory_taken,
-        update_advisory_exit_status,
-    )
-    try:
-        from database.client import get_advisory_scoreboard as _get_advisory_scoreboard
-    except (ImportError, AttributeError):
-        _get_advisory_scoreboard = None
-    try:
-        from database.client import get_latest_advisory_scan_snapshots as _get_latest_scan_snapshots
-    except (ImportError, AttributeError):
-        _get_latest_scan_snapshots = None
+    from database import client as db_client
+
+    def _missing_row(*args, **kwargs):
+        return {}
+
+    def _missing_rows(*args, **kwargs):
+        return []
+
+    def _missing_update(*args, **kwargs):
+        return {"error": "This advisory database helper is not available in the deployed app version."}
+
+    get_advisory_signal_by_id = getattr(db_client, "get_advisory_signal_by_id", _missing_row)
+    get_open_advisory_positions = getattr(db_client, "get_open_advisory_positions", _missing_rows)
+    get_recent_advisory_signals = getattr(db_client, "get_recent_advisory_signals", _missing_rows)
+    mark_advisory_taken = getattr(db_client, "mark_advisory_taken", _missing_update)
+    update_advisory_exit_status = getattr(db_client, "update_advisory_exit_status", _missing_update)
+    _get_advisory_scan_log = getattr(db_client, "get_advisory_scan_log", None)
+    _get_advisory_scoreboard = getattr(db_client, "get_advisory_scoreboard", None)
+    _get_latest_scan_snapshots = getattr(db_client, "get_latest_advisory_scan_snapshots", None)
     from backend import advisory
 
     cfg = advisory.load_config()
@@ -351,7 +357,7 @@ def render():
     st.divider()
 
     # ── Live Scan log ──────────────────────────────────────────────────────
-    _render_live_scan_log(get_advisory_scan_log)
+    _render_live_scan_log(_get_advisory_scan_log)
 
     st.divider()
 

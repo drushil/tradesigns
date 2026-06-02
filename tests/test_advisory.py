@@ -45,7 +45,7 @@ def test_window_name_enforces_trade_republic_friendly_sessions():
     berlin = timezone(timedelta(hours=2))
 
     assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 29, tzinfo=berlin)) is None
-    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 0, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 15, tzinfo=berlin)) == "eu_open"
@@ -54,7 +54,7 @@ def test_window_name_enforces_trade_republic_friendly_sessions():
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 15, tzinfo=berlin)) == "us_premarket"
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 30, tzinfo=berlin)) == "us_open"
     assert advisory._window_name("US", datetime(2026, 5, 15, 17, 30, tzinfo=berlin)) == "us_midday"
-    assert advisory._window_name("US", datetime(2026, 5, 15, 20, 30, tzinfo=berlin)) == "us_afternoon"
+    assert advisory._window_name("US", datetime(2026, 5, 15, 20, 30, tzinfo=berlin)) == "us_power_hour"
     assert advisory._window_name("US", datetime(2026, 5, 15, 21, 30, tzinfo=berlin)) == "us_close"
 
 

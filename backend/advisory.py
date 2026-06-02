@@ -31,11 +31,27 @@ from database.client import (
     upsert_advisory_scan_snapshot,
     upsert_fx_rate_cache,
     update_advisory_exit_status,
-    insert_advisory_scan_log,
-    create_virtual_position,
-    get_open_virtual_positions,
-    update_virtual_position,
 )
+try:
+    from database.client import insert_advisory_scan_log
+except (ImportError, AttributeError):
+    def insert_advisory_scan_log(record: dict) -> dict:
+        return {"skipped": True, "reason": "scan_log_helper_unavailable"}
+try:
+    from database.client import (
+        create_virtual_position,
+        get_open_virtual_positions,
+        update_virtual_position,
+    )
+except (ImportError, AttributeError):
+    def create_virtual_position(record: dict) -> dict:
+        return {"skipped": True, "reason": "virtual_position_helpers_unavailable"}
+
+    def get_open_virtual_positions(max_age_days: int = 5) -> list:
+        return []
+
+    def update_virtual_position(position_id: int, updates: dict) -> dict:
+        return {"skipped": True, "reason": "virtual_position_helpers_unavailable"}
 
 
 ADVISORY_UNIVERSE = {
@@ -1776,9 +1792,13 @@ def _build_downside_candidate(
         "side": side,
         "composite_score": round(composite, 4),
         "grade": grade,
-        "alert_stage": "watch",
-        "status": "sent",
+        "alert_stage": "downside",
+        "status": "skipped",
         "downside_risk": True,
+        "message_text": (
+            f"**DOWNSIDE RISK - {symbol}**\n"
+            f"Bearish pressure detected; composite {composite:.3f}. No short entry is recommended."
+        ),
         "rationale": (
             f"Bearish pressure: composite={composite:.3f} | "
             f"VWAP {signals.get('vwap_deviation', {}).get('score', 0):+.2f} | "
@@ -1807,7 +1827,12 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         return None
     listing_type = item.get("listing_type")
     primary_symbol = item.get("primary_symbol")
-    quality = _data_quality(symbol, market, listing_type=listing_type, window=window)
+    try:
+        quality = _data_quality(symbol, market, listing_type=listing_type, window=window)
+    except TypeError as exc:
+        if "window" not in str(exc):
+            raise
+        quality = _data_quality(symbol, market, listing_type=listing_type)
     if not quality.get("ok"):
         return {
             "market": market, "mode": mode, "status": "blocked_data_quality",
