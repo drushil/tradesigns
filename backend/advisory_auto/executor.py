@@ -95,9 +95,9 @@ def _get_alpaca_open_orders() -> set[str]:
     """Return set of tickers with open orders in the advisory-auto account."""
     try:
         from alpaca.trading.requests import GetOrdersRequest
-        from alpaca.trading.enums import OrderStatus
+        from alpaca.trading.enums import QueryOrderStatus
         client = _get_auto_client()
-        req = GetOrdersRequest(status=OrderStatus.OPEN, limit=100)
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=100)
         orders = client.get_orders(filter=req)
         return {o.symbol for o in orders}
     except Exception as e:

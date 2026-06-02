@@ -2679,6 +2679,23 @@ def run_advisory_cycle() -> dict:
         "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
         "immediate_live_sent": immediate_live_sent,
     })
+
+    # Trigger advisory-auto evaluation immediately so US live signals are scored
+    # while still inside the freshness window (default 6 min). Without this,
+    # auto-cycle would only fire from run_signal_cycle on a separate cadence
+    # and could miss early-session signals entirely. Gated by ADVISORY_AUTO_RUN
+    # so the master kill switch in workflow vars controls both call sites.
+    if (
+        "US" in cfg.live_markets
+        and "US" in cfg.markets
+        and os.getenv("ADVISORY_AUTO_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        try:
+            from backend.advisory_auto.executor import run_advisory_auto_cycle
+            run_advisory_auto_cycle()
+        except Exception as exc:
+            log_event("WARN", "advisory_auto_cycle_failed", {"error": str(exc)[:160]})
+
     return {
         "emitted": len(emitted),
         "blocked": len(blocked),

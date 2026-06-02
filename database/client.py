@@ -1054,11 +1054,13 @@ def get_advisory_attribution_summary(days: int = 90) -> dict:
 
 
 def get_advisory_auto_eligible(market: str = "US", max_age_minutes: int = 6,
-                                limit: int = 20) -> list:
+                                limit: int = 100) -> list:
     """
     Fetch advisory signals eligible for advisory-auto evaluation.
-    Returns US live A/A+ signals from the last max_age_minutes that have not
-    yet been checked by the auto executor this cycle.
+    Returns US live BUY-side A/A+/B signals from the last max_age_minutes that
+    have not yet been checked by the auto executor this cycle. V1 is long-only
+    on a paper/Trade-Republic-compatible account, so SELL-side rows are excluded
+    at the selector — they lack entry/stop/target levels in the current pipeline.
     """
     try:
         cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + "Z"
@@ -1067,6 +1069,7 @@ def get_advisory_auto_eligible(market: str = "US", max_age_minutes: int = 6,
                   .select("*")
                   .eq("mode", "live")
                   .eq("market", market.upper())
+                  .eq("side", "BUY")
                   .in_("grade", ["A+", "A", "B"])
                   .gte("created_at", cutoff)
                   .is_("auto_checked_at", "null")
