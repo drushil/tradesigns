@@ -1058,7 +1058,7 @@ def get_advisory_auto_eligible(market: str = "US", max_age_minutes: int = 6,
                   .select("*")
                   .eq("mode", "live")
                   .eq("market", market.upper())
-                  .in_("grade", ["A+", "A"])
+                  .in_("grade", ["A+", "A", "B"])
                   .gte("created_at", cutoff)
                   .is_("auto_checked_at", "null")
                   .order("created_at", desc=True)
