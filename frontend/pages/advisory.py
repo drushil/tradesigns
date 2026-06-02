@@ -277,9 +277,11 @@ def render():
     from database.client import (
         get_advisory_signal_by_id,
         get_advisory_scan_log,
+        get_advisory_trades,
         get_open_advisory_positions,
         get_recent_advisory_signals,
         mark_advisory_taken,
+        record_advisory_manual_trade,
         update_advisory_exit_status,
     )
     try:
@@ -335,7 +337,8 @@ def render():
     st.divider()
 
     _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
-    _render_open_positions(get_open_advisory_positions, update_advisory_exit_status)
+    _render_open_positions(get_open_advisory_positions, record_advisory_manual_trade)
+    _render_closed_advisory_trades(get_advisory_trades)
 
     st.divider()
 
@@ -571,7 +574,7 @@ def _render_mark_taken_banner(fetch_signal_fn, mark_taken_fn):
                 st.rerun()
 
 
-def _render_open_positions(fetch_open_fn, update_exit_fn):
+def _render_open_positions(fetch_open_fn, record_exit_fn):
     try:
         positions = fetch_open_fn(max_age_days=7) or []
     except Exception as exc:
@@ -611,7 +614,6 @@ def _render_open_positions(fetch_open_fn, update_exit_fn):
         if current_eur is None and monitor.get("last_price_native") is not None:
             current_eur = _native_to_eur(pos, monitor.get("last_price_native"))
         current_eur = float(current_eur) if current_eur is not None else float(entry_eur or 0)
-        size_eur = float(monitor.get("size_eur") or pos.get("suggested_size_eur") or 0)
 
         with st.expander(f"Close {pos.get('data_symbol')} {pos.get('side')} from advisory #{signal_id}"):
             with st.form(f"close_advisory_{signal_id}"):
@@ -630,29 +632,92 @@ def _render_open_positions(fetch_open_fn, update_exit_fn):
                 close_submitted = st.form_submit_button("Record exit")
 
             if close_submitted:
-                exit_native = _eur_to_native(pos, exit_price_eur)
-                pnl_pct = _pnl_pct(pos, float(entry_eur or 0), float(exit_price_eur or 0))
-                pnl_eur = size_eur * pnl_pct / 100.0
-                updated_monitor = {
-                    **monitor,
-                    "manual_exit_price_eur": round(float(exit_price_eur or 0), 4),
-                    "exited_at": datetime.now(timezone.utc).isoformat(),
-                    "exit_notes": notes or None,
-                    "manual_pnl_pct": round(pnl_pct, 4),
-                }
-                result = update_exit_fn(signal_id, {
-                    "status": "expired",
-                    "manual_exit_price": round(float(exit_native or 0), 4),
-                    "manual_pnl_eur": round(float(pnl_eur), 2),
-                    "exit_alert_type": "manual_exit",
-                    "exit_alerted_at": datetime.now(timezone.utc).isoformat(),
-                    "exit_monitor_json": updated_monitor,
-                })
+                result = record_exit_fn(signal_id, exit_price_eur, notes=notes or "")
                 if result.get("error"):
                     st.error(f"Could not record exit: {result['error']}")
                 else:
-                    st.success(f"Exit recorded. Estimated P&L: €{pnl_eur:+.2f}")
+                    pnl = result.get("pnl_eur", 0)
+                    st.success(f"Exit recorded and saved to trade history. P&L: €{float(pnl):+.2f}")
                     st.rerun()
+
+
+# ── Closed Advisory Trades ───────────────────────────────────────────────────
+
+def _render_closed_advisory_trades(fetch_fn):
+    try:
+        trades = fetch_fn(days=90) or []
+    except Exception as exc:
+        st.warning(f"Advisory trade history unavailable: {exc}")
+        return
+
+    if not trades:
+        return
+
+    st.subheader("Closed advisory trades")
+    st.caption("Trades executed from advisory signals via Trade Republic or the close form.")
+
+    df = pd.DataFrame(trades)
+    df["pnl_eur"]     = pd.to_numeric(df.get("pnl_eur", 0), errors="coerce").fillna(0)
+    df["net_pnl_pct"] = pd.to_numeric(df.get("net_pnl_pct", 0), errors="coerce").fillna(0)
+
+    total_pnl  = df["pnl_eur"].sum()
+    win_count  = int((df["net_pnl_pct"] > 0).sum())
+    win_rate   = win_count / len(df) * 100 if len(df) else 0
+    avg_pnl    = df["net_pnl_pct"].mean() if len(df) else 0
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Trades", len(df))
+    mc2.metric("Total P&L", f"€{total_pnl:+.2f}")
+    mc3.metric("Win rate", f"{win_rate:.0f}%")
+    mc4.metric("Avg P&L", f"{avg_pnl:+.2f}%")
+
+    # Join advisory grade when advisory_signal_id is present
+    grade_map: dict = {}
+    signal_ids = [r.get("advisory_signal_id") for r in trades if r.get("advisory_signal_id")]
+    if signal_ids:
+        try:
+            from database.client import get_client as _gc
+            res = (_gc().table("advisory_signals")
+                        .select("id,grade,alert_stage,data_symbol")
+                        .in_("id", signal_ids)
+                        .execute())
+            grade_map = {row["id"]: row for row in (res.data or [])}
+        except Exception:
+            pass
+
+    display_rows = []
+    for t in trades:
+        sig = grade_map.get(t.get("advisory_signal_id")) or {}
+        display_rows.append({
+            "Date": (t.get("exit_time") or t.get("created_at") or "")[:10],
+            "Ticker": t.get("ticker"),
+            "Side": t.get("side"),
+            "Grade": sig.get("grade") or "—",
+            "Entry €": f"€{float(t['entry_price']):.2f}" if t.get("entry_price") else "—",
+            "Exit €": f"€{float(t['exit_price']):.2f}" if t.get("exit_price") else "—",
+            "P&L €": f"€{float(t['pnl_eur']):+.2f}" if t.get("pnl_eur") is not None else "—",
+            "P&L %": f"{float(t['net_pnl_pct']):+.2f}%" if t.get("net_pnl_pct") is not None else "—",
+        })
+
+    display_df = pd.DataFrame(display_rows)
+
+    def _highlight(val):
+        if isinstance(val, str) and val.startswith("€"):
+            try:
+                num = float(val.replace("€", "").replace(",", ""))
+                if num > 0:
+                    return "color: #00d4a0"
+                if num < 0:
+                    return "color: #ff5c5c"
+            except ValueError:
+                pass
+        return ""
+
+    st.dataframe(
+        display_df.style.map(_highlight, subset=["P&L €", "P&L %"] if "P&L €" in display_df.columns else []),
+        hide_index=True,
+        use_container_width=True,
+    )
 
 
 # ── Live Scan Table ─────────────────────────────────────────────────────────

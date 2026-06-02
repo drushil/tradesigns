@@ -941,3 +941,23 @@ create index if not exists idx_advisory_virt_pos_symbol
 alter table advisory_virtual_positions enable row level security;
 create policy "anon read advisory_virtual_positions"
     on advisory_virtual_positions for select to anon using (true);
+
+-- v10: trade_source discriminator — separate advisory manual trades from automated agent trades
+alter table trades
+    add column if not exists trade_source text
+        check (trade_source in ('agent', 'advisory_manual', 'manual_other'))
+        default 'agent',
+    add column if not exists advisory_signal_id bigint
+        references advisory_signals(id) on delete set null;
+
+create index if not exists idx_trades_trade_source_created_at
+    on trades (trade_source, created_at desc);
+
+create index if not exists idx_trades_advisory_signal_id
+    on trades (advisory_signal_id)
+    where advisory_signal_id is not null;
+
+update trades
+set trade_source = 'advisory_manual'
+where order_id like 'MANUAL-%'
+  and trade_source is null;

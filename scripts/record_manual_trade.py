@@ -29,24 +29,28 @@ def record_manual_trade(
     commission_eur: float,
     exit_time: datetime,
     notes: str = "",
+    advisory_signal_id: int = None,
 ) -> dict:
     db = get_client(write=True)
     record = {
-        "ticker":         ticker,
-        "side":           side,
-        "entry_price":    round(entry_price, 4),
-        "exit_price":     round(exit_price, 4),
-        "quantity":       round(quantity, 6),
-        "size_eur":       round(size_eur, 2),
-        "pnl_eur":        round(pnl_eur, 2),
-        "pnl_pct":        round(pnl_pct, 4),
-        "net_pnl_pct":    round(net_pnl_pct, 4),
-        "commission_eur": round(commission_eur, 4),
-        "exit_time":      exit_time.isoformat(),
-        "exit_reason":    "manual",
-        "llm_rationale":  notes or f"Manual trade via Trade Republic. Profit {pnl_pct}%.",
-        "order_id":       f"MANUAL-{ticker}-{exit_time.strftime('%Y%m%d')}",
+        "ticker":             ticker,
+        "side":               side,
+        "entry_price":        round(entry_price, 4),
+        "exit_price":         round(exit_price, 4),
+        "quantity":           round(quantity, 6),
+        "size_eur":           round(size_eur, 2),
+        "pnl_eur":            round(pnl_eur, 2),
+        "pnl_pct":            round(pnl_pct, 4),
+        "net_pnl_pct":        round(net_pnl_pct, 4),
+        "commission_eur":     round(commission_eur, 4),
+        "exit_time":          exit_time.isoformat(),
+        "exit_reason":        "manual",
+        "trade_source":       "advisory_manual",
+        "llm_rationale":      notes or f"Manual trade via Trade Republic. Profit {pnl_pct}%.",
+        "order_id":           f"MANUAL-{ticker}-{exit_time.strftime('%Y%m%d')}",
     }
+    if advisory_signal_id:
+        record["advisory_signal_id"] = advisory_signal_id
     result = db.table("trades").insert(record).execute()
     return result.data[0] if result.data else {}
 

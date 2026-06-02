@@ -79,6 +79,7 @@ def insert_trade(trade: dict) -> dict:
             "atr_at_entry", "r_multiple", "stop_pct_used",
             "hold_decision_json", "hold_extension_count",
             "setup_grade", "partial_exit_done", "entry_tranche_count",
+            "trade_source", "advisory_signal_id",
         }
         fallback = {k: v for k, v in trade.items() if k in base_columns}
         try:
@@ -231,7 +232,7 @@ def close_open_trade_record(ticker: str, reason: str = None):
         print(f"[OPEN_TRADE_CLOSE_FAILED] {str(e)[:200]}")
 
 
-def get_recent_trades(days: int = 30, ticker: str = None) -> list:
+def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent") -> list:
     db = get_client()
     q = db.table("trades").select("*").order("created_at", desc=True)
     if days:
@@ -239,8 +240,31 @@ def get_recent_trades(days: int = 30, ticker: str = None) -> list:
         q = q.gte("created_at", cutoff)
     if ticker:
         q = q.eq("ticker", ticker)
+    if source:
+        q = q.eq("trade_source", source)
     result = q.limit(500).execute()
     return result.data or []
+
+
+def get_advisory_trades(days: int = 90) -> list:
+    """Fetch trades executed from advisory signals (trade_source='advisory_manual')."""
+    try:
+        db = get_client()
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        result = (db.table("trades")
+                  .select("id,ticker,side,entry_price,exit_price,quantity,size_eur,"
+                          "pnl_eur,pnl_pct,net_pnl_pct,commission_eur,"
+                          "entry_time,exit_time,exit_reason,llm_rationale,"
+                          "advisory_signal_id,created_at")
+                  .eq("trade_source", "advisory_manual")
+                  .gte("created_at", cutoff)
+                  .order("exit_time", desc=True)
+                  .limit(200)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_TRADES_READ_FAILED] {str(e)[:200]}")
+        return []
 
 
 def get_unchecked_closed_trades_for_replay(min_age_minutes: int = 20, limit: int = 50,
@@ -650,6 +674,86 @@ def mark_advisory_taken(signal_id: int, entry_price_eur: float = None,
         return result.data[0] if result.data else {}
     except Exception as e:
         print(f"[ADVISORY_MARK_TAKEN_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def record_advisory_manual_trade(signal_id: int, exit_price_eur: float,
+                                  notes: str = "") -> dict:
+    """
+    Record a closed advisory-based manual trade.
+
+    Reads the advisory signal, computes P&L, updates advisory_signals.status='closed',
+    and inserts a trades row with trade_source='advisory_manual' so the Advisory page
+    can display it alongside automated trade history on the Trades page.
+    """
+    try:
+        row = get_advisory_signal_by_id(signal_id)
+        if not row:
+            return {"error": "advisory_signal_not_found"}
+
+        monitor = row.get("exit_monitor_json") or {}
+        if not isinstance(monitor, dict):
+            monitor = {}
+
+        entry_eur = float(
+            monitor.get("manual_entry_price_eur")
+            or _advisory_native_to_eur(row, float(row.get("manual_entry_price") or 0))
+            or _advisory_native_to_eur(row, float(row.get("entry_min") or 0))
+            or 0
+        )
+        size_eur = float(monitor.get("size_eur") or row.get("suggested_size_eur") or 0)
+        exit_native = _advisory_eur_to_native(row, float(exit_price_eur or 0))
+
+        direction = 1 if str(row.get("side") or "BUY").upper() == "BUY" else -1
+        pnl_pct = (
+            (float(exit_price_eur) - entry_eur) / entry_eur * 100.0 * direction
+            if entry_eur else 0.0
+        )
+        pnl_eur = size_eur * pnl_pct / 100.0
+
+        now_iso = datetime.utcnow().isoformat() + "Z"
+        updated_monitor = {
+            **monitor,
+            "manual_exit_price_eur": round(float(exit_price_eur or 0), 4),
+            "exited_at": now_iso,
+            "exit_notes": notes or None,
+            "manual_pnl_pct": round(pnl_pct, 4),
+        }
+
+        db = get_client(write=True)
+        (db.table("advisory_signals")
+           .update({
+               "status": "closed",
+               "manual_exit_price": round(float(exit_native or 0), 4),
+               "manual_pnl_eur": round(float(pnl_eur), 2),
+               "exit_alert_type": "manual_exit",
+               "exit_alerted_at": now_iso,
+               "exit_monitor_json": _json_safe(updated_monitor),
+           })
+           .eq("id", signal_id)
+           .execute())
+
+        trade_row = {
+            "ticker": row.get("data_symbol") or row.get("primary_symbol"),
+            "side": str(row.get("side") or "BUY").upper(),
+            "entry_price": round(float(row.get("manual_entry_price") or 0), 4) or None,
+            "exit_price": round(float(exit_native or 0), 4) or None,
+            "size_eur": round(size_eur, 2) or None,
+            "pnl_eur": round(float(pnl_eur), 2),
+            "pnl_pct": round(pnl_pct, 4),
+            "net_pnl_pct": round(pnl_pct, 4),
+            "exit_time": now_iso,
+            "exit_reason": "manual",
+            "composite_score": row.get("composite_score"),
+            "llm_rationale": notes or f"Advisory close via dashboard. {row.get('grade','')} signal #{signal_id}.",
+            "order_id": f"ADVISORY-{signal_id}",
+            "trade_source": "advisory_manual",
+            "advisory_signal_id": signal_id,
+        }
+        result = db.table("trades").insert(trade_row).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[RECORD_ADVISORY_MANUAL_TRADE_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
 
 

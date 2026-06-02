@@ -11,7 +11,7 @@ from frontend.ui_theme import page_header, status_pill
 def render():
     try:
         from database.client import get_recent_trades
-        trades = get_recent_trades(days=90)
+        trades = get_recent_trades(days=90, source="agent")
     except Exception as e:
         st.error(f"DB error: {e}")
         return
@@ -22,7 +22,8 @@ def render():
             "Closed trade execution, P&L, replay, and swing-vs-intraday analysis.",
             eyebrow="Execution Review",
         )
-        st.info("No trades yet. The agent will populate this once it starts trading.")
+        st.info("No automated trades yet. The agent will populate this once it starts trading.")
+        st.caption("Advisory-based manual trades (Trade Republic) are tracked on the Advisory page.")
         return
 
     df = pd.DataFrame(trades)
@@ -76,6 +77,8 @@ def render():
             status_pill(f"€{df['pnl_eur'].sum():+.2f}", "positive" if df["pnl_eur"].sum() >= 0 else "negative"),
         ],
     )
+
+    st.caption("Automated agent trades only. Advisory-based manual trades are tracked on the Advisory page.")
 
     # ── Filters ────────────────────────────────────────────────────────────
     col_f1, col_f2, col_f3, col_f4, col_f5, col_f6 = st.columns(6)
