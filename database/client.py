@@ -240,7 +240,10 @@ def get_recent_trades(days: int = 30, ticker: str = None, source: str = None) ->
         q = q.gte("created_at", cutoff)
     if ticker:
         q = q.eq("ticker", ticker)
-    if source:
+    if source == "agent":
+        # Include pre-migration rows that have NULL trade_source — they are all agent trades
+        q = q.or_("trade_source.eq.agent,trade_source.is.null")
+    elif source:
         q = q.eq("trade_source", source)
     result = q.limit(500).execute()
     return result.data or []
