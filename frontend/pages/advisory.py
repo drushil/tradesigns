@@ -309,6 +309,7 @@ def render():
     _get_advisory_scan_log = getattr(db_client, "get_advisory_scan_log", None)
     _get_advisory_scoreboard = getattr(db_client, "get_advisory_scoreboard", None)
     _get_latest_scan_snapshots = getattr(db_client, "get_latest_advisory_scan_snapshots", None)
+    _get_advisory_attribution_summary = getattr(db_client, "get_advisory_attribution_summary", None)
     from backend import advisory
 
     cfg = advisory.load_config()
@@ -356,6 +357,8 @@ def render():
     _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
     _render_open_positions(get_open_advisory_positions, record_advisory_manual_trade)
     _render_closed_advisory_trades(get_advisory_trades)
+    if _get_advisory_attribution_summary is not None:
+        _render_attribution_summary(_get_advisory_attribution_summary)
 
     st.divider()
 
@@ -657,6 +660,87 @@ def _render_open_positions(fetch_open_fn, record_exit_fn):
                     pnl = result.get("pnl_eur", 0)
                     st.success(f"Exit recorded and saved to trade history. P&L: €{float(pnl):+.2f}")
                     st.rerun()
+
+
+# ── Advisory Attribution Summary ─────────────────────────────────────────────
+
+def _render_attribution_summary(summary_fn):
+    """Attribution panel: manual trade P&L vs signal quality (last 90 days)."""
+    try:
+        summary = summary_fn(days=90)
+    except Exception as exc:
+        st.caption(f"Attribution summary unavailable: {exc}")
+        return
+
+    if not summary or summary.get("total_trades", 0) == 0:
+        return
+
+    with st.expander(
+        f"Advisory attribution (90d) — {summary['total_trades']} trades "
+        f"€{summary['total_pnl_eur']:+.2f} P&L",
+        expanded=False,
+    ):
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("Linked trades", summary["total_trades"])
+        mc2.metric("Total P&L", f"€{summary['total_pnl_eur']:+.2f}")
+        mc3.metric("Win rate", f"{summary['win_rate']:.0f}%")
+        mc4.metric("Avg P&L", f"{summary['avg_pnl_pct']:+.2f}%")
+
+        if summary.get("by_grade"):
+            st.caption("By grade")
+            grade_rows = [
+                {
+                    "Grade": r["grade"], "Trades": r["count"],
+                    "Wins": r["wins"], "Win %": f"{r['win_rate']:.0f}%",
+                    "Avg P&L": f"{r['avg_pnl_pct']:+.2f}%",
+                    "Total €": f"€{r['total_pnl_eur']:+.2f}",
+                }
+                for r in summary["by_grade"]
+            ]
+            st.dataframe(pd.DataFrame(grade_rows), hide_index=True, use_container_width=True)
+
+        if summary.get("by_ticker"):
+            st.caption("By ticker")
+            ticker_rows = [
+                {
+                    "Ticker": r["ticker"], "Trades": r["count"],
+                    "Win %": f"{r['win_rate']:.0f}%",
+                    "Avg P&L": f"{r['avg_pnl_pct']:+.2f}%",
+                    "Total €": f"€{r['total_pnl_eur']:+.2f}",
+                    "Grades": ", ".join(r.get("grades") or []),
+                }
+                for r in summary["by_ticker"]
+            ]
+            st.dataframe(pd.DataFrame(ticker_rows), hide_index=True, use_container_width=True)
+
+        if summary.get("signal_vs_execution"):
+            st.caption("Signal vs execution (where 60m forward return is available)")
+            sve_rows = [
+                {
+                    "Ticker": r["ticker"], "Grade": r["grade"],
+                    "Manual P&L": f"{r['manual_pnl_pct']:+.2f}%",
+                    "Fwd 60m": f"{r['forward_return_60m']:+.2f}%",
+                    "Outperformed": "yes" if r["outperformed"] else "no",
+                }
+                for r in summary["signal_vs_execution"]
+            ]
+            st.dataframe(pd.DataFrame(sve_rows), hide_index=True, use_container_width=True)
+
+        if summary.get("missed_winners"):
+            st.caption(
+                f"Missed winners — {len(summary['missed_winners'])} signals not taken "
+                f"with >1% 60m forward return"
+            )
+            mw_rows = [
+                {
+                    "Date": str(r.get("created_at") or "")[:10],
+                    "Ticker": r["ticker"], "Grade": r["grade"],
+                    "Fwd 60m": f"{r['forward_return_60m']:+.2f}%",
+                    "Score": f"{r.get('composite_score', 0):.2f}",
+                }
+                for r in summary["missed_winners"]
+            ]
+            st.dataframe(pd.DataFrame(mw_rows), hide_index=True, use_container_width=True)
 
 
 # ── Closed Advisory Trades ───────────────────────────────────────────────────

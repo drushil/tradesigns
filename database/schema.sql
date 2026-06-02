@@ -942,10 +942,11 @@ alter table advisory_virtual_positions enable row level security;
 create policy "anon read advisory_virtual_positions"
     on advisory_virtual_positions for select to anon using (true);
 
--- v10: trade_source discriminator — separate advisory manual trades from automated agent trades
+-- v10: trade_source discriminator + advisory_signal_id FK on trades
+-- advisory_auto added for Phase 2 advisory-auto paper executor
 alter table trades
     add column if not exists trade_source text
-        check (trade_source in ('agent', 'advisory_manual', 'manual_other'))
+        check (trade_source in ('agent', 'advisory_manual', 'advisory_auto', 'manual_other'))
         default 'agent',
     add column if not exists advisory_signal_id bigint
         references advisory_signals(id) on delete set null;
@@ -957,7 +958,25 @@ create index if not exists idx_trades_advisory_signal_id
     on trades (advisory_signal_id)
     where advisory_signal_id is not null;
 
-update trades
-set trade_source = 'advisory_manual'
+update trades set trade_source = 'advisory_manual'
 where order_id like 'MANUAL-%'
   and coalesce(trade_source, '') <> 'advisory_manual';
+
+update trades set trade_source = 'agent'
+where trade_source is null;
+
+-- v11: advisory-auto dry-run lifecycle columns
+alter table advisory_signals
+    add column if not exists auto_status text
+        check (auto_status in ('eligible','skipped','submitted','filled','closed','rejected','cancelled')),
+    add column if not exists auto_checked_at timestamptz,
+    add column if not exists auto_skip_reason text,
+    add column if not exists auto_order_id text,
+    add column if not exists auto_fill_price numeric(12,4),
+    add column if not exists auto_fill_qty   numeric(14,6),
+    add column if not exists auto_pnl_eur    numeric(10,2),
+    add column if not exists auto_exit_reason text;
+
+create index if not exists idx_advisory_signals_auto_status
+    on advisory_signals (auto_status, created_at desc)
+    where auto_status is not null;

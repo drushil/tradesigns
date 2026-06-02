@@ -153,7 +153,15 @@ def run_weekly_digest():
         run_gate_controller(days=7, limit=500)
     except Exception as e:
         log_event("WARN", "gate_controller_error", {"error": str(e)[:160]})
-    insights = generate_weekly_insights(trades, daily_reviews=daily_reviews)
+    advisory_summary = {}
+    try:
+        from database.client import get_advisory_attribution_summary
+        advisory_summary = get_advisory_attribution_summary(days=90)
+    except Exception as e:
+        log_event("WARN", "advisory_attribution_error", {"error": str(e)[:160]})
+    insights = generate_weekly_insights(
+        trades, daily_reviews=daily_reviews, advisory_summary=advisory_summary
+    )
     from datetime import date
     save_learning(
         week_start      = date.today(),
