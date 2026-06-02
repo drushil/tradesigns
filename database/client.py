@@ -908,6 +908,220 @@ def update_advisory_signal_replay(signal_id: int, replay: dict) -> dict:
         return {"error": str(e)}
 
 
+def get_advisory_attribution_summary(days: int = 90) -> dict:
+    """
+    Attribution metrics comparing manual advisory trades to signal quality.
+
+    Returns {total_trades, total_pnl_eur, win_rate, avg_pnl_pct,
+             by_grade, by_ticker, signal_vs_execution, missed_winners}.
+    """
+    empty: dict = {
+        "total_trades": 0, "total_pnl_eur": 0.0, "win_rate": 0.0, "avg_pnl_pct": 0.0,
+        "by_grade": [], "by_ticker": [], "signal_vs_execution": [], "missed_winners": [],
+    }
+    try:
+        from collections import defaultdict
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        db = get_client()
+
+        trade_result = (db.table("trades")
+                        .select("id,ticker,side,pnl_pct,pnl_eur,net_pnl_pct,advisory_signal_id")
+                        .eq("trade_source", "advisory_manual")
+                        .not_.is_("advisory_signal_id", "null")
+                        .gte("created_at", cutoff)
+                        .order("created_at", desc=False)
+                        .limit(200)
+                        .execute())
+        trades = trade_result.data or []
+        if not trades:
+            return empty
+
+        signal_ids = [t["advisory_signal_id"] for t in trades if t.get("advisory_signal_id")]
+        sig_result = (db.table("advisory_signals")
+                      .select("id,grade,composite_score,forward_return_60m,data_symbol,side")
+                      .in_("id", signal_ids)
+                      .execute())
+        signal_lookup = {s["id"]: s for s in (sig_result.data or [])}
+
+        grade_order = {"A+": 0, "A": 1, "B": 2, "C": 3}
+        grade_map: dict = defaultdict(lambda: {"count": 0, "wins": 0, "pnl_pct": [], "pnl_eur": []})
+        ticker_map: dict = defaultdict(lambda: {"count": 0, "wins": 0, "pnl_pct": [], "pnl_eur": [], "grades": set()})
+        signal_vs_exec = []
+
+        for t in trades:
+            pnl_pct = float(t.get("pnl_pct") or 0)
+            pnl_eur = float(t.get("pnl_eur") or 0)
+            ticker = str(t.get("ticker") or "").upper()
+            sig = signal_lookup.get(t.get("advisory_signal_id")) or {}
+            grade = str(sig.get("grade") or "?")
+            is_win = pnl_pct > 0
+
+            grade_map[grade]["count"] += 1
+            grade_map[grade]["pnl_pct"].append(pnl_pct)
+            grade_map[grade]["pnl_eur"].append(pnl_eur)
+            if is_win:
+                grade_map[grade]["wins"] += 1
+
+            ticker_map[ticker]["count"] += 1
+            ticker_map[ticker]["pnl_pct"].append(pnl_pct)
+            ticker_map[ticker]["pnl_eur"].append(pnl_eur)
+            ticker_map[ticker]["grades"].add(grade)
+            if is_win:
+                ticker_map[ticker]["wins"] += 1
+
+            fwd = sig.get("forward_return_60m")
+            if fwd is not None:
+                signal_vs_exec.append({
+                    "ticker": ticker,
+                    "grade": grade,
+                    "manual_pnl_pct": round(pnl_pct, 4),
+                    "forward_return_60m": round(float(fwd), 4),
+                    "outperformed": pnl_pct > float(fwd),
+                })
+
+        by_grade = []
+        for g, v in sorted(grade_map.items(), key=lambda x: grade_order.get(x[0], 9)):
+            n = v["count"]
+            by_grade.append({
+                "grade": g, "count": n, "wins": v["wins"],
+                "win_rate": round(v["wins"] / n * 100, 1) if n else 0.0,
+                "avg_pnl_pct": round(sum(v["pnl_pct"]) / n, 3) if n else 0.0,
+                "total_pnl_eur": round(sum(v["pnl_eur"]), 2),
+            })
+
+        by_ticker = []
+        for ticker, v in sorted(ticker_map.items(),
+                                key=lambda x: sum(x[1]["pnl_eur"]), reverse=True):
+            n = v["count"]
+            by_ticker.append({
+                "ticker": ticker, "count": n, "wins": v["wins"],
+                "win_rate": round(v["wins"] / n * 100, 1) if n else 0.0,
+                "avg_pnl_pct": round(sum(v["pnl_pct"]) / n, 3) if n else 0.0,
+                "total_pnl_eur": round(sum(v["pnl_eur"]), 2),
+                "grades": sorted(v["grades"], key=lambda g: grade_order.get(g, 9)),
+            })
+
+        all_pnl_eur = [float(t.get("pnl_eur") or 0) for t in trades]
+        all_pnl_pct = [float(t.get("pnl_pct") or 0) for t in trades]
+        wins = sum(1 for p in all_pnl_pct if p > 0)
+        total = len(trades)
+
+        missed_q = (db.table("advisory_signals")
+                    .select("id,data_symbol,grade,composite_score,forward_return_60m,created_at")
+                    .eq("mode", "live")
+                    .eq("market", "US")
+                    .gte("created_at", cutoff)
+                    .gt("forward_return_60m", 1.0)
+                    .order("forward_return_60m", desc=True)
+                    .limit(20))
+        if signal_ids:
+            missed_q = missed_q.not_.in_("id", signal_ids)
+        missed_result = missed_q.execute()
+        missed_winners = [
+            {
+                "signal_id": s["id"],
+                "ticker": s.get("data_symbol"),
+                "grade": s.get("grade"),
+                "forward_return_60m": round(float(s.get("forward_return_60m") or 0), 3),
+                "composite_score": round(float(s.get("composite_score") or 0), 3),
+                "created_at": s.get("created_at"),
+            }
+            for s in (missed_result.data or [])
+        ]
+
+        return {
+            "total_trades": total,
+            "total_pnl_eur": round(sum(all_pnl_eur), 2),
+            "win_rate": round(wins / total * 100, 1) if total else 0.0,
+            "avg_pnl_pct": round(sum(all_pnl_pct) / total, 3) if total else 0.0,
+            "by_grade": by_grade,
+            "by_ticker": by_ticker,
+            "signal_vs_execution": signal_vs_exec,
+            "missed_winners": missed_winners,
+        }
+    except Exception as e:
+        print(f"[ADVISORY_ATTRIBUTION_FAILED] {str(e)[:200]}")
+        return empty
+
+
+def get_advisory_auto_eligible(market: str = "US", max_age_minutes: int = 6,
+                                limit: int = 20) -> list:
+    """
+    Fetch advisory signals eligible for advisory-auto evaluation.
+    Returns US live A/A+ signals from the last max_age_minutes that have not
+    yet been checked by the auto executor this cycle.
+    """
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .eq("mode", "live")
+                  .eq("market", market.upper())
+                  .in_("grade", ["A+", "A"])
+                  .gte("created_at", cutoff)
+                  .is_("auto_checked_at", "null")
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_ELIGIBLE_FAILED] {str(e)[:200]}")
+        return []
+
+
+def mark_advisory_auto_decision(signal_id: int, auto_status: str,
+                                 skip_reason: str = None) -> dict:
+    """Set auto_status and auto_checked_at on an advisory_signals row."""
+    try:
+        db = get_client(write=True)
+        record: dict = {
+            "auto_status": auto_status,
+            "auto_checked_at": datetime.utcnow().isoformat() + "Z",
+        }
+        if skip_reason:
+            record["auto_skip_reason"] = skip_reason
+        result = (db.table("advisory_signals")
+                  .update(record)
+                  .eq("id", signal_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_DECISION_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_advisory_auto_daily_pnl() -> float:
+    """Sum today's closed advisory-auto trade P&L in EUR."""
+    try:
+        today_start = datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("trades")
+                  .select("pnl_eur")
+                  .eq("trade_source", "advisory_auto")
+                  .gte("created_at", today_start)
+                  .execute())
+        return sum(float(r.get("pnl_eur") or 0) for r in (result.data or []))
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_DAILY_PNL_FAILED] {str(e)[:200]}")
+        return 0.0
+
+
+def get_advisory_auto_open_count() -> int:
+    """Count of currently open advisory-auto positions (submitted or filled)."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("id", count="exact")
+                  .in_("auto_status", ["submitted", "filled"])
+                  .execute())
+        return result.count or 0
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_OPEN_COUNT_FAILED] {str(e)[:200]}")
+        return 0
+
+
 def get_advisory_scoreboard(
     days_back: int = 30,
     mode: str = None,

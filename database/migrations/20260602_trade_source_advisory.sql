@@ -3,7 +3,7 @@
 
 alter table trades
     add column if not exists trade_source text
-        check (trade_source in ('agent', 'advisory_manual', 'manual_other'))
+        check (trade_source in ('agent', 'advisory_manual', 'advisory_auto', 'manual_other'))
         default 'agent',
     add column if not exists advisory_signal_id bigint
         references advisory_signals(id) on delete set null;
@@ -20,3 +20,8 @@ update trades
 set trade_source = 'advisory_manual'
 where order_id like 'MANUAL-%'
   and trade_source is null;
+
+-- Backfill remaining NULLs as agent trades
+update trades
+set trade_source = 'agent'
+where trade_source is null;

@@ -601,7 +601,26 @@ def compute_hold_score(
     }
 
 
-def generate_weekly_insights(trades: list, daily_reviews: list = None) -> list:
+def _advisory_summary_section(summary: dict = None) -> str:
+    if not summary or summary.get("total_trades", 0) == 0:
+        return ""
+    lines = [
+        "\nADVISORY MANUAL TRADE ATTRIBUTION (last 90d):",
+        f"  Trades: {summary['total_trades']}  Win rate: {summary['win_rate']:.0f}%"
+        f"  Total P&L: €{summary['total_pnl_eur']:+.2f}  Avg: {summary['avg_pnl_pct']:+.3f}%",
+    ]
+    if summary.get("by_grade"):
+        lines.append("  By grade: " + "  |  ".join(
+            f"{r['grade']} {r['count']}t {r['win_rate']:.0f}% wr €{r['total_pnl_eur']:+.0f}"
+            for r in summary["by_grade"]
+        ))
+    if summary.get("missed_winners"):
+        lines.append(f"  Missed winners (signals not taken): {len(summary['missed_winners'])}")
+    return "\n".join(lines) + "\n"
+
+
+def generate_weekly_insights(trades: list, daily_reviews: list = None,
+                             advisory_summary: dict = None) -> list:
     """
     Sends the week's trades to Claude Sonnet for qualitative pattern extraction.
     Returns a list of actionable insight dicts.
@@ -644,7 +663,7 @@ TRADE LOG (most recent 50):
 
 WEEKLY EOD EVIDENCE:
 {json.dumps(eod_evidence, default=str)[:10000]}
-
+{_advisory_summary_section(advisory_summary)}
 Analyse these trades and EOD evidence. Identify 4-6 CONCRETE patterns.
 Look for: time-of-day effects, signal combinations that work/fail,
 regime-specific patterns, holding duration effects, ticker preferences.
