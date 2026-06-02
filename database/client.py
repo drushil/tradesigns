@@ -232,7 +232,7 @@ def close_open_trade_record(ticker: str, reason: str = None):
         print(f"[OPEN_TRADE_CLOSE_FAILED] {str(e)[:200]}")
 
 
-def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent") -> list:
+def get_recent_trades(days: int = 30, ticker: str = None, source: str = None) -> list:
     db = get_client()
     q = db.table("trades").select("*").order("created_at", desc=True)
     if days:
