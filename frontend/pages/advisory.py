@@ -196,10 +196,10 @@ _GRADE_RANK = {"A+": 0, "A": 1, "B": 2, "C": 3}
 
 
 def _render_live_scan_log(fetch_fn):
-    """Render the live scan log — shown at the top of the page, sorted by grade."""
-    st.subheader("📋 Live Scan Log")
+    """Render historical scan decisions with per-ticker gate reasons."""
+    st.subheader("Debug: Scan History")
     st.caption(
-        "Every ticker scanned this cycle with its gate reason. "
+        "Historical ticker-level scan decisions with gate reasons. "
         "Green = alerted to Discord. Red = downside risk. Grey = blocked."
     )
     if fetch_fn is None:
@@ -353,11 +353,6 @@ def render():
 
     st.divider()
 
-    # ── Live Scan log — first thing visible after stats ───────────────────
-    _render_live_scan_log(_get_advisory_scan_log)
-
-    st.divider()
-
     _render_mark_taken_banner(get_advisory_signal_by_id, mark_advisory_taken)
     _render_open_positions(get_open_advisory_positions, record_advisory_manual_trade)
     _render_closed_advisory_trades(get_advisory_trades)
@@ -372,6 +367,12 @@ def render():
     # ── Replay Scoreboard ──────────────────────────────────────────────────
     if _get_advisory_scoreboard is not None:
         _render_scoreboard(_get_advisory_scoreboard)
+
+    st.divider()
+
+    # ── Historical scan debug log ──────────────────────────────────────────
+    with st.expander("Debug: Scan History", expanded=False):
+        _render_live_scan_log(_get_advisory_scan_log)
 
     st.divider()
 
@@ -740,8 +741,8 @@ def _render_closed_advisory_trades(fetch_fn):
 # ── Live Scan Table ─────────────────────────────────────────────────────────
 
 def _render_live_scan_table(fetch_fn):
-    st.subheader("All US live scan")
-    st.caption("Latest per-cycle advisory state for each scanned ticker, including non-alert gate reasons.")
+    st.subheader("Latest Scan")
+    st.caption("Current per-ticker advisory state from the latest scan cycle, including non-alert gate reasons.")
 
     c_market, c_limit, _ = st.columns([2, 2, 6])
     with c_market:
