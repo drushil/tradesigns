@@ -232,7 +232,30 @@ def close_open_trade_record(ticker: str, reason: str = None):
         print(f"[OPEN_TRADE_CLOSE_FAILED] {str(e)[:200]}")
 
 
-def get_recent_trades(days: int = 30, ticker: str = None, source: str = None) -> list:
+def _is_advisory_manual_trade(row: dict) -> bool:
+    source = str((row or {}).get("trade_source") or "").strip().lower()
+    order_id = str((row or {}).get("order_id") or "").strip().upper()
+    strategy = str((row or {}).get("strategy_family") or "").strip().lower()
+    return (
+        source == "advisory_manual"
+        or order_id.startswith("MANUAL-")
+        or bool((row or {}).get("advisory_signal_id"))
+        or strategy == "advisory_manual"
+    )
+
+
+def _trade_matches_source(row: dict, source: str = "agent") -> bool:
+    source = "agent" if source is None else str(source).strip().lower()
+    if source in {"", "all", "*"}:
+        return True
+    if source == "agent":
+        return not _is_advisory_manual_trade(row)
+    if source == "advisory_manual":
+        return _is_advisory_manual_trade(row)
+    return str((row or {}).get("trade_source") or "").strip().lower() == source
+
+
+def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent") -> list:
     db = get_client()
     q = db.table("trades").select("*").order("created_at", desc=True)
     if days:
@@ -240,31 +263,17 @@ def get_recent_trades(days: int = 30, ticker: str = None, source: str = None) ->
         q = q.gte("created_at", cutoff)
     if ticker:
         q = q.eq("ticker", ticker)
-    if source == "agent":
-        # Include pre-migration rows that have NULL trade_source — they are all agent trades
-        q = q.or_("trade_source.eq.agent,trade_source.is.null")
-    elif source:
-        q = q.eq("trade_source", source)
     result = q.limit(500).execute()
-    return result.data or []
+    rows = result.data or []
+    return [row for row in rows if _trade_matches_source(row, source)]
 
 
 def get_advisory_trades(days: int = 90) -> list:
     """Fetch trades executed from advisory signals (trade_source='advisory_manual')."""
     try:
-        db = get_client()
-        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
-        result = (db.table("trades")
-                  .select("id,ticker,side,entry_price,exit_price,quantity,size_eur,"
-                          "pnl_eur,pnl_pct,net_pnl_pct,commission_eur,"
-                          "entry_time,exit_time,exit_reason,llm_rationale,"
-                          "advisory_signal_id,created_at")
-                  .eq("trade_source", "advisory_manual")
-                  .gte("created_at", cutoff)
-                  .order("exit_time", desc=True)
-                  .limit(200)
-                  .execute())
-        return result.data or []
+        rows = get_recent_trades(days=days, source="advisory_manual")
+        rows = sorted(rows, key=lambda row: row.get("exit_time") or row.get("created_at") or "", reverse=True)
+        return rows[:200]
     except Exception as e:
         print(f"[ADVISORY_TRADES_READ_FAILED] {str(e)[:200]}")
         return []

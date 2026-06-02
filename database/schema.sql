@@ -960,4 +960,4 @@ create index if not exists idx_trades_advisory_signal_id
 update trades
 set trade_source = 'advisory_manual'
 where order_id like 'MANUAL-%'
-  and trade_source is null;
+  and coalesce(trade_source, '') <> 'advisory_manual';
