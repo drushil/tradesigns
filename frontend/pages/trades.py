@@ -23,7 +23,7 @@ def render():
             eyebrow="Execution Review",
         )
         st.info("No automated trades yet. The agent will populate this once it starts trading.")
-        st.caption("Advisory-based manual trades (Trade Republic) are tracked on the Advisory page.")
+        st.caption("Advisory manual and advisory-auto paper trades are tracked separately on the Advisory page.")
         return
 
     df = pd.DataFrame(trades)
@@ -78,7 +78,7 @@ def render():
         ],
     )
 
-    st.caption("Automated agent trades only. Advisory-based manual trades are tracked on the Advisory page.")
+    st.caption("Automated agent trades only. Advisory manual and advisory-auto paper P&L are tracked separately on the Advisory page.")
 
     # ── Filters ────────────────────────────────────────────────────────────
     col_f1, col_f2, col_f3, col_f4, col_f5, col_f6 = st.columns(6)

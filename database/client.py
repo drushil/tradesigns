@@ -282,6 +282,17 @@ def get_advisory_trades(days: int = 90) -> list:
         return []
 
 
+def get_advisory_auto_trades(days: int = 90) -> list:
+    """Fetch paper trades executed by the advisory-auto allocator."""
+    try:
+        rows = get_recent_trades(days=days, source="advisory_auto")
+        rows = sorted(rows, key=lambda row: row.get("exit_time") or row.get("created_at") or "", reverse=True)
+        return rows[:200]
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_TRADES_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 def get_unchecked_closed_trades_for_replay(min_age_minutes: int = 20, limit: int = 50,
                                            exit_reasons: list[str] = None,
                                            max_age_days: int = 4) -> list:
