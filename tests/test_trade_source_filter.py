@@ -38,10 +38,19 @@ def test_advisory_manual_source_includes_linked_or_strategy_rows():
     assert _trade_matches_source(strategy, "agent") is False
 
 
+def test_advisory_auto_source_is_separate_from_agent_and_manual():
+    row = {"ticker": "NVDA", "trade_source": "advisory_auto", "order_id": "ADVAUTO-123"}
+
+    assert _trade_matches_source(row, "agent") is False
+    assert _trade_matches_source(row, "advisory_manual") is False
+    assert _trade_matches_source(row, "advisory_auto") is True
+
+
 def test_all_trade_source_keeps_both_agent_and_manual_rows():
     rows = [
         {"ticker": "NVDA", "order_id": "MANUAL-NVDA-20260601"},
         {"ticker": "META", "trade_source": "agent"},
+        {"ticker": "MU", "trade_source": "advisory_auto"},
     ]
 
-    assert [_trade_matches_source(row, "all") for row in rows] == [True, True]
+    assert [_trade_matches_source(row, "all") for row in rows] == [True, True, True]

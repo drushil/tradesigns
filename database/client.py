@@ -246,13 +246,16 @@ def _is_advisory_manual_trade(row: dict) -> bool:
 
 def _trade_matches_source(row: dict, source: str = "agent") -> bool:
     source = "agent" if source is None else str(source).strip().lower()
+    row_source = str((row or {}).get("trade_source") or "").strip().lower()
     if source in {"", "all", "*"}:
         return True
     if source == "agent":
-        return not _is_advisory_manual_trade(row)
+        return row_source != "advisory_auto" and not _is_advisory_manual_trade(row)
     if source == "advisory_manual":
         return _is_advisory_manual_trade(row)
-    return str((row or {}).get("trade_source") or "").strip().lower() == source
+    if source == "advisory_auto":
+        return row_source == "advisory_auto"
+    return row_source == source
 
 
 def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent") -> list:
