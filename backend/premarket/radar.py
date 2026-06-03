@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
@@ -20,6 +20,27 @@ try:
     NY_TZ = ZoneInfo("America/New_York")
 except Exception:  # pragma: no cover
     NY_TZ = None
+
+
+# Module-level Alpaca client singleton — avoids per-ticker re-instantiation
+# across the 40-ticker scan (was a small but unnecessary cost).
+_alpaca_client = None
+
+
+def _get_alpaca_client():
+    """Return a process-wide StockHistoricalDataClient, or None if keys missing."""
+    global _alpaca_client
+    if _alpaca_client is None:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+
+            api_key = os.getenv("ALPACA_API_KEY")
+            secret = os.getenv("ALPACA_SECRET_KEY")
+            if api_key and secret:
+                _alpaca_client = StockHistoricalDataClient(api_key, secret)
+        except Exception:
+            pass
+    return _alpaca_client
 
 
 @dataclass
@@ -96,7 +117,55 @@ def radar_universe() -> list[str]:
     return _csv_tickers(",".join(configured + advisory + extras))
 
 
-def _fetch_extended_bars(ticker: str):
+def _alpaca_extended_bars(ticker: str):
+    """Fetch 5 days of 1-min bars from Alpaca (IEX feed, real-time inc. pre-market).
+
+    Alpaca's stocks bars API returns all sessions by default on the IEX free-tier
+    feed — including pre-market and after-hours bars with real Volume values.
+    Yfinance, in contrast, frequently returns Volume=0 for pre-market 1-min bars,
+    which broke RVOL and the volume-threshold component of the radar score.
+
+    Note: IEX represents ~2-3% of total US market volume, so absolute pre-market
+    volume numbers from this source are a fraction of SIP totals. PMH/PML/VWAP
+    and the RVOL ratio (today / avg prior 4 days) remain correct because the
+    IEX share is consistent across days. Tune PREMARKET_MIN_VOLUME accordingly.
+    """
+    try:
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        client = _get_alpaca_client()
+        if client is None:
+            return None
+        req = StockBarsRequest(
+            symbol_or_symbols=ticker,
+            timeframe=TimeFrame.Minute,
+            start=datetime.now(timezone.utc) - timedelta(days=5),
+        )
+        bars = client.get_stock_bars(req)
+        if not bars or ticker not in bars.data or not bars.data[ticker]:
+            return None
+        df = bars.df
+        if isinstance(df.index, pd.MultiIndex):
+            if ticker in df.index.get_level_values(0):
+                df = df.loc[ticker]
+            else:
+                df = df.droplevel(0)
+        df.index = pd.to_datetime(df.index, utc=True)
+        df.columns = [str(c).title() for c in df.columns]
+        if len(df) < 10:
+            return None
+        return df
+    except Exception:
+        return None
+
+
+def _yfinance_extended_bars(ticker: str):
+    """Yfinance prepost fallback when Alpaca is unavailable or returns nothing.
+
+    Known limitation: yfinance 1-min pre-market bars often have Volume=0 even
+    when price action exists. Use only as a last resort for PMH/PML/VWAP.
+    """
     try:
         import yfinance as yf
 
@@ -110,6 +179,22 @@ def _fetch_extended_bars(ticker: str):
         )
     except Exception:
         return None
+
+
+def _fetch_extended_bars(ticker: str):
+    """Get 5 days of 1-min bars with reliable pre-market Volume.
+
+    Tries Alpaca IEX first (real volume); falls back to yfinance prepost if
+    Alpaca returns nothing or all-zero volume (e.g. ticker not on IEX).
+    """
+    df = _alpaca_extended_bars(ticker)
+    if df is not None and "Volume" in df.columns:
+        try:
+            if float(df["Volume"].fillna(0).sum()) > 0:
+                return df
+        except Exception:
+            pass
+    return _yfinance_extended_bars(ticker) or df
 
 
 def _normalise_bars(bars) -> Optional[pd.DataFrame]:
@@ -161,14 +246,11 @@ def _previous_premarket_volumes(df: pd.DataFrame, today) -> list[float]:
 
 def _latest_quote_spread_pct(ticker: str) -> Optional[float]:
     try:
-        from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockLatestQuoteRequest
 
-        api_key = os.getenv("ALPACA_API_KEY")
-        secret = os.getenv("ALPACA_SECRET_KEY")
-        if not api_key or not secret:
+        client = _get_alpaca_client()
+        if client is None:
             return None
-        client = StockHistoricalDataClient(api_key, secret)
         quote = client.get_stock_latest_quote(StockLatestQuoteRequest(symbol_or_symbols=ticker))[ticker]
         bid = float(getattr(quote, "bid_price", 0) or 0)
         ask = float(getattr(quote, "ask_price", 0) or 0)
