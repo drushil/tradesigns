@@ -70,11 +70,25 @@ def render():
     )
 
     try:
-        from database.client import get_latest_premarket_radar_snapshots
+        from database import client as db_client
 
-        rows = get_latest_premarket_radar_snapshots(limit=200)
+        reader = getattr(db_client, "get_latest_premarket_radar_snapshots", None)
+        if reader:
+            rows = reader(limit=200)
+        else:
+            result = (db_client.get_client()
+                      .table("premarket_radar_snapshots")
+                      .select("*")
+                      .order("cycle_started_at", desc=True)
+                      .limit(200)
+                      .execute())
+            rows = result.data or []
     except Exception as e:
-        st.error(f"Could not load pre-market radar snapshots: {str(e)[:160]}")
+        message = str(e)[:180]
+        if "premarket_radar_snapshots" in message and "schema cache" in message:
+            st.info("Pre-market radar table is not available yet. Apply the Supabase migration to enable snapshots.")
+        else:
+            st.error(f"Could not load pre-market radar snapshots: {message}")
         return
 
     if not rows:
