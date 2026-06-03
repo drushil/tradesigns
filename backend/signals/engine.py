@@ -5,6 +5,7 @@ Returns a normalised composite score -1.0 to +1.0.
 """
 from __future__ import annotations
 import os
+import re
 import time
 import logging
 import requests
@@ -303,6 +304,31 @@ _FINVIZ_HEADERS = {
 }
 
 
+# Yahoo-style market suffixes used by EU/UK/global natives in the advisory
+# universe. News aggregators (NewsAPI, yfinance, Finviz, StockTwits) index by
+# the base ticker (ASML, SAP, SIE), not the suffix-qualified Yahoo symbol
+# (ASML.AS, SAP.DE, SIE.DE). Without aliasing, EU-native tickers silently
+# get zero news contribution which drags their composite scores below grade
+# thresholds (see ASML.AS analysis 2026-06-02: composite capped at 0.27).
+_EU_NEWS_SUFFIXES = (
+    ".AS", ".DE", ".PA", ".MI", ".MC", ".AT", ".OL",
+    ".ST", ".HE", ".BR", ".LS", ".SW", ".VI", ".CO", ".L",
+)
+
+
+def _news_alias(ticker: str) -> str:
+    """Return the suffix-stripped form for tickers carrying a Yahoo market suffix.
+
+    For US/uncovered tickers returns the input unchanged. Used as the news-feed
+    query identifier so EU-native tickers actually surface articles.
+    """
+    t = (ticker or "").upper()
+    for suffix in _EU_NEWS_SUFFIXES:
+        if t.endswith(suffix) and len(t) > len(suffix):
+            return t[: -len(suffix)]
+    return t
+
+
 def _fetch_newsapi_headlines(ticker: str) -> list:
     """
     NewsAPI fallback — only called when yfinance returns nothing.
@@ -314,7 +340,7 @@ def _fetch_newsapi_headlines(ticker: str) -> list:
         return []
     resp = requests.get(
         "https://newsapi.org/v2/everything",
-        params={"q": ticker, "language": "en", "sortBy": "publishedAt",
+        params={"q": _news_alias(ticker), "language": "en", "sortBy": "publishedAt",
                 "pageSize": 10, "apiKey": NEWSAPI_KEY},
         timeout=5,
     )
@@ -336,7 +362,12 @@ def _fetch_newsapi_batch(tickers: list) -> dict:
     """
     if not NEWSAPI_KEY or not tickers:
         return {t: [] for t in tickers}
-    q = " OR ".join(tickers)
+    # Query NewsAPI by base aliases (ASML, SAP, SIE) so EU-suffixed tickers
+    # actually surface articles. Attribution below also uses the alias so a
+    # raw "ASML" mention in the article text maps back to ASML.AS.
+    aliases = [_news_alias(t).upper() for t in tickers]
+    unique_aliases = list(dict.fromkeys(a for a in aliases if a))
+    q = " OR ".join(unique_aliases)
     try:
         resp = requests.get(
             "https://newsapi.org/v2/everything",
@@ -358,14 +389,16 @@ def _fetch_newsapi_batch(tickers: list) -> dict:
 
     articles = resp.json().get("articles", [])
     result: dict = {t: [] for t in tickers}
-    tickers_upper = [t.upper() for t in tickers]
+    # Word-boundary patterns prevent short aliases (e.g. BESI) from
+    # substring-matching unrelated words (e.g. "OBESITY"). Built once per call.
+    alias_patterns = [re.compile(rf"\b{re.escape(a)}\b") for a in aliases]
     for article in articles:
         text = ((article.get("title") or "") + " " + (article.get("description") or "")).upper()
         title = (article.get("title") or "").strip()
         if not title:
             continue
-        for i, t_upper in enumerate(tickers_upper):
-            if t_upper in text:
+        for i, pattern in enumerate(alias_patterns):
+            if pattern.search(text):
                 result[tickers[i]].append(title)
     return result
 
@@ -573,15 +606,21 @@ def news_sentiment_score(
     st_bullish = st_bearish = 0
 
     # Source 1: yfinance; Source 1b: NewsAPI backup when yfinance returns nothing
-    try:
-        for a in (yf.Ticker(ticker).news or [])[:5]:
-            title = (a.get("title") or "").strip()
-            if title:
-                texts.append(title)
-        if texts:
-            sources.append("yfinance")
-    except Exception:
-        pass
+    # Try the suffix-qualified symbol first (works for US tickers), then fall
+    # back to the alias for EU-suffixed natives where Yahoo indexes news under
+    # the base symbol (e.g. ASML, not ASML.AS).
+    alias = _news_alias(ticker)
+    for symbol in dict.fromkeys([ticker, alias]):
+        try:
+            for a in (yf.Ticker(symbol).news or [])[:5]:
+                title = (a.get("title") or "").strip()
+                if title:
+                    texts.append(title)
+            if texts:
+                sources.append("yfinance")
+                break
+        except Exception:
+            continue
     if not texts:
         # Pre-gate: skip live NewsAPI call when the signal can't shift the decision.
         # News weight is ~0.15-0.20; a perfect score adds at most ~0.20 to composite.
@@ -2226,16 +2265,33 @@ def compute_all_signals(ticker: str, weights: dict,
         "mean_reversion":      s11,
     }
     effective_weights = dict(weights or {})
+    mean_reversion_active = bool(m11.get("mean_reversion_signal"))
     if regime_state.market_regime == "bull":
         for key in ("tape_aggression", "macd_crossover", "relative_strength"):
             effective_weights[key] = effective_weights.get(key, 0.0) * 1.2
-        effective_weights["mean_reversion"] = max(effective_weights.get("mean_reversion", 0.0), 0.12)
+        # Bull-regime mean-reversion floor only applies when the signal is
+        # actually firing. Previously the 0.12 floor was unconditional, which
+        # let inactive mean-reversion readings (score=0) silently dilute strong
+        # trend signals on tickers without mean-reversion coverage — most EU
+        # natives are outside the ETF mean-reversion universe entirely.
+        if mean_reversion_active:
+            effective_weights["mean_reversion"] = max(effective_weights.get("mean_reversion", 0.0), 0.12)
+        else:
+            effective_weights["mean_reversion"] = 0.0
     elif regime_state.market_regime == "bear":
         for key in ("rsi_divergence", "vwap_deviation", "bollinger_squeeze"):
             effective_weights[key] = effective_weights.get(key, 0.0) * 1.2
         effective_weights["mean_reversion"] = 0.0
     else:
         effective_weights["mean_reversion"] = 0.0
+
+    # No-coverage news mask: when every text source (yfinance/NewsAPI/Finviz/
+    # StockTwits) returned zero articles, news_sentiment is structurally 0
+    # rather than genuinely neutral. Nulling its weight prevents that fake-zero
+    # from diluting tickers with thin news flow. A real neutral reading (articles
+    # found but pos/neg cancel) still contributes normally.
+    if int(m3.get("articles_found") or 0) == 0:
+        effective_weights["news_sentiment"] = 0.0
 
     high_vol_multiplier = 0.8 if regime_state.intraday_regime == "high_vol" else 1.0
     if regime_state.intraday_regime == "high_vol":
