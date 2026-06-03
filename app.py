@@ -56,6 +56,8 @@ _SLUG_TO_PAGE = {module: label for label, module in PAGES.items()}
 _SLUG_TO_PAGE.update({
     "eod":       "📅 EOD Review",
     "blocked":   "🚧 Blocked Ops",
+    "pre-market": "🌅 Pre-Market",
+    "pre_market": "🌅 Pre-Market",
     "portfolio": "📋 Portfolio Review",
     "config":    "⚙️  Config",
 })

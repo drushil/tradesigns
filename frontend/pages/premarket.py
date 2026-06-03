@@ -14,7 +14,7 @@ try:
 except ImportError:
     ZoneInfo = None
 
-from frontend.ui_theme import metric_card, page_header, status_pill
+from frontend.ui_theme import metric_card, status_pill
 
 
 CLASS_TONE = {
@@ -64,10 +64,9 @@ def _safe_float(value, default=0.0) -> float:
 
 
 def render():
-    page_header(
-        "Pre-Market Radar",
-        "Read-only gap watchlist with catalyst, liquidity, and opening-plan context.",
-    )
+    st.title("Pre-Market Radar")
+    st.caption("Read-only gap watchlist with catalyst, liquidity, and opening-plan context.")
+    st.markdown("[Direct link](?page=premarket)")
 
     try:
         from database import client as db_client
