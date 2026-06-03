@@ -424,7 +424,13 @@ def render():
     st.divider()
 
     # ── Recent alert feed ──────────────────────────────────────────────────
-    st.subheader("📡 Recent alerts (last 24h)")
+    alerts_title, alerts_refresh = st.columns([8, 1])
+    with alerts_title:
+        st.subheader("📡 Recent alerts (last 24h)")
+    with alerts_refresh:
+        st.write("")
+        if st.button("Refresh", key="recent_alerts_refresh", help="Reload recent advisory alerts"):
+            st.rerun()
     if not rows:
         st.info("No advisory signals stored yet. Once the cron runs, alerts will appear here.")
         return
@@ -888,7 +894,13 @@ def _render_advisory_trade_table(trades):
 # ── Live Scan Table ─────────────────────────────────────────────────────────
 
 def _render_live_scan_table(fetch_fn):
-    st.subheader("Latest Scan")
+    scan_title, scan_refresh = st.columns([8, 1])
+    with scan_title:
+        st.subheader("Latest Scan")
+    with scan_refresh:
+        st.write("")
+        if st.button("Refresh", key="latest_scan_refresh", help="Reload the latest scan snapshot"):
+            st.rerun()
     st.caption("Current per-ticker advisory state from the latest scan cycle, including non-alert gate reasons.")
 
     c_market, c_limit, _ = st.columns([2, 2, 6])
