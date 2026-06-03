@@ -875,9 +875,25 @@ def get_latest_advisory_scan_snapshots(market: str = "US", limit: int = 100) -> 
     """Fetch newest advisory scan snapshots for dashboard visibility."""
     try:
         db = get_client()
+        head = (db.table("advisory_scan_snapshots")
+                .select("cycle_id,cycle_started_at")
+                .order("cycle_started_at", desc=True)
+                .limit(1))
+        if market and market.lower() != "all":
+            head = head.eq("market", market.upper())
+        head_result = head.execute()
+        head_rows = head_result.data or []
+        if not head_rows:
+            return []
+
+        cycle_id = head_rows[0].get("cycle_id")
+        if not cycle_id:
+            return []
+
         q = (db.table("advisory_scan_snapshots")
              .select("*")
-             .order("cycle_started_at", desc=True)
+             .eq("cycle_id", cycle_id)
+             .order("data_symbol", desc=False)
              .limit(limit))
         if market and market.lower() != "all":
             q = q.eq("market", market.upper())
