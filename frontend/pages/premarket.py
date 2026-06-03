@@ -66,7 +66,6 @@ def _safe_float(value, default=0.0) -> float:
 def render():
     st.title("Pre-Market Radar")
     st.caption("Read-only gap watchlist with catalyst, liquidity, and opening-plan context.")
-    st.markdown("[Direct link](?page=premarket)")
 
     try:
         from database import client as db_client

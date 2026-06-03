@@ -89,6 +89,21 @@ def _page_from_query_params(page_names: list) -> str:
     return page_names[0]
 
 
+def _sync_page_query_param(selection: str):
+    """Keep the browser URL aligned with the selected sidebar page."""
+    try:
+        slug = PAGES.get(selection)
+        if not slug:
+            return
+        current = st.query_params.get("page", "")
+        if isinstance(current, list):
+            current = current[0] if current else ""
+        if str(current).strip().lower() != slug:
+            st.query_params["page"] = slug
+    except Exception:
+        pass
+
+
 with st.sidebar:
     st.markdown(
         """
@@ -109,6 +124,7 @@ with st.sidebar:
         label_visibility="collapsed",
         help=help_text("Navigation"),
     )
+    _sync_page_query_param(selection)
     st.markdown("---")
     try:
         from database.client import get_logs
