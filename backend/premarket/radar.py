@@ -155,6 +155,9 @@ def _alpaca_extended_bars(ticker: str):
         df.columns = [str(c).title() for c in df.columns]
         if len(df) < 10:
             return None
+        df.attrs["source"] = "alpaca_iex"
+        df.attrs["price_source"] = "alpaca_iex"
+        df.attrs["volume_source"] = "alpaca_iex"
         return df
     except Exception:
         return None
@@ -169,7 +172,7 @@ def _yfinance_extended_bars(ticker: str):
     try:
         import yfinance as yf
 
-        return yf.download(
+        df = yf.download(
             ticker,
             period="5d",
             interval="1m",
@@ -177,6 +180,11 @@ def _yfinance_extended_bars(ticker: str):
             progress=False,
             auto_adjust=True,
         )
+        if df is not None:
+            df.attrs["source"] = "yfinance_prepost"
+            df.attrs["price_source"] = "yfinance_prepost"
+            df.attrs["volume_source"] = "yfinance_prepost"
+        return df
     except Exception:
         return None
 
@@ -194,13 +202,15 @@ def _fetch_extended_bars(ticker: str):
                 return df
         except Exception:
             pass
-    return _yfinance_extended_bars(ticker) or df
+    fallback = _yfinance_extended_bars(ticker)
+    return fallback if fallback is not None else df
 
 
 def _normalise_bars(bars) -> Optional[pd.DataFrame]:
     if bars is None or getattr(bars, "empty", True):
         return None
     df = bars.copy()
+    df.attrs.update(getattr(bars, "attrs", {}) or {})
     if isinstance(df.columns, pd.MultiIndex):
         try:
             df.columns = df.columns.get_level_values(0)
@@ -328,7 +338,11 @@ def build_gap_features(ticker: str, bars=None, now: Optional[datetime] = None,
         latest_headline=str(news_meta.get("latest_headline") or "")[:160],
         earnings_context=earnings_context,
         data_quality={
-            "source": "yfinance_prepost",
+            "source": df.attrs.get("source") or "provided_bars",
+            "price_source": df.attrs.get("price_source") or df.attrs.get("source") or "provided_bars",
+            "volume_source": df.attrs.get("volume_source") or df.attrs.get("source") or "provided_bars",
+            "volume_available": bool(vol_sum > 0),
+            "volume_rows": int((volume.fillna(0) > 0).sum()) if len(volume) else 0,
             "premarket_rows": int(len(pre)),
             "prior_regular_rows": int(len(regular_prior)),
             "previous_premarket_volume_samples": int(len(previous_volumes)),
@@ -503,4 +517,3 @@ def run_premarket_radar(now: Optional[datetime] = None, force: bool = False) -> 
         _send_discord(_format_radar_message(rows, window, now))
 
     return {**cycle, "ran": True, "candidate_count": len(rows)}
-

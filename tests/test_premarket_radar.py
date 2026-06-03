@@ -26,6 +26,12 @@ def _bars():
     )
 
 
+def _bars_with_attrs(**attrs):
+    bars = _bars()
+    bars.attrs.update(attrs)
+    return bars
+
+
 def test_session_window_uses_new_york_time():
     assert radar.session_window(datetime(2026, 6, 2, 12, 30, tzinfo=timezone.utc)) == "primary_premarket"
     assert radar.session_window(datetime(2026, 6, 2, 13, 31, tzinfo=timezone.utc)) == "opening_confirmation"
@@ -44,7 +50,7 @@ def test_build_gap_features_from_extended_bars(monkeypatch):
 
     features = radar.build_gap_features(
         "NVDA",
-        bars=_bars(),
+        bars=_bars_with_attrs(source="alpaca_iex", price_source="alpaca_iex", volume_source="alpaca_iex"),
         now=datetime(2026, 6, 2, 12, 5, tzinfo=timezone.utc),
         earnings_context={"blocked": False},
     )
@@ -55,6 +61,25 @@ def test_build_gap_features_from_extended_bars(monkeypatch):
     assert features.premarket_low == 100
     assert features.premarket_volume == 190000
     assert features.catalyst_label == "company_news"
+    assert features.data_quality["source"] == "alpaca_iex"
+    assert features.data_quality["volume_source"] == "alpaca_iex"
+    assert features.data_quality["volume_available"] is True
+    assert features.data_quality["volume_rows"] == 4
+
+
+def test_fetch_extended_bars_falls_back_when_alpaca_volume_zero(monkeypatch):
+    alpaca = _bars()
+    alpaca["Volume"] = 0
+    alpaca.attrs["source"] = "alpaca_iex"
+    yf_bars = _bars_with_attrs(source="yfinance_prepost")
+
+    monkeypatch.setattr(radar, "_alpaca_extended_bars", lambda ticker: alpaca)
+    monkeypatch.setattr(radar, "_yfinance_extended_bars", lambda ticker: yf_bars)
+
+    result = radar._fetch_extended_bars("NVDA")
+
+    assert result is yf_bars
+    assert result.attrs["source"] == "yfinance_prepost"
 
 
 def test_classify_gap_continuation_watch(monkeypatch):
