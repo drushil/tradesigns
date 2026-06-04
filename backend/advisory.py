@@ -2590,7 +2590,15 @@ def run_advisory_cycle() -> dict:
                 and candidate.get("alert_stage") in INFO_ALERT_STAGES
                 and _should_send_discord(candidate, cfg)
             ):
-                _persist_emit_candidate(candidate, mode)
+                _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode)
+                _scan_log_base["alerted"] = _emitted_ok
+                _scan_log_base["gate_reason"] = "alerted" if _emitted_ok else "emit_failed"
+                if _emit_detail:
+                    _scan_log_base["gate_detail"] = _emit_detail
+                try:
+                    insert_advisory_scan_log(_scan_log_base)
+                except Exception:
+                    pass
                 continue
             if (
                 mode == "live"
