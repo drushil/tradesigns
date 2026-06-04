@@ -33,9 +33,11 @@ from typing import Optional
 import pandas as pd
 
 from database.client import (
+    get_advisory_auto_chase_skips,
     get_advisory_auto_sim_signal_ids,
     get_active_advisory_auto_simulations,
     get_eligible_advisory_signals_for_simulation,
+    get_latest_advisory_signal_for_symbol,
     insert_advisory_auto_simulation,
     log_event,
     update_advisory_auto_simulation,
@@ -52,6 +54,21 @@ SIM_MAX_FILL_HOURS = int(os.getenv("ADVISORY_AUTO_SIM_MAX_FILL_HOURS", "24"))
 
 # Skip processing entirely if disabled.
 SIM_ENABLED = os.getenv("ADVISORY_AUTO_SIM_ENABLED", "true").strip().lower() != "false"
+
+# Pending-cancel: drop a resting watch-limit sim if the symbol's latest live
+# signal has turned bearish or its grade has fallen this many tiers or more.
+SIM_CANCEL_GRADE_DROP = int(os.getenv("ADVISORY_AUTO_SIM_CANCEL_GRADE_DROP", "2"))
+
+# Near-T1 protection: arm once MFE reaches this fraction of the fill→T1 distance,
+# then book if price retraces this many R (R = fill - stop) back from the peak.
+SIM_NEAR_T1_ARM_FRAC = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_ARM_FRAC", "0.8"))
+SIM_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_RETRACE_R", "0.5"))
+
+_GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
+
+
+def _grade_rank(grade) -> int:
+    return _GRADE_RANK.get(str(grade or "").strip().upper(), 0)
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -124,12 +141,16 @@ def _create_pending_sims(market: str = "US") -> int:
     created = 0
     for sig in eligible:
         sig_id = int(sig.get("id") or 0)
-        if not sig_id or sig_id in existing:
+        if not sig_id:
             continue
         # Only watch + trade stages are interesting. Ignition is too early.
         sj = sig.get("signal_json") or {}
         stage = str(sj.get("alert_stage") or "").lower() if isinstance(sj, dict) else ""
         if stage not in ("watch", "trade"):
+            continue
+        # trade-stage = "enter now" limit; watch-stage = "wait for the pullback".
+        mode = "trade_now" if stage == "trade" else "watch_pullback"
+        if (sig_id, mode) in existing:
             continue
         entry_min = float(sig.get("entry_min") or 0)
         entry_max = float(sig.get("entry_max") or 0)
@@ -145,6 +166,7 @@ def _create_pending_sims(market: str = "US") -> int:
             "side": sig.get("side") or "BUY",
             "grade": sig.get("grade"),
             "alert_stage": stage,
+            "mode": mode,
             "composite_score": float(composite) if composite is not None else None,
             "breakout_quality": float(breakout) if breakout is not None else None,
             "currency": sig.get("currency"),
@@ -166,8 +188,104 @@ def _create_pending_sims(market: str = "US") -> int:
         result = insert_advisory_auto_simulation(payload)
         if "error" not in result:
             created += 1
-            existing.add(sig_id)
+            existing.add((sig_id, mode))
     return created
+
+
+def _parse_chase_price(reason) -> Optional[float]:
+    """Pull the chased price out of an executor skip reason.
+
+    Format: "skipped_chase:{current:.2f}>{do_not_chase:.2f}". We want the price
+    the executor saw when it refused to chase — the value before the '>'.
+    """
+    try:
+        after = str(reason).split(":", 1)[1]
+        cur = after.split(">", 1)[0]
+        return float(cur)
+    except Exception:
+        return None
+
+
+def _create_chase_tracker_sims(market: str = "US") -> int:
+    """Create filled chase_tracker sims for BUY signals the executor refused to
+    chase. The synthetic fill is the chased price itself, so _process_filled
+    measures what buying above the do-not-chase line would have done."""
+    skips = get_advisory_auto_chase_skips(
+        market=market, max_age_minutes=SIM_CREATION_LOOKBACK_MIN, limit=200
+    )
+    if not skips:
+        return 0
+    existing = get_advisory_auto_sim_signal_ids()
+    created = 0
+    for sig in skips:
+        sig_id = int(sig.get("id") or 0)
+        if not sig_id or (sig_id, "chase_tracker") in existing:
+            continue
+        chase_price = _parse_chase_price(sig.get("auto_skip_reason"))
+        stop_price = float(sig.get("stop_price") or 0)
+        entry_min = float(sig.get("entry_min") or 0)
+        entry_max = float(sig.get("entry_max") or 0)
+        if not (chase_price and stop_price and chase_price > stop_price):
+            continue
+        fill_at = sig.get("auto_checked_at") or sig.get("created_at")
+        composite = sig.get("composite_score")
+        breakout = sig.get("breakout_quality")
+        sj = sig.get("signal_json") or {}
+        stage = str(sj.get("alert_stage") or "trade").lower() if isinstance(sj, dict) else "trade"
+        payload = {
+            "advisory_signal_id": sig_id,
+            "data_symbol": sig.get("data_symbol"),
+            "market": sig.get("market"),
+            "side": sig.get("side") or "BUY",
+            "grade": sig.get("grade"),
+            "alert_stage": stage,
+            "mode": "chase_tracker",
+            "composite_score": float(composite) if composite is not None else None,
+            "breakout_quality": float(breakout) if breakout is not None else None,
+            "currency": sig.get("currency"),
+            "entry_min": entry_min or chase_price,
+            "entry_max": entry_max or chase_price,
+            "stop_price": stop_price,
+            "target_1": float(sig.get("target_1")) if sig.get("target_1") is not None else None,
+            "target_2": float(sig.get("target_2")) if sig.get("target_2") is not None else None,
+            "suggested_size_eur": sig.get("suggested_size_eur"),
+            "simulated_at": fill_at,
+            "valid_until": sig.get("valid_until"),
+            # Already filled at the chased price — no limit to rest, we paid up.
+            "status": "filled",
+            "fill_at": fill_at,
+            "fill_price": round(chase_price, 4),
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+            "notes": {"synthetic_fill": "chase_price"},
+        }
+        result = insert_advisory_auto_simulation(payload)
+        if "error" not in result:
+            created += 1
+            existing.add((sig_id, "chase_tracker"))
+    return created
+
+
+def _signal_weakened(sim: dict) -> Optional[str]:
+    """Return a short reason if the symbol's latest live signal no longer
+    supports the resting BUY limit (flipped bearish / grade collapsed), else None."""
+    latest = get_latest_advisory_signal_for_symbol(
+        str(sim.get("data_symbol") or ""), market=str(sim.get("market") or "US")
+    )
+    if not latest:
+        return None
+    # Don't react to the very signal that spawned this sim.
+    if int(latest.get("id") or 0) == int(sim.get("advisory_signal_id") or 0):
+        return None
+    if str(latest.get("side") or "BUY").upper() == "SELL":
+        return "latest_signal_sell"
+    comp = latest.get("composite_score")
+    if comp is not None and float(comp) < 0:
+        return "latest_composite_bearish"
+    drop = _grade_rank(sim.get("grade")) - _grade_rank(latest.get("grade"))
+    if _grade_rank(sim.get("grade")) > 0 and drop >= SIM_CANCEL_GRADE_DROP:
+        return f"grade_drop:{sim.get('grade')}->{latest.get('grade')}"
+    return None
 
 
 def _yfinance_symbol(market_symbol: str) -> str:
@@ -185,6 +303,18 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
     born after valid_until still gets a proper fill check on historical bars
     before being closed.
     """
+    # Pull the resting limit if conviction has died since it was placed. We'd
+    # have cancelled the order rather than let it fill into a souring setup, so
+    # this terminates before the fill check (slight imprecision on exact
+    # fill-vs-cancel timing is acceptable for measurement).
+    weak_reason = _signal_weakened(sim)
+    if weak_reason:
+        return {
+            "status": "cancelled_signal_weak",
+            "last_checked_at": _iso_z(now_utc),
+            "closed_at": _iso_z(now_utc),
+            "notes": {**(sim.get("notes") or {}), "cancel_reason": weak_reason},
+        }
     valid_until = _parse_dt(sim.get("valid_until"))
     simulated_at = _parse_dt(sim.get("simulated_at")) or now_utc
     last_check = _parse_dt(sim.get("last_checked_at")) or simulated_at
@@ -311,6 +441,28 @@ def _process_filled(sim: dict, now_utc: datetime) -> dict:
                 "last_checked_at": _iso_z(now_utc),
                 "closed_at": _iso_z(ts.to_pydatetime()),
             }
+        # Near-T1 protection (lowest priority — T1/T2 take it first). Once the
+        # run-up has covered ARM_FRAC of the fill→T1 distance, book the trade if
+        # price gives back RETRACE_R of risk (R = fill - stop) from the peak.
+        # mfe_pct already encodes the peak, so peak = fill * (1 + mfe_pct/100).
+        if t1 is not None and t1 > fill_price:
+            arm_pct = SIM_NEAR_T1_ARM_FRAC * (t1 - fill_price) / fill_price * 100.0
+            if mfe_pct >= arm_pct:
+                peak_price = fill_price * (1.0 + mfe_pct / 100.0)
+                retrace_price = peak_price - SIM_NEAR_T1_RETRACE_R * (fill_price - stop_price)
+                if bar_low <= retrace_price:
+                    return {
+                        "status": "hit_near_t1_protection",
+                        "last_price": round(float(bar.get("Close") or 0), 4),
+                        "mfe_pct": round(mfe_pct, 4),
+                        "mae_pct": round(mae_pct, 4),
+                        "last_checked_at": _iso_z(now_utc),
+                        "closed_at": _iso_z(ts.to_pydatetime()),
+                        "notes": {
+                            **(sim.get("notes") or {}),
+                            "near_t1_peak_price": round(peak_price, 4),
+                        },
+                    }
     return {
         "mfe_pct": round(mfe_pct, 4),
         "mae_pct": round(mae_pct, 4),
@@ -327,15 +479,18 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         return {"ran": False, "reason": "disabled"}
     now_utc = datetime.now(timezone.utc)
     created = _create_pending_sims(market=market)
+    created_chase = _create_chase_tracker_sims(market=market)
     active = get_active_advisory_auto_simulations(limit=200)
     transitions: dict = {
         "pending_checked": 0,
         "filled_new": 0,
         "filled_checked": 0,
         "expired": 0,
+        "cancelled_signal_weak": 0,
         "hit_stop": 0,
         "hit_target_1": 0,
         "hit_target_2": 0,
+        "hit_near_t1_protection": 0,
         "errors": 0,
     }
     for sim in active:
@@ -349,12 +504,15 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
                     transitions["filled_new"] += 1
                 elif new_status == "expired":
                     transitions["expired"] += 1
+                elif new_status == "cancelled_signal_weak":
+                    transitions["cancelled_signal_weak"] += 1
             elif status == "filled":
                 transitions["filled_checked"] += 1
                 update = _process_filled(sim, now_utc)
                 new_status = update.get("status") or status
-                if new_status in ("hit_stop", "hit_target_1", "hit_target_2", "expired"):
-                    transitions[new_status if new_status != "expired" else "expired"] += 1
+                if new_status in ("hit_stop", "hit_target_1", "hit_target_2",
+                                  "hit_near_t1_protection", "expired"):
+                    transitions[new_status] += 1
             else:
                 continue
             update_advisory_auto_simulation(int(sim["id"]), update)
@@ -368,6 +526,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
     log_event("INFO", "advisory_auto_sim_cycle", {
         "market": market,
         "created": created,
+        "created_chase": created_chase,
         "active": len(active),
         **transitions,
     })
@@ -375,6 +534,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "ran": True,
         "market": market,
         "created": created,
+        "created_chase": created_chase,
         "active": len(active),
         **transitions,
     }

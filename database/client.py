@@ -1252,14 +1252,19 @@ def insert_advisory_auto_simulation(payload: dict) -> dict:
 
 
 def get_advisory_auto_sim_signal_ids() -> set:
-    """Set of advisory_signal_ids that already have a simulation row.
-    Used to skip re-creating sims when iterating eligible watches."""
+    """Set of (advisory_signal_id, mode) pairs that already have a simulation row.
+    Used to skip re-creating sims when iterating eligible candidates. Per-mode
+    because one signal can back several sims (e.g. trade_now + chase_tracker)."""
     try:
         db = get_client()
         result = (db.table("advisory_auto_simulations")
-                  .select("advisory_signal_id")
+                  .select("advisory_signal_id,mode")
                   .execute())
-        return {int(r["advisory_signal_id"]) for r in (result.data or []) if r.get("advisory_signal_id")}
+        return {
+            (int(r["advisory_signal_id"]), str(r.get("mode") or "watch_pullback"))
+            for r in (result.data or [])
+            if r.get("advisory_signal_id")
+        }
     except Exception as e:
         print(f"[ADVISORY_AUTO_SIM_IDS_FAILED] {str(e)[:200]}")
         return set()
@@ -1319,6 +1324,53 @@ def get_eligible_advisory_signals_for_simulation(market: str = "US",
     except Exception as e:
         print(f"[ADVISORY_AUTO_SIM_ELIGIBLE_FAILED] {str(e)[:200]}")
         return []
+
+
+def get_advisory_auto_chase_skips(market: str = "US",
+                                  max_age_minutes: int = 30,
+                                  limit: int = 200) -> list:
+    """Recent BUY signals the auto-allocator skipped because price ran past the
+    do-not-chase line. These back chase_tracker sims: a synthetic fill at the
+    chased price, so we can measure what chasing would have cost or earned."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .eq("market", market.upper())
+                  .eq("side", "BUY")
+                  .eq("auto_status", "skipped")
+                  .like("auto_skip_reason", "skipped_chase%")
+                  .gte("auto_checked_at", cutoff)
+                  .not_.is_("stop_price", "null")
+                  .order("auto_checked_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_CHASE_SKIPS_FAILED] {str(e)[:200]}")
+        return []
+
+
+def get_latest_advisory_signal_for_symbol(data_symbol: str,
+                                          market: str = "US",
+                                          mode: str = "live") -> dict:
+    """Most recent advisory_signal for a symbol — used to detect whether a
+    still-pending watch-limit sim's conviction has since weakened."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("id,created_at,side,grade,composite_score,signal_json")
+                  .eq("data_symbol", data_symbol)
+                  .eq("market", market.upper())
+                  .eq("mode", mode)
+                  .order("created_at", desc=True)
+                  .limit(1)
+                  .execute())
+        return (result.data or [{}])[0]
+    except Exception as e:
+        print(f"[ADVISORY_LATEST_SIGNAL_FAILED] {str(e)[:200]}")
+        return {}
 
 
 def get_advisory_scoreboard(

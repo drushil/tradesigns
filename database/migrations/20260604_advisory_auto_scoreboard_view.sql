@@ -1,11 +1,17 @@
--- Two-track scoreboard: compare strict trade-stage dry-run (advisory_signals.auto_*)
--- against the watch-limit simulator (advisory_auto_simulations) on the same axes.
--- One row per (utc_date, grade); presence on either side is enough to materialise.
+-- Scoreboard: compare the strict trade-stage dry-run (advisory_signals.auto_*)
+-- against the watch-limit simulator (advisory_auto_simulations), now split by
+-- the simulator's measurement mode.
+--
+-- The strict path only ever evaluates the trade-stage "enter now" decision, so
+-- it aligns to the simulator's trade_now mode. watch_pullback and chase_tracker
+-- rows have no strict counterpart (strict_* columns are 0 there).
+-- One row per (utc_date, mode, grade).
 
 create or replace view advisory_auto_scoreboard as
 with strict as (
     select
         date_trunc('day', auto_checked_at)::date as utc_date,
+        'trade_now'::text as mode,
         coalesce(grade, '-') as grade,
         count(*) as strict_checked,
         count(*) filter (where auto_status = 'eligible') as strict_eligible,
@@ -21,28 +27,32 @@ with strict as (
     where auto_checked_at is not null
       and side = 'BUY'
       and market = 'US'
-    group by 1, 2
+    group by 1, 2, 3
 ),
 sim as (
     select
         date_trunc('day', simulated_at)::date as utc_date,
+        coalesce(mode, 'watch_pullback') as mode,
         coalesce(grade, '-') as grade,
         count(*) as sim_total,
-        count(*) filter (where status in ('filled','hit_stop','hit_target_1','hit_target_2')) as sim_filled_or_closed,
+        count(*) filter (where status in ('filled','hit_stop','hit_target_1','hit_target_2','hit_near_t1_protection')) as sim_filled_or_closed,
         count(*) filter (where status = 'expired') as sim_expired,
         count(*) filter (where status = 'pending') as sim_pending,
+        count(*) filter (where status = 'cancelled_signal_weak') as sim_cancelled_weak,
         count(*) filter (where status = 'hit_stop') as sim_hit_stop,
         count(*) filter (where status = 'hit_target_1') as sim_hit_t1,
         count(*) filter (where status = 'hit_target_2') as sim_hit_t2,
+        count(*) filter (where status = 'hit_near_t1_protection') as sim_near_t1,
         round(avg(mfe_pct) filter (where mfe_pct is not null)::numeric, 3) as sim_avg_mfe_pct,
         round(avg(mae_pct) filter (where mae_pct is not null)::numeric, 3) as sim_avg_mae_pct
     from advisory_auto_simulations
     where side = 'BUY'
       and market = 'US'
-    group by 1, 2
+    group by 1, 2, 3
 )
 select
     coalesce(strict.utc_date, sim.utc_date) as utc_date,
+    coalesce(strict.mode, sim.mode) as mode,
     coalesce(strict.grade, sim.grade) as grade,
     coalesce(strict.strict_checked, 0) as strict_checked,
     coalesce(strict.strict_eligible, 0) as strict_eligible,
@@ -57,19 +67,24 @@ select
     coalesce(sim.sim_hit_stop, 0) as sim_hit_stop,
     coalesce(sim.sim_hit_t1, 0) as sim_hit_t1,
     coalesce(sim.sim_hit_t2, 0) as sim_hit_t2,
+    coalesce(sim.sim_near_t1, 0) as sim_near_t1,
     coalesce(sim.sim_expired, 0) as sim_expired,
     coalesce(sim.sim_pending, 0) as sim_pending,
+    coalesce(sim.sim_cancelled_weak, 0) as sim_cancelled_weak,
     sim.sim_avg_mfe_pct,
     sim.sim_avg_mae_pct,
-    -- Edge proxies
-    case when coalesce(sim.sim_hit_stop, 0) + coalesce(sim.sim_hit_t1, 0) + coalesce(sim.sim_hit_t2, 0) > 0
+    -- Edge proxy: targets + near-T1 protection count as wins, stops as losses.
+    case when coalesce(sim.sim_hit_stop, 0) + coalesce(sim.sim_hit_t1, 0)
+              + coalesce(sim.sim_hit_t2, 0) + coalesce(sim.sim_near_t1, 0) > 0
          then round(
-             (coalesce(sim.sim_hit_t1, 0) + coalesce(sim.sim_hit_t2, 0))::numeric
-             / (coalesce(sim.sim_hit_stop, 0) + coalesce(sim.sim_hit_t1, 0) + coalesce(sim.sim_hit_t2, 0))
+             (coalesce(sim.sim_hit_t1, 0) + coalesce(sim.sim_hit_t2, 0)
+              + coalesce(sim.sim_near_t1, 0))::numeric
+             / (coalesce(sim.sim_hit_stop, 0) + coalesce(sim.sim_hit_t1, 0)
+                + coalesce(sim.sim_hit_t2, 0) + coalesce(sim.sim_near_t1, 0))
              * 100, 1)
     end as sim_target_win_pct
 from strict
-full outer join sim using (utc_date, grade)
-order by utc_date desc, grade;
+full outer join sim using (utc_date, mode, grade)
+order by utc_date desc, mode, grade;
 
 grant select on advisory_auto_scoreboard to anon;
