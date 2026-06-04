@@ -2252,7 +2252,14 @@ def run_advisory_cycle() -> dict:
     except Exception:
         pass
 
-    def _persist_emit_candidate(candidate: dict, mode: str, *, immediate: bool = False) -> bool:
+    def _persist_emit_candidate(candidate: dict, mode: str, *, immediate: bool = False) -> tuple[bool, dict]:
+        """Persist + maybe-emit a candidate.
+
+        Returns (ok, failure_detail). On success failure_detail is empty.
+        On failure failure_detail carries the specific cause so callers can
+        write it to advisory_scan_log.gate_detail without cross-referencing
+        agent_logs. Reasons: watch_symbol_cap / watch_session_cap / insert_error.
+        """
         nonlocal live_sent_today, live_sent_this_window, open_live_count
         nonlocal live_watch_this_window, shadow_discord_sent_today
         nonlocal first_live_discord_elapsed_s, immediate_live_sent
@@ -2268,12 +2275,20 @@ def run_advisory_cycle() -> dict:
                     "market": symbol_key[0],
                     "max_watch_per_symbol": max_watch_per_symbol,
                 })
-                return False
+                return False, {
+                    "reason": "watch_symbol_cap",
+                    "max_watch_per_symbol": max_watch_per_symbol,
+                    "current": watch_counts_by_symbol.get(symbol_key, 0),
+                }
             if live_watch_this_window >= max_watch_per_session:
                 log_event("INFO", "advisory_watch_blocked_session_cap", {
                     "max_watch_per_session": max_watch_per_session,
                 })
-                return False
+                return False, {
+                    "reason": "watch_session_cap",
+                    "max_watch_per_session": max_watch_per_session,
+                    "current": live_watch_this_window,
+                }
 
         saved = insert_advisory_signal(candidate)
         if "error" not in saved and saved.get("id"):
@@ -2354,7 +2369,9 @@ def run_advisory_cycle() -> dict:
                 pass
 
         emitted.append(candidate)
-        return "error" not in saved
+        if "error" in saved:
+            return False, {"reason": "insert_error", "error": str(saved.get("error"))[:160]}
+        return True, {}
 
     market_timings = []
 
@@ -2584,9 +2601,11 @@ def run_advisory_cycle() -> dict:
                     cfg.max_live_trades_per_session - live_sent_this_window,
                 ) > 0
             ):
-                _emitted_ok = _persist_emit_candidate(candidate, mode, immediate=True)
+                _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode, immediate=True)
                 _scan_log_base["alerted"] = _emitted_ok
                 _scan_log_base["gate_reason"] = "alerted" if _emitted_ok else "emit_failed"
+                if _emit_detail:
+                    _scan_log_base["gate_detail"] = _emit_detail
                 try:
                     insert_advisory_scan_log(_scan_log_base)
                 except Exception:
@@ -2623,9 +2642,17 @@ def run_advisory_cycle() -> dict:
             limit = cfg.max_shadow_signals_per_day
         for idx, candidate in enumerate(market_candidates):
             will_emit = idx < max(0, limit)
-            _emitted_ok = _persist_emit_candidate(candidate, mode) if will_emit else False
+            if will_emit:
+                _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode)
+            else:
+                _emitted_ok, _emit_detail = False, {"reason": "capped_by_limit", "limit": limit, "rank": idx}
             try:
                 _sig_scores_q = (candidate.get("signal_json") or {}).get("signals") or {}
+                # gate_detail: prefer the upstream block_detail when present
+                # (data-quality blocks etc.), else surface the emit-failure
+                # cause from _persist_emit_candidate so a single scan_log row
+                # answers "why didn't this emit?".
+                _detail = candidate.get("block_detail") or _emit_detail or {}
                 insert_advisory_scan_log({
                     "data_symbol": candidate.get("data_symbol"),
                     "primary_symbol": candidate.get("primary_symbol"),
@@ -2642,7 +2669,7 @@ def run_advisory_cycle() -> dict:
                     "breakout_quality": candidate.get("breakout_quality"),
                     "price_native": candidate.get("reference_price") or (candidate.get("signal_json") or {}).get("atr_data", {}).get("current_price"),
                     "downside_risk": candidate.get("downside_risk", False),
-                    "gate_detail": candidate.get("block_detail") or {},
+                    "gate_detail": _detail,
                     "vwap_score": (_sig_scores_q.get("vwap_deviation") or {}).get("score"),
                     "macd_score": (_sig_scores_q.get("macd_crossover") or {}).get("score"),
                     "rel_strength_score": (_sig_scores_q.get("relative_strength") or {}).get("score"),
@@ -2695,6 +2722,18 @@ def run_advisory_cycle() -> dict:
             run_advisory_auto_cycle()
         except Exception as exc:
             log_event("WARN", "advisory_auto_cycle_failed", {"error": str(exc)[:160]})
+
+        # Watch-limit simulator: measurement-only. Records what a limit order
+        # at each BUY watch entry band would have done, then tracks MFE/MAE
+        # through stop/target hits. Separate from the strict trade-stage
+        # dry-run executor above — these two paths together give the two-track
+        # scoreboard that lets us see whether watches or trade-stage signals
+        # better measure advisory edge.
+        try:
+            from backend.advisory_auto.simulator import run_advisory_auto_simulation_cycle
+            run_advisory_auto_simulation_cycle(market="US")
+        except Exception as exc:
+            log_event("WARN", "advisory_auto_sim_cycle_failed", {"error": str(exc)[:160]})
 
     return {
         "emitted": len(emitted),

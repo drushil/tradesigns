@@ -1235,6 +1235,92 @@ def get_advisory_auto_open_count() -> int:
         return 0
 
 
+# ── Advisory-auto watch-limit simulator ──────────────────────────────────────
+# Measurement-only dry-run for advisory watches. Each new BUY watch with valid
+# levels gets a simulation row; the simulator polls 1-min bars to decide if a
+# limit order at the entry band would have filled, then tracks MFE/MAE through
+# stop/target hits. Strictly separate from advisory-auto execution.
+
+def insert_advisory_auto_simulation(payload: dict) -> dict:
+    """Insert a new pending simulation row. Idempotent via unique(advisory_signal_id)."""
+    try:
+        db = get_client(write=True)
+        result = db.table("advisory_auto_simulations").insert(_json_safe(payload)).execute()
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_advisory_auto_sim_signal_ids() -> set:
+    """Set of advisory_signal_ids that already have a simulation row.
+    Used to skip re-creating sims when iterating eligible watches."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_auto_simulations")
+                  .select("advisory_signal_id")
+                  .execute())
+        return {int(r["advisory_signal_id"]) for r in (result.data or []) if r.get("advisory_signal_id")}
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_SIM_IDS_FAILED] {str(e)[:200]}")
+        return set()
+
+
+def get_active_advisory_auto_simulations(limit: int = 200) -> list:
+    """Fetch sims still being tracked: pending (no fill yet) or filled (no terminal)."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_auto_simulations")
+                  .select("*")
+                  .in_("status", ["pending", "filled"])
+                  .order("simulated_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_SIM_ACTIVE_FAILED] {str(e)[:200]}")
+        return []
+
+
+def update_advisory_auto_simulation(sim_id: int, fields: dict) -> dict:
+    """Patch a simulation row by primary key."""
+    try:
+        db = get_client(write=True)
+        result = (db.table("advisory_auto_simulations")
+                  .update(_json_safe(fields))
+                  .eq("id", sim_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_eligible_advisory_signals_for_simulation(market: str = "US",
+                                                  max_age_minutes: int = 30,
+                                                  limit: int = 200) -> list:
+    """Recent live BUY watch advisory_signals with valid levels — candidates for sim creation.
+    Pulls a wider net than the auto-allocator selector since the simulator is
+    measurement-only and not bound by the same freshness floor."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(minutes=max_age_minutes)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .eq("mode", "live")
+                  .eq("market", market.upper())
+                  .eq("side", "BUY")
+                  .gte("created_at", cutoff)
+                  .not_.is_("entry_min", "null")
+                  .not_.is_("entry_max", "null")
+                  .not_.is_("stop_price", "null")
+                  .order("created_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_SIM_ELIGIBLE_FAILED] {str(e)[:200]}")
+        return []
+
+
 def get_advisory_scoreboard(
     days_back: int = 30,
     mode: str = None,
