@@ -324,6 +324,43 @@ def test_runner_watch_card_distinguishes_fresh_entry_from_holder_context():
     assert "wait for pullback into the band; no fresh chase" not in card
 
 
+def test_extended_momentum_runner_card_warns_against_clean_fresh_entry():
+    cfg = _cfg()
+    plan = advisory._entry_plan(price=936.0, side="BUY", atr_pct=0.33, currency="USD", cfg=cfg, grade="C")
+    signal = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "MU",
+        "broker_display_name": "Micron",
+        "currency": "USD",
+        "side": "BUY",
+        "valid_until_cet": "16:00 Berlin",
+        "time_exit_cet": "20:55 Berlin",
+        "rationale": "C setup, VWAP -0.80, ORB +0.00",
+        "grade": "C",
+        "composite_score": 0.3246,
+        "ev_net_pct": None,
+        "fx_rate": 1.1519,
+        "late_chase_json": {"pct_deviation": 2.59, "threshold_pct": 0.49},
+        "runner_context": {
+            "type": "extended_momentum_runner",
+            "trend": {"ret_6h_pct": 9.38},
+            "scores": {"relative_strength": 1.0, "tape_aggression": 0.34},
+        },
+        **plan,
+    }
+
+    card = advisory._format_trade_card(signal)
+
+    assert "RUNNER WATCH" in card
+    assert "extended runner" in card
+    assert "extended momentum leader" in card
+    assert "not a clean fresh entry" in card
+    assert "buy only on pullback into the band" in card
+    assert "protect fast near T1" in card
+
+
 def test_runner_hold_card_uses_open_position_context():
     cfg = _cfg()
     plan = advisory._entry_plan(price=150.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
@@ -456,6 +493,74 @@ def test_runner_context_requires_prior_b_plus_watch_or_trade():
     runner = advisory._runner_context(candidate, b_watch, now, [], _cfg())
     assert runner["type"] == "runner_continuation"
     assert runner["prior_signal_id"] == 10
+
+
+def test_extended_momentum_runner_context_captures_mu_like_pullback_setup():
+    candidate = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "MU",
+        "side": "BUY",
+        "grade": "C",
+        "composite_score": 0.3246,
+        "breakout_quality": 0.4482,
+        "late_chase_json": {"pct_deviation": 2.59, "threshold_pct": 0.49},
+        "signal_json": {
+            "scores": {
+                "relative_strength": 1.0,
+                "bollinger_squeeze": 0.70,
+                "tape_aggression": 0.342,
+                "macd_crossover": 0.398,
+                "vwap_deviation": -0.80,
+                "rsi_divergence": -0.485,
+            },
+            "trend_1h": {
+                "aligned": True,
+                "direction": "bullish",
+                "ret_3h_pct": 4.1713,
+                "ret_6h_pct": 9.3836,
+                "score": 1.0,
+            },
+        },
+    }
+
+    runner = advisory._extended_momentum_runner_context(candidate, [], _cfg())
+
+    assert runner["type"] == "extended_momentum_runner"
+    assert runner["reason"] == "extended_leader_pullback"
+    assert runner["scores"]["relative_strength"] == pytest.approx(1.0)
+    assert runner["trend"]["ret_6h_pct"] == pytest.approx(9.3836)
+
+
+def test_extended_momentum_runner_context_rejects_weak_extended_watch():
+    candidate = {
+        "mode": "live",
+        "alert_stage": "watch",
+        "market": "US",
+        "data_symbol": "AVGO",
+        "side": "BUY",
+        "grade": "C",
+        "composite_score": 0.258,
+        "breakout_quality": 0.419,
+        "late_chase_json": {"pct_deviation": 2.0, "threshold_pct": 0.5},
+        "signal_json": {
+            "scores": {
+                "relative_strength": 0.55,
+                "bollinger_squeeze": 0.10,
+                "tape_aggression": 0.05,
+                "macd_crossover": 0.10,
+            },
+            "trend_1h": {
+                "aligned": True,
+                "direction": "bullish",
+                "ret_3h_pct": 4.0,
+                "ret_6h_pct": 7.0,
+            },
+        },
+    }
+
+    assert advisory._extended_momentum_runner_context(candidate, [], _cfg()) == {}
 
 
 def test_runner_context_adds_holder_only_when_position_not_deep_underwater():

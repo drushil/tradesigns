@@ -38,6 +38,7 @@ from database.client import (
     get_active_advisory_auto_simulations,
     get_eligible_advisory_signals_for_simulation,
     get_latest_advisory_signal_for_symbol,
+    get_open_filled_simulations,
     insert_advisory_auto_simulation,
     log_event,
     update_advisory_auto_simulation,
@@ -474,7 +475,12 @@ def _process_filled(sim: dict, now_utc: datetime) -> dict:
 def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
     """Run one simulator cycle. Idempotent: cap-blocked watches are skipped
     because they never reach advisory_signals, and existing sims are not
-    re-created."""
+    re-created.
+
+    EOD mark-to-close runs automatically at the end of this cycle whenever
+    the US session close has passed (≥30 min buffer). This ensures the last
+    cycle of the day always leaves a clean scoreboard with no dangling fills.
+    """
     if not SIM_ENABLED:
         return {"ran": False, "reason": "disabled"}
     now_utc = datetime.now(timezone.utc)
@@ -523,11 +529,15 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
                 "symbol": sim.get("data_symbol"),
                 "error": str(e)[:160],
             })
+    # ── EOD mark-to-close: runs automatically when session is past close ─────
+    eod_closed = _eod_close_fills(market=market, now_utc=now_utc)
+
     log_event("INFO", "advisory_auto_sim_cycle", {
         "market": market,
         "created": created,
         "created_chase": created_chase,
         "active": len(active),
+        "eod_closed": eod_closed,
         **transitions,
     })
     return {
@@ -536,5 +546,110 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "created": created,
         "created_chase": created_chase,
         "active": len(active),
+        "eod_closed": eod_closed,
         **transitions,
     }
+
+
+# ── EOD mark-to-close ────────────────────────────────────────────────────────
+
+def _us_session_close_utc(fill_at: datetime) -> Optional[datetime]:
+    """Return the UTC datetime of the US session close (16:00 ET) for the
+    calendar date the fill belongs to. Returns None if timezone data is
+    unavailable (caller falls back to a UTC approximation)."""
+    try:
+        from zoneinfo import ZoneInfo
+        ny_tz = ZoneInfo("America/New_York")
+        fill_ny = fill_at.astimezone(ny_tz)
+        close_ny = fill_ny.replace(hour=16, minute=0, second=0, microsecond=0)
+        return close_ny.astimezone(timezone.utc)
+    except Exception:
+        # Fallback: assume 20:00 UTC (EDT offset); not perfect in winter but
+        # close enough — the 30-min buffer in the caller absorbs the error.
+        return fill_at.replace(hour=20, minute=0, second=0, microsecond=0,
+                               tzinfo=timezone.utc)
+
+
+def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> int:
+    """Mark filled sims whose US session has ended as closed_eod.
+
+    For each open fill:
+      1. Determine the session-close UTC for its date (16:00 ET).
+      2. If now_utc is at least 30 minutes past that close (buffer for late
+         yfinance data), the session is definitively over.
+      3. Re-run _process_filled up to session_close to catch any terminal
+         hits in the closing bars. If none fired, status becomes closed_eod.
+
+    closed_eod means: survived to session end with no stop or target hit.
+    It is excluded from sim_target_win_pct (inconclusive) but counted in
+    sim_closed_eod so the scoreboard stays honest.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    open_fills = get_open_filled_simulations(market=market, limit=200)
+    if not open_fills:
+        return 0
+    closed = 0
+    for sim in open_fills:
+        fill_at = _parse_dt(sim.get("fill_at"))
+        if fill_at is None:
+            continue
+        session_close = _us_session_close_utc(fill_at)
+        if session_close is None:
+            continue
+        # Require a 30-min buffer after session close before marking EOD —
+        # yfinance occasionally delivers late bars.
+        if now_utc < session_close + timedelta(minutes=30):
+            continue
+        try:
+            # Run _process_filled capped at session_close. Any unfired
+            # terminals in the closing bars are caught here; otherwise we
+            # get back an mfe/mae update with no status change.
+            update = _process_filled(sim, session_close)
+            new_status = update.get("status")
+            if new_status and new_status != "filled":
+                # A terminal (hit_stop, hit_target_*, hit_near_t1_protection,
+                # expired) fired in the closing bars — use it as-is.
+                update_advisory_auto_simulation(int(sim["id"]), update)
+                log_event("INFO", "advisory_auto_sim_eod_terminal", {
+                    "sim_id": sim["id"], "symbol": sim.get("data_symbol"),
+                    "status": new_status,
+                })
+            else:
+                # No terminal — mark as closed_eod with the final mfe/mae.
+                eod_update = {
+                    **update,
+                    "status": "closed_eod",
+                    "closed_at": _iso_z(session_close),
+                }
+                update_advisory_auto_simulation(int(sim["id"]), eod_update)
+                log_event("INFO", "advisory_auto_sim_eod_close", {
+                    "sim_id": sim["id"], "symbol": sim.get("data_symbol"),
+                    "grade": sim.get("grade"), "mode": sim.get("mode"),
+                    "mfe_pct": update.get("mfe_pct"),
+                    "mae_pct": update.get("mae_pct"),
+                    "last_price": update.get("last_price"),
+                })
+            closed += 1
+        except Exception as e:
+            log_event("WARN", "advisory_auto_sim_eod_error", {
+                "sim_id": sim.get("id"), "symbol": sim.get("data_symbol"),
+                "error": str(e)[:160],
+            })
+    return closed
+
+
+def run_advisory_auto_eod_close(market: str = "US") -> dict:
+    """Public entry point for the EOD mark-to-close step.
+
+    Safe to call any time — fills whose session hasn't closed yet are skipped.
+    Called automatically at the end of run_advisory_auto_simulation_cycle when
+    the session is past close, and can also be triggered from a dedicated EOD
+    workflow step for belt-and-suspenders coverage.
+    """
+    now_utc = datetime.now(timezone.utc)
+    closed = _eod_close_fills(market=market, now_utc=now_utc)
+    log_event("INFO", "advisory_auto_sim_eod_cycle", {
+        "market": market, "closed_eod": closed,
+    })
+    return {"ran": True, "market": market, "closed_eod": closed}

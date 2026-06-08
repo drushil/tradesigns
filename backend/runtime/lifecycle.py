@@ -100,7 +100,21 @@ def run_post_market_analytics():
 # ---------------------------------------------------------------------------
 
 def run_daily_eod_review():
-    """Run read-only daily post-market synthesis and recommendations."""
+    """Run read-only daily post-market synthesis and recommendations.
+
+    Also triggers the advisory-auto sim EOD mark-to-close so any fills that
+    survived to the session bell are cleanly recorded as closed_eod before
+    the scoreboard is read.
+    """
+    # Advisory-auto sim EOD close — belt-and-suspenders in addition to the
+    # inline call at the end of each simulation cycle.
+    try:
+        from backend.advisory_auto.simulator import run_advisory_auto_eod_close
+        eod_result = run_advisory_auto_eod_close(market="US")
+        log_event("INFO", "advisory_auto_eod_close_from_eod_review", eod_result)
+    except Exception as e:
+        log_event("WARN", "advisory_auto_eod_close_failed", {"error": str(e)[:160]})
+
     try:
         from backend.daily_review import run_daily_eod_review as _review
         return _review()

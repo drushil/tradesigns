@@ -697,6 +697,86 @@ def _runner_context(candidate: dict, recent_live: list, now_cet: datetime,
     }
 
 
+def _extended_momentum_runner_context(candidate: dict, open_positions: list,
+                                      cfg: AdvisoryConfig) -> dict:
+    """Classify high-momentum extended leaders without requiring a prior advisory.
+
+    This is intentionally separate from the normal grade path: these setups are
+    not clean fresh entries, but they can be tradable as pullback-only runners
+    on strong trend days.
+    """
+    if not _env_bool("ADVISORY_EXTENDED_RUNNER_ENABLED", True):
+        return {}
+    if candidate.get("mode") != "live":
+        return {}
+    if candidate.get("alert_stage") not in WATCH_ALERT_STAGES:
+        return {}
+    if str(candidate.get("side") or "").upper() != "BUY":
+        return {}
+    if not _watch_had_late_chase(candidate):
+        return {}
+
+    signal_json = candidate.get("signal_json") or {}
+    scores = signal_json.get("scores") or {}
+    trend = signal_json.get("trend_1h") or candidate.get("trend_1h_json") or {}
+    if trend.get("aligned") is not True:
+        return {}
+
+    composite = float(candidate.get("composite_score") or 0.0)
+    breakout = float(candidate.get("breakout_quality") or 0.0)
+    rel_strength = float(scores.get("relative_strength") or 0.0)
+    tape = float(scores.get("tape_aggression") or 0.0)
+    bollinger = float(scores.get("bollinger_squeeze") or 0.0)
+    macd = float(scores.get("macd_crossover") or 0.0)
+    ret_3h = float(trend.get("ret_3h_pct") or 0.0)
+    ret_6h = float(trend.get("ret_6h_pct") or 0.0)
+
+    min_composite = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_COMPOSITE", 0.25)
+    min_breakout = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_BREAKOUT", 0.42)
+    min_relative_strength = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_RS", 0.90)
+    min_ret_3h = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_RET_3H", 3.0)
+    min_ret_6h = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_RET_6H", 6.0)
+    min_tape = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_TAPE", 0.25)
+    min_bollinger = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_BOLLINGER", 0.50)
+    min_macd = _env_float("ADVISORY_EXTENDED_RUNNER_MIN_MACD", 0.35)
+
+    if composite < min_composite or breakout < min_breakout:
+        return {}
+    if rel_strength < min_relative_strength:
+        return {}
+    if ret_3h < min_ret_3h and ret_6h < min_ret_6h:
+        return {}
+    if tape < min_tape and bollinger < min_bollinger and macd < min_macd:
+        return {}
+
+    position = _position_context_for_candidate(candidate, open_positions, cfg)
+    return {
+        "type": "extended_momentum_runner",
+        "reason": "extended_leader_pullback",
+        "holder_context": position if position.get("meaningful_holder_context") else {},
+        "position_context": position,
+        "scores": {
+            "relative_strength": round(rel_strength, 4),
+            "tape_aggression": round(tape, 4),
+            "bollinger_squeeze": round(bollinger, 4),
+            "macd_crossover": round(macd, 4),
+        },
+        "trend": {
+            "ret_3h_pct": round(ret_3h, 4),
+            "ret_6h_pct": round(ret_6h, 4),
+            "direction": trend.get("direction"),
+            "score": trend.get("score"),
+        },
+        "thresholds": {
+            "min_composite": min_composite,
+            "min_breakout": min_breakout,
+            "min_relative_strength": min_relative_strength,
+            "min_ret_3h": min_ret_3h,
+            "min_ret_6h": min_ret_6h,
+        },
+    }
+
+
 def _watch_repeat_blocked(recent_watch: dict, candidate: dict) -> bool:
     if not recent_watch or candidate.get("alert_stage") not in WATCH_ALERT_STAGES:
         return False
@@ -1234,6 +1314,8 @@ def _format_trade_card(signal: dict) -> str:
     is_runner = bool(signal.get("runner_context"))
     is_holding = bool(signal.get("holding_context"))
     signal_json = signal.get("signal_json") or {}
+    runner_context = signal.get("runner_context") or {}
+    runner_type = runner_context.get("type")
     notional = f"€{signal['suggested_size_eur']:.0f}"
     range_action = (
         "sell/short only inside range; avoid chasing below max extension."
@@ -1274,6 +1356,8 @@ def _format_trade_card(signal: dict) -> str:
     qualifier = ""
     if is_downside:
         qualifier = " - protect longs"
+    elif runner_type == "extended_momentum_runner":
+        qualifier = " - extended runner"
     elif is_late_chase:
         qualifier = " - extended"
     elif signal.get("pullback_confirmed"):
@@ -1312,11 +1396,27 @@ def _format_trade_card(signal: dict) -> str:
         notes.append("Action: watch for follow-through; use the band as tentative only.")
     elif is_runner:
         detail = signal.get("late_chase_json") or {}
-        notes.append(
-            "Why: same-day runner continuation; prior B+ advisory confirmed the move, "
-            f"but VWAP deviation is {detail.get('pct_deviation')}% vs {detail.get('threshold_pct')}%."
-        )
-        notes.append("Action: active-trader/holder context; fresh entry only on pullback.")
+        if runner_type == "extended_momentum_runner":
+            trend = runner_context.get("trend") or {}
+            scores = runner_context.get("scores") or {}
+            notes.append(
+                "Why: extended momentum leader "
+                f"({trend.get('ret_6h_pct', 0):+.1f}% over 6h, "
+                f"RS {scores.get('relative_strength', 0):+.2f}, "
+                f"tape {scores.get('tape_aggression', 0):+.2f})."
+            )
+            notes.append(
+                "Risk: already stretched "
+                f"(VWAP deviation {detail.get('pct_deviation')}% vs {detail.get('threshold_pct')}%); "
+                "treat as runner, not a clean fresh entry."
+            )
+            notes.append("Action: buy only on pullback into the band; protect fast near T1.")
+        else:
+            notes.append(
+                "Why: same-day runner continuation; prior B+ advisory confirmed the move, "
+                f"but VWAP deviation is {detail.get('pct_deviation')}% vs {detail.get('threshold_pct')}%."
+            )
+            notes.append("Action: active-trader/holder context; fresh entry only on pullback.")
     elif is_watch:
         if is_ignition:
             pass
@@ -2549,7 +2649,10 @@ def run_advisory_cycle() -> dict:
                     pass
                 continue
             if mode == "live":
-                runner = _runner_context(candidate, recent_live, now_cet, open_advisory_positions, cfg)
+                runner = (
+                    _runner_context(candidate, recent_live, now_cet, open_advisory_positions, cfg)
+                    or _extended_momentum_runner_context(candidate, open_advisory_positions, cfg)
+                )
                 if runner:
                     candidate["runner_context"] = runner
                     if runner.get("holder_context"):

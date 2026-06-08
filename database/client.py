@@ -1286,6 +1286,24 @@ def get_active_advisory_auto_simulations(limit: int = 200) -> list:
         return []
 
 
+def get_open_filled_simulations(market: str = "US", limit: int = 200) -> list:
+    """Fetch filled sims that have not yet reached a terminal outcome.
+    Used by the EOD mark-to-close step to close positions at session end."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_auto_simulations")
+                  .select("*")
+                  .eq("status", "filled")
+                  .eq("market", market.upper())
+                  .order("fill_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_SIM_OPEN_FILLED_FAILED] {str(e)[:200]}")
+        return []
+
+
 def update_advisory_auto_simulation(sim_id: int, fields: dict) -> dict:
     """Patch a simulation row by primary key."""
     try:
