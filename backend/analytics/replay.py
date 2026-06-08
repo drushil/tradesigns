@@ -41,6 +41,7 @@ from database.client import (
     get_unchecked_closed_trades_for_replay,
     update_trade_post_exit_replay,
     get_unscored_advisory_signals,
+    get_advisory_signals_needing_5d_score,
     update_advisory_signal_replay,
     log_event,
 )
@@ -138,6 +139,8 @@ def _replay_price_window(ticker: str, action: str, start_at: datetime,
 # ---------------------------------------------------------------------------
 
 _ADVISORY_FORWARD_WINDOWS = (5, 15, 30, 60)
+# 5-day horizon is scored in a separate pass (needs 5 calendar days of data).
+_ADVISORY_5D_MINUTES = 5 * 24 * 60  # 7200 minutes — used only as an age gate
 
 
 def _advisory_reference_price(signal: dict) -> float:
@@ -298,17 +301,50 @@ def _replay_one_advisory_signal(signal: dict) -> dict:
         "grade": signal.get("grade"),
         "status_at_alert": signal.get("status"),
     }
-    return {
+    fwd_60m = forward_returns.get(60)
+    # fwd_60m is already sign-adjusted for side (positive = thesis correct for both
+    # BUY and SELL) because _advisory_price_window returns (ref - close) for SELL.
+    direction_correct_60m: Optional[bool] = (fwd_60m > 0) if fwd_60m is not None else None
+
+    # Derive pick_outcome_bucket from the existing replay columns on the signal.
+    # We use target_hit_first / stop_hit_first / fwd_60m as a proxy here;
+    # the authoritative bucket may be overwritten by the 5d scorer later.
+    target_hit = signal.get("target_hit_first")
+    stop_hit = signal.get("stop_hit_first")
+    if target_hit:
+        bucket = "tp1_hit"
+    elif stop_hit:
+        bucket = "stop_hit"
+    elif complete and fwd_60m is not None:
+        bucket = "expired_positive" if fwd_60m > 0 else "expired_negative"
+    else:
+        bucket = "pending"
+
+    result: dict = {
         "forward_return_5m": forward_returns.get(5),
         "forward_return_15m": forward_returns.get(15),
         "forward_return_30m": forward_returns.get(30),
-        "forward_return_60m": forward_returns.get(60),
+        "forward_return_60m": fwd_60m,
         "forward_scored_at": now_utc.isoformat() if complete else None,
         "max_favorable_pct": replay.get("max_favorable_pct"),
         "max_adverse_pct": replay.get("max_adverse_pct"),
         "close_after_pct": replay.get("close_after_pct"),
         "advisory_replay_json": payload,
+        "direction_correct_60m": direction_correct_60m,
+        "pick_outcome_bucket": bucket,
     }
+    # Backfill session_window and regime_at_pick from signal_json if not already set.
+    if not signal.get("session_window"):
+        sj = signal.get("signal_json") or {}
+        sw = sj.get("session_window") if isinstance(sj, dict) else None
+        if sw:
+            result["session_window"] = sw
+    if not signal.get("regime_at_pick"):
+        mc = signal.get("market_context_json") or {}
+        regime = mc.get("regime") if isinstance(mc, dict) else None
+        if regime:
+            result["regime_at_pick"] = regime
+    return result
 
 
 def _replay_advisory_signals():
@@ -369,6 +405,123 @@ def _replay_advisory_signals():
             "finalized": finalized,
             "min_age_minutes": min_age,
             "max_age_days": max_age_days,
+        })
+
+
+def _score_5d_return(signal: dict, created_at: datetime) -> Optional[dict]:
+    """Fetch the 5-day forward return for a single advisory signal.
+
+    Downloads 1d bars (5d period) so we only need one yfinance call per signal.
+    Returns a dict of fields to update, or None on failure.
+    """
+    import yfinance as yf
+
+    ticker = str(
+        signal.get("data_symbol") or signal.get("primary_symbol") or ""
+    ).upper()
+    side = str(signal.get("side") or "BUY").upper()
+    reference_price = _advisory_reference_price(signal)
+    if not ticker or reference_price <= 0:
+        return None
+
+    now_utc = datetime.now(timezone.utc)
+    # Require at least 5 calendar days elapsed before scoring.
+    if now_utc < created_at + timedelta(days=5):
+        return None
+
+    try:
+        signal_day = created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Use explicit start/end so old backlog signals (>10 days ago) are not
+        # mis-scored by picking bars from the wrong window. Fetch 12 calendar
+        # days from signal_day; ~8–9 trading days, enough for 5 trading closes.
+        fetch_start = signal_day.strftime("%Y-%m-%d")
+        fetch_end = (signal_day + timedelta(days=12)).strftime("%Y-%m-%d")
+        bars = yf.download(
+            ticker,
+            start=fetch_start,
+            end=fetch_end,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
+        if bars is None or bars.empty:
+            return None
+        if isinstance(bars.columns, pd.MultiIndex):
+            bars.columns = bars.columns.get_level_values(0)
+        if bars.index.tz is None:
+            bars.index = bars.index.tz_localize("UTC")
+        else:
+            bars.index = bars.index.tz_convert("UTC")
+
+        future_bars = bars[bars.index >= signal_day]
+        if len(future_bars) < 2:
+            return None
+
+        # Close of the 5th trading day from signal_day (index 5 if available, else last).
+        target_idx = min(5, len(future_bars) - 1)
+        close_5d = float(_col_values(future_bars.iloc[[target_idx]], "Close")[0])
+        if side == "BUY":
+            fwd_5d = (close_5d - reference_price) / reference_price * 100.0
+            direction_correct_5d = fwd_5d > 0
+        else:
+            fwd_5d = (reference_price - close_5d) / reference_price * 100.0
+            direction_correct_5d = fwd_5d > 0
+
+        # Finalize pick_outcome_bucket (authoritative version using T1 hit data too).
+        target_hit = signal.get("target_hit_first")
+        stop_hit = signal.get("stop_hit_first")
+        if target_hit:
+            bucket = "tp1_hit"
+        elif stop_hit:
+            bucket = "stop_hit"
+        elif fwd_5d > 0:
+            bucket = "expired_positive"
+        else:
+            bucket = "expired_negative"
+
+        return {
+            "forward_return_5d": round(fwd_5d, 4),
+            "direction_correct_5d": direction_correct_5d,
+            "pick_outcome_bucket": bucket,
+        }
+    except Exception:
+        return None
+
+
+def _replay_advisory_signals_5d():
+    """Score T+5d forward return for signals that are already 60m-complete
+    but haven't been scored for 5d yet. Runs nightly."""
+    if not _env_bool("ADVISORY_REPLAY_ENABLED", True):
+        return
+
+    limit = _env_int("ADVISORY_REPLAY_5D_LIMIT", 20)
+    signals = get_advisory_signals_needing_5d_score(limit=limit)
+    if not signals:
+        return
+
+    checked = 0
+    updated = 0
+    for signal in signals:
+        checked += 1
+        created_at = _parse_supabase_time(signal.get("created_at"))
+        if not created_at:
+            continue
+        try:
+            patch = _score_5d_return(signal, created_at)
+            if not patch:
+                continue
+            result = update_advisory_signal_replay(signal.get("id"), patch)
+            if not result.get("error"):
+                updated += 1
+        except Exception as e:
+            log_event("WARN", "advisory_replay_5d_failed", {
+                "id": signal.get("id"),
+                "symbol": signal.get("data_symbol"),
+                "error": str(e)[:160],
+            })
+    if checked:
+        log_event("INFO", "advisory_replay_5d_complete", {
+            "checked": checked, "updated": updated,
         })
 
 

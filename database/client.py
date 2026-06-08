@@ -992,22 +992,25 @@ def get_unscored_advisory_signals(min_age_minutes: int = 5, limit: int = 25,
 
 
 def update_advisory_signal_replay(signal_id: int, replay: dict) -> dict:
-    """Persist incremental forward-return replay stats for an advisory signal."""
+    """Persist forward-return replay stats for an advisory signal.
+    Handles both incremental 60m updates and the separate 5d patch."""
     try:
         db = get_client(write=True)
-        record = {
-            "replay_checked_at": datetime.utcnow().isoformat() + "Z",
-            "forward_return_5m": replay.get("forward_return_5m"),
-            "forward_return_15m": replay.get("forward_return_15m"),
-            "forward_return_30m": replay.get("forward_return_30m"),
-            "forward_return_60m": replay.get("forward_return_60m"),
-            "forward_scored_at": replay.get("forward_scored_at"),
-            "max_favorable_pct": replay.get("max_favorable_pct"),
-            "max_adverse_pct": replay.get("max_adverse_pct"),
-            "close_after_pct": replay.get("close_after_pct"),
-            "advisory_replay_json": _json_safe(replay.get("advisory_replay_json") or {}),
+        _passthrough = {
+            "forward_return_5m", "forward_return_15m", "forward_return_30m",
+            "forward_return_60m", "forward_return_5d",
+            "forward_scored_at", "forward_scored_horizons",
+            "max_favorable_pct", "max_adverse_pct", "close_after_pct",
+            "direction_correct_60m", "direction_correct_5d",
+            "pick_outcome_bucket", "session_window", "regime_at_pick",
         }
-        record = {key: value for key, value in record.items() if value is not None}
+        record = {"replay_checked_at": datetime.utcnow().isoformat() + "Z"}
+        for key in _passthrough:
+            val = replay.get(key)
+            if val is not None:
+                record[key] = val
+        if replay.get("advisory_replay_json"):
+            record["advisory_replay_json"] = _json_safe(replay["advisory_replay_json"])
         result = (db.table("advisory_signals")
                   .update(record)
                   .eq("id", signal_id)
@@ -1016,6 +1019,75 @@ def update_advisory_signal_replay(signal_id: int, replay: dict) -> dict:
     except Exception as e:
         print(f"[ADVISORY_REPLAY_UPDATE_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
+
+
+def get_advisory_signals_needing_5d_score(limit: int = 20) -> list:
+    """Signals that have been 60m-scored but haven't yet received a 5d score,
+    and are old enough that 5 trading days have elapsed."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=5)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .not_.is_("forward_scored_at", "null")
+                  .is_("forward_return_5d", "null")
+                  .lte("created_at", cutoff)
+                  .order("created_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_5D_SCORE_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def insert_advisory_policy_recommendations(recs: list[dict]) -> int:
+    """Bulk-insert a list of advisory_policy_recommendations rows.
+    Skips rows with errors. Returns the count successfully inserted."""
+    if not recs:
+        return 0
+    try:
+        db = get_client(write=True)
+        result = db.table("advisory_policy_recommendations").insert(
+            [_json_safe(r) for r in recs]
+        ).execute()
+        return len(result.data or [])
+    except Exception as e:
+        print(f"[ADVISORY_POLICY_REC_INSERT_FAILED] {str(e)[:200]}")
+        return 0
+
+
+def expire_old_advisory_policy_recommendations(scope: str, scope_value: str,
+                                                field_name: str) -> None:
+    """Mark any existing 'proposed' recommendations for the same scope/field
+    as 'expired' before inserting a new one. Keeps the proposed list clean."""
+    try:
+        db = get_client(write=True)
+        (db.table("advisory_policy_recommendations")
+           .update({"status": "expired", "status_changed_at": datetime.utcnow().isoformat() + "Z"})
+           .eq("scope", scope)
+           .eq("scope_value", scope_value)
+           .eq("field_name", field_name)
+           .eq("status", "proposed")
+           .execute())
+    except Exception as e:
+        print(f"[ADVISORY_POLICY_REC_EXPIRE_FAILED] {str(e)[:200]}")
+
+
+def get_proposed_advisory_policy_recommendations(limit: int = 50) -> list:
+    """Fetch unactioned recommendations for the config dashboard."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_policy_recommendations")
+                  .select("*")
+                  .eq("status", "proposed")
+                  .order("computed_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_POLICY_REC_READ_FAILED] {str(e)[:200]}")
+        return []
 
 
 def get_advisory_attribution_summary(days: int = 90) -> dict:
@@ -1434,6 +1506,44 @@ def get_advisory_scoreboard(
         return result.data or []
     except Exception as e:
         print(f"[ADVISORY_SCOREBOARD_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def get_advisory_pick_scoreboard(days_back: int = 90, market: str = None, limit: int = 500) -> list:
+    """Fetch aggregated pick-level outcome rows from the advisory-first views."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days_back)).date().isoformat()
+        db = get_client()
+        q = (db.table("advisory_pick_scoreboard")
+             .select("*")
+             .gte("utc_date", cutoff)
+             .order("utc_date", desc=True)
+             .limit(limit))
+        if market and market.upper() not in ("ALL", ""):
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_PICK_SCOREBOARD_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
+def get_advisory_execution_scoreboard(days_back: int = 90, market: str = None, limit: int = 500) -> list:
+    """Fetch aggregated simulator/execution outcome rows from the advisory-first views."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days_back)).date().isoformat()
+        db = get_client()
+        q = (db.table("advisory_execution_scoreboard")
+             .select("*")
+             .gte("utc_date", cutoff)
+             .order("utc_date", desc=True)
+             .limit(limit))
+        if market and market.upper() not in ("ALL", ""):
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_EXEC_SCOREBOARD_READ_FAILED] {str(e)[:200]}")
         return []
 
 

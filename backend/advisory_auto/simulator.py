@@ -72,6 +72,52 @@ def _grade_rank(grade) -> int:
     return _GRADE_RANK.get(str(grade or "").strip().upper(), 0)
 
 
+# Current simulator version. Bump when logic changes materially so old rows
+# don't contaminate new learning queries.
+SIM_VERSION = 2
+
+_STATUS_TO_CLOSURE_REASON = {
+    "hit_target_1":          "target_1",
+    "hit_target_2":          "target_2",
+    "hit_stop":              "stop",
+    "hit_near_t1_protection": "near_t1_protection",
+    "expired":               "expired_pending",
+    "cancelled_signal_weak": "cancelled_weak",
+    "closed_eod":            "eod_close",
+    "closed_eod_win":        "eod_close",
+    "closed_eod_loss":       "eod_close",
+}
+
+
+def _closure_reason(status: str) -> Optional[str]:
+    return _STATUS_TO_CLOSURE_REASON.get(str(status or ""))
+
+
+def _r_multiple(fill_price: float, stop_price: float,
+                exit_price: float, side: str = "BUY") -> Optional[float]:
+    """Return signed R-multiple: (exit - fill) / risk, where risk = |fill - stop|."""
+    try:
+        risk = abs(fill_price - stop_price)
+        if risk <= 0:
+            return None
+        pnl = (exit_price - fill_price) if side.upper() == "BUY" else (fill_price - exit_price)
+        return round(pnl / risk, 4)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _entry_policy_quality(fill_price: float,
+                          entry_min: float, entry_max: float) -> Optional[float]:
+    """0 = filled at entry_min, 1 = at entry_max, >1 = chased above band."""
+    try:
+        band = entry_max - entry_min
+        if band <= 0:
+            return None
+        return round((fill_price - entry_min) / band, 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_dt(value) -> Optional[datetime]:
     if not value:
         return None
@@ -185,6 +231,8 @@ def _create_pending_sims(market: str = "US") -> int:
             "simulated_at": sig.get("created_at"),
             "valid_until": sig.get("valid_until"),
             "status": "pending",
+            "entry_policy": mode,
+            "sim_version": SIM_VERSION,
         }
         result = insert_advisory_auto_simulation(payload)
         if "error" not in result:
@@ -259,6 +307,11 @@ def _create_chase_tracker_sims(market: str = "US") -> int:
             "mfe_pct": 0.0,
             "mae_pct": 0.0,
             "notes": {"synthetic_fill": "chase_price"},
+            "entry_policy": "chase_tracker",
+            "entry_policy_quality": _entry_policy_quality(
+                chase_price, entry_min or chase_price, entry_max or chase_price
+            ),
+            "sim_version": SIM_VERSION,
         }
         result = insert_advisory_auto_simulation(payload)
         if "error" not in result:
@@ -349,6 +402,7 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
                 fill = entry_max
             else:
                 fill = (max(bar_low, entry_min) + min(bar_high, entry_max)) / 2.0
+            epq = _entry_policy_quality(fill, entry_min, entry_max)
             return {
                 "status": "filled",
                 "fill_at": _iso_z(ts.to_pydatetime()),
@@ -357,6 +411,7 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
                 "mae_pct": 0.0,
                 "last_price": round(float(bar.get("Close") or fill), 4),
                 "last_checked_at": _iso_z(now_utc),
+                "entry_policy_quality": epq,
             }
     # No fill in this window. Mark expired if we're past valid_until.
     if valid_until and now_utc > valid_until:
@@ -508,10 +563,11 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
                 new_status = update.get("status") or status
                 if new_status == "filled":
                     transitions["filled_new"] += 1
-                elif new_status == "expired":
-                    transitions["expired"] += 1
-                elif new_status == "cancelled_signal_weak":
-                    transitions["cancelled_signal_weak"] += 1
+                elif new_status in ("expired", "cancelled_signal_weak"):
+                    transitions[new_status] += 1
+                    cr = _closure_reason(new_status)
+                    if cr and not update.get("closure_reason"):
+                        update["closure_reason"] = cr
             elif status == "filled":
                 transitions["filled_checked"] += 1
                 update = _process_filled(sim, now_utc)
@@ -519,6 +575,29 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
                 if new_status in ("hit_stop", "hit_target_1", "hit_target_2",
                                   "hit_near_t1_protection", "expired"):
                     transitions[new_status] += 1
+                    # Enrich terminal updates with learning columns.
+                    cr = _closure_reason(new_status)
+                    if cr and not update.get("closure_reason"):
+                        update["closure_reason"] = cr
+                    fill_price = float(sim.get("fill_price") or 0)
+                    stop_price = float(sim.get("stop_price") or 0)
+                    # Use the actual terminal level, not bar close, so r_multiple
+                    # reflects what you'd actually get: stop_price for a stopped-out
+                    # trade, target_1/target_2 for a target hit, last_price only as
+                    # a fallback for near_t1 or expired (no clean terminal level).
+                    if new_status == "hit_stop":
+                        exit_price = stop_price
+                    elif new_status == "hit_target_2":
+                        exit_price = float(sim.get("target_2") or update.get("last_price") or 0)
+                    elif new_status == "hit_target_1":
+                        exit_price = float(sim.get("target_1") or update.get("last_price") or 0)
+                    else:
+                        exit_price = float(update.get("last_price") or 0)
+                    if fill_price > 0 and stop_price > 0 and exit_price > 0:
+                        r = _r_multiple(fill_price, stop_price, exit_price,
+                                        side=str(sim.get("side") or "BUY"))
+                        if r is not None and not sim.get("r_multiple"):
+                            update["r_multiple"] = r
             else:
                 continue
             update_advisory_auto_simulation(int(sim["id"]), update)
@@ -607,28 +686,59 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
             # get back an mfe/mae update with no status change.
             update = _process_filled(sim, session_close)
             new_status = update.get("status")
+            fill_price = float(sim.get("fill_price") or 0)
+            stop_price = float(sim.get("stop_price") or 0)
+            side = str(sim.get("side") or "BUY")
             if new_status and new_status != "filled":
-                # A terminal (hit_stop, hit_target_*, hit_near_t1_protection,
-                # expired) fired in the closing bars — use it as-is.
+                # A terminal fired in the closing bars — enrich with learning cols.
+                cr = _closure_reason(new_status)
+                if cr and not update.get("closure_reason"):
+                    update["closure_reason"] = cr
+                if new_status == "hit_stop":
+                    exit_price = stop_price
+                elif new_status == "hit_target_2":
+                    exit_price = float(sim.get("target_2") or update.get("last_price") or 0)
+                elif new_status == "hit_target_1":
+                    exit_price = float(sim.get("target_1") or update.get("last_price") or 0)
+                else:
+                    exit_price = float(update.get("last_price") or 0)
+                if fill_price > 0 and stop_price > 0 and exit_price > 0 and not sim.get("r_multiple"):
+                    r = _r_multiple(fill_price, stop_price, exit_price, side)
+                    if r is not None:
+                        update["r_multiple"] = r
                 update_advisory_auto_simulation(int(sim["id"]), update)
                 log_event("INFO", "advisory_auto_sim_eod_terminal", {
                     "sim_id": sim["id"], "symbol": sim.get("data_symbol"),
                     "status": new_status,
                 })
             else:
-                # No terminal — mark as closed_eod with the final mfe/mae.
+                # No terminal — mark as closed_eod with win/loss status and new cols.
+                eod_price = float(update.get("last_price") or 0)
+                if eod_price > 0 and fill_price > 0:
+                    eod_win = (eod_price > fill_price) if side == "BUY" else (eod_price < fill_price)
+                    eod_status = "closed_eod_win" if eod_win else "closed_eod_loss"
+                else:
+                    eod_status = "closed_eod"
                 eod_update = {
                     **update,
-                    "status": "closed_eod",
+                    "status": eod_status,
                     "closed_at": _iso_z(session_close),
+                    "closure_reason": "eod_close",
+                    "eod_marked_at": _iso_z(now_utc),
+                    "eod_close_price": round(eod_price, 4) if eod_price else None,
                 }
+                if fill_price > 0 and stop_price > 0 and eod_price > 0 and not sim.get("r_multiple"):
+                    r = _r_multiple(fill_price, stop_price, eod_price, side)
+                    if r is not None:
+                        eod_update["r_multiple"] = r
                 update_advisory_auto_simulation(int(sim["id"]), eod_update)
                 log_event("INFO", "advisory_auto_sim_eod_close", {
                     "sim_id": sim["id"], "symbol": sim.get("data_symbol"),
                     "grade": sim.get("grade"), "mode": sim.get("mode"),
+                    "status": eod_status,
                     "mfe_pct": update.get("mfe_pct"),
                     "mae_pct": update.get("mae_pct"),
-                    "last_price": update.get("last_price"),
+                    "eod_close_price": eod_price,
                 })
             closed += 1
         except Exception as e:

@@ -22,6 +22,7 @@ from backend.broker.alpaca import get_account, get_positions
 from backend.sweep.agent import compute_sweep_plan, execute_sweep
 from backend.analytics.replay import (
     _replay_advisory_signals,
+    _replay_advisory_signals_5d,
     _replay_blocked_opportunities,
     _replay_closed_trade_exits,
 )
@@ -82,14 +83,20 @@ def run_nightly_sweep():
 def run_post_market_analytics():
     """
     Runs after US market close (21:05 UTC / 5:05 PM ET).
-    Replays blocked opportunities and closed trade exits against post-event
-    price action. Kept out of the signal cycle to avoid I/O overhead.
+    Replays advisory signals + 5d scores, blocked opportunities, closed trade
+    exits, and the advisory nightly learner.
     """
     try:
         log_event("INFO", "post_market_analytics_start", {})
         _replay_advisory_signals()
+        _replay_advisory_signals_5d()
         _replay_blocked_opportunities()
         _replay_closed_trade_exits()
+        try:
+            from backend.learning.advisory_learner import run_advisory_learner
+            run_advisory_learner()
+        except Exception as e:
+            log_event("WARN", "advisory_learner_failed", {"error": str(e)[:160]})
         log_event("INFO", "post_market_analytics_complete", {})
     except Exception as e:
         log_event("ERROR", "post_market_analytics_failed", {"error": str(e)[:160]})

@@ -1,4 +1,4 @@
-name: Trading Agent - Signal Cycle
+name: Advisory Agent - Nightly & Scheduled Jobs
 
 on:
   schedule:
@@ -8,39 +8,23 @@ on:
     - cron: '0 18 * * 0'
     # Off-hours macro/advisory alert scan (weekdays only; no weekend noise)
     - cron: '0 */4 * * 1-5'
-    # Nightly sweep — after US market close Mon-Fri (21:05 UTC)
+    # Nightly analytics + advisory learner — after US market close Mon-Fri (21:05 UTC)
     - cron: '5 21 * * 1-5'
     # Daily EOD review — after replay analytics (read-only recommendations)
     - cron: '25 21 * * 1-5'
-    # Daily swing position re-evaluation — 09:35 New York, DST-aware in Python
-    - cron: '35 13,14 * * 1-5'
-    # EU open advisory (7-9 UTC) is now handled by advisory-fast.yml triggered
-    # by cron-job.org every 2 min — no GH schedule needed here.
-    # Full US market hours (14:00–20:00 UTC). Previously 13-15,18-19 left a
-    # 16:00–17:59 UTC gap (noon–2pm ET) that was only covered by cron-job.org.
-    # Extended to 13-19 so GitHub Actions covers the full session.
-    # GitHub's native schedule floor is 5 min; shorter expressions are silently
-    # throttled. Keep at 5 min as safety-net backup — cron-job.org workflow_dispatch
-    # is the primary trigger (external dispatch bypasses the 5-min floor).
-    - cron: '*/5 13-19 * * 1-5'
-  # Market-hours cycles triggered by cron-job.org via workflow_dispatch
-  # (more reliable than GitHub's schedule — honours triggers within seconds)
+  # Manual override: workflow_dispatch with optional mode input
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Override agent mode (leave blank for auto-detect by time)'
+        description: 'Override agent mode (leave blank for auto-detect by time). Options: portfolio_review | digest | sweep | analytics | eod_review | advisory'
         required: false
         default: ''
-  # Fallback external trigger for cron-job.org when the workflow_dispatch API path
-  # is degraded. Use POST /repos/{owner}/{repo}/dispatches with event_type below.
-  repository_dispatch:
-    types: [agent-signal-cycle]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: trading-agent-cycle
+  group: advisory-agent-scheduled
   cancel-in-progress: true
 
 jobs:
@@ -106,7 +90,7 @@ jobs:
               sys.exit(1)
           PY
 
-      - name: Run signal cycle
+      - name: Run advisory agent
         env:
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
           ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
@@ -127,93 +111,11 @@ jobs:
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           MAX_CAPITAL_DEPLOYED_EUR: "${{ vars.MAX_CAPITAL_DEPLOYED_EUR }}"
           LLM_CALLS_PER_HOUR_LIMIT: "${{ vars.LLM_CALLS_PER_HOUR_LIMIT }}"
-          LLM_SHADOW_DECISION_ENABLED: "${{ vars.LLM_SHADOW_DECISION_ENABLED }}"
           BROKER_ENV:           "${{ vars.BROKER_ENV }}"
-          SWEEP_TICKER:         "${{ vars.SWEEP_TICKER }}"
           SWEEP_ENABLED:        "${{ vars.SWEEP_ENABLED }}"
+          SWEEP_TICKER:         "${{ vars.SWEEP_TICKER }}"
           SWEEP_MIN_EUR:        "${{ vars.SWEEP_MIN_EUR }}"
           SWEEP_RESERVE_PCT:    "${{ vars.SWEEP_RESERVE_PCT }}"
-          DIVIDEND_SCAN_ENABLED: "${{ vars.DIVIDEND_SCAN_ENABLED }}"
-          DIVIDEND_MIN_YIELD_PCT: "${{ vars.DIVIDEND_MIN_YIELD_PCT }}"
-          ALLOW_SHORT_SELLING:  "${{ vars.ALLOW_SHORT_SELLING }}"
-          ALLOW_B_GRADE_EXPLORATION: "${{ vars.ALLOW_B_GRADE_EXPLORATION }}"
-          TREND_SCORE_THRESHOLD: "${{ vars.TREND_SCORE_THRESHOLD }}"
-          EV_ALLOW_EXPLORATION: "${{ vars.EV_ALLOW_EXPLORATION }}"
-          EV_MIN_NET_PCT:       "${{ vars.EV_MIN_NET_PCT }}"
-          GRADE_EV_OVERRIDE_NEGATIVE_MIN_SAMPLES: "${{ vars.GRADE_EV_OVERRIDE_NEGATIVE_MIN_SAMPLES }}"
-          PROBE_FLOOR_INFLATION_MAX_MULTIPLE: "${{ vars.PROBE_FLOOR_INFLATION_MAX_MULTIPLE }}"
-          MAX_NEW_INTRADAY_TRADES_PER_CYCLE: "${{ vars.MAX_NEW_INTRADAY_TRADES_PER_CYCLE }}"
-          TICKER_DAILY_LOSS_COOLDOWN_COUNT: "${{ vars.TICKER_DAILY_LOSS_COOLDOWN_COUNT }}"
-          TICKER_LOSS_REENTRY_MIN_SCORE: "${{ vars.TICKER_LOSS_REENTRY_MIN_SCORE }}"
-          THESIS_INVALIDATED_COOLDOWN_MINUTES: "${{ vars.THESIS_INVALIDATED_COOLDOWN_MINUTES }}"
-          HIGH_ATR_STOP_THRESHOLD_PCT: "${{ vars.HIGH_ATR_STOP_THRESHOLD_PCT }}"
-          HIGH_ATR_STOP_MULTIPLIER: "${{ vars.HIGH_ATR_STOP_MULTIPLIER }}"
-          RANGING_MAX_TRADES_PER_DAY: "${{ vars.RANGING_MAX_TRADES_PER_DAY }}"
-          RANGING_ATR_STOP_MULTIPLE: "${{ vars.RANGING_ATR_STOP_MULTIPLE }}"
-          RANGING_REGIME_SIZE_MULTIPLIER: "${{ vars.RANGING_REGIME_SIZE_MULTIPLIER }}"
-          RANGING_A_PLUS_MIN_COMPOSITE: "${{ vars.RANGING_A_PLUS_MIN_COMPOSITE }}"
-          RANGING_A_PLUS_MIN_BREAKOUT_QUALITY: "${{ vars.RANGING_A_PLUS_MIN_BREAKOUT_QUALITY }}"
-          RANGING_A_PLUS_MIN_EV_PCT: "${{ vars.RANGING_A_PLUS_MIN_EV_PCT }}"
-          RANGING_A_GRADE_MIN_BREAKOUT_QUALITY: "${{ vars.RANGING_A_GRADE_MIN_BREAKOUT_QUALITY }}"
-          RANGING_A_GRADE_MIN_EV_PCT: "${{ vars.RANGING_A_GRADE_MIN_EV_PCT }}"
-          RANGING_PROBE_ENABLED: "${{ vars.RANGING_PROBE_ENABLED }}"
-          RANGING_PROBE_ALLOWED_GRADES: "${{ vars.RANGING_PROBE_ALLOWED_GRADES }}"
-          RANGING_PROBE_SHADOW_GRADES: "${{ vars.RANGING_PROBE_SHADOW_GRADES }}"
-          RANGING_PROBE_SIZE_MULTIPLIER: "${{ vars.RANGING_PROBE_SIZE_MULTIPLIER }}"
-          RANGING_PROBE_GRADE_B_SHADOW_SIZE_MULTIPLIER: "${{ vars.RANGING_PROBE_GRADE_B_SHADOW_SIZE_MULTIPLIER }}"
-          RANGING_PROBE_GRADE_B_MIN_COMPOSITE: "${{ vars.RANGING_PROBE_GRADE_B_MIN_COMPOSITE }}"
-          RANGING_PROBE_GRADE_B_MIN_BREAKOUT_QUALITY: "${{ vars.RANGING_PROBE_GRADE_B_MIN_BREAKOUT_QUALITY }}"
-          RANGING_PROBE_GRADE_B_PROMOTE_MIN_SAMPLES: "${{ vars.RANGING_PROBE_GRADE_B_PROMOTE_MIN_SAMPLES }}"
-          RANGING_PROBE_GRADE_B_PROMOTE_MIN_WIN_RATE: "${{ vars.RANGING_PROBE_GRADE_B_PROMOTE_MIN_WIN_RATE }}"
-          RANGING_PROBE_GRADE_B_PROMOTE_REQUIRES_MFE_GT_MAE: "${{ vars.RANGING_PROBE_GRADE_B_PROMOTE_REQUIRES_MFE_GT_MAE }}"
-          RANGING_PROBE_GRADE_B_PROMOTE_SIZE_MULTIPLIER: "${{ vars.RANGING_PROBE_GRADE_B_PROMOTE_SIZE_MULTIPLIER }}"
-          RANGING_PROBE_MIN_EV_PCT: "${{ vars.RANGING_PROBE_MIN_EV_PCT }}"
-          RANGING_PROBE_MIN_COMPOSITE: "${{ vars.RANGING_PROBE_MIN_COMPOSITE }}"
-          RANGING_PROBE_MIN_BREAKOUT_QUALITY: "${{ vars.RANGING_PROBE_MIN_BREAKOUT_QUALITY }}"
-          RANGING_PROBE_MIN_ALIGNED_SIGNALS: "${{ vars.RANGING_PROBE_MIN_ALIGNED_SIGNALS }}"
-          RANGING_PROBE_MIN_MACD: "${{ vars.RANGING_PROBE_MIN_MACD }}"
-          RANGING_PROBE_MIN_TAPE: "${{ vars.RANGING_PROBE_MIN_TAPE }}"
-          RANGING_PROBE_MIN_RELATIVE_STRENGTH: "${{ vars.RANGING_PROBE_MIN_RELATIVE_STRENGTH }}"
-          RANGING_PROBE_MAX_TAPE_AGAINST: "${{ vars.RANGING_PROBE_MAX_TAPE_AGAINST }}"
-          RANGING_PROBE_MIN_SECTOR_RELATIVE_PCT: "${{ vars.RANGING_PROBE_MIN_SECTOR_RELATIVE_PCT }}"
-          RANGING_PROBE_BLOCKED_THEMES: "${{ vars.RANGING_PROBE_BLOCKED_THEMES }}"
-          RANGING_MAX_NOTIONAL_EUR: "${{ vars.RANGING_MAX_NOTIONAL_EUR }}"
-          AUTONOMOUS_MIN_COMPOSITE_FOR_ENTRY: "${{ vars.AUTONOMOUS_MIN_COMPOSITE_FOR_ENTRY }}"
-          RANGING_MIN_COMPOSITE_FOR_ENTRY: "${{ vars.RANGING_MIN_COMPOSITE_FOR_ENTRY }}"
-          ADVISORY_CONFIRMATION_ENABLED: "${{ vars.ADVISORY_CONFIRMATION_ENABLED }}"
-          ADVISORY_CONFIRMATION_MIN_GRADE: "${{ vars.ADVISORY_CONFIRMATION_MIN_GRADE }}"
-          ADVISORY_CONFIRMATION_MIN_COMPOSITE: "${{ vars.ADVISORY_CONFIRMATION_MIN_COMPOSITE }}"
-          ADVISORY_CONFIRMATION_LOOKBACK_MINUTES: "${{ vars.ADVISORY_CONFIRMATION_LOOKBACK_MINUTES }}"
-          ADVISORY_CONFIRMATION_TICKERS: "${{ vars.ADVISORY_CONFIRMATION_TICKERS }}"
-          RANGING_STOP_LOSS_COOLDOWN_MINUTES: "${{ vars.RANGING_STOP_LOSS_COOLDOWN_MINUTES }}"
-          MIN_REWARD_RISK_RATIO: "${{ vars.MIN_REWARD_RISK_RATIO }}"
-          RANGING_MIN_REWARD_RISK_RATIO: "${{ vars.RANGING_MIN_REWARD_RISK_RATIO }}"
-          SIGNAL_CONSENSUS_MIN_COUNT: "${{ vars.SIGNAL_CONSENSUS_MIN_COUNT }}"
-          RANGING_SIGNAL_CONSENSUS_MIN_COUNT: "${{ vars.RANGING_SIGNAL_CONSENSUS_MIN_COUNT }}"
-          RANGING_CORE_CONSENSUS_ENABLED: "${{ vars.RANGING_CORE_CONSENSUS_ENABLED }}"
-          RANGING_CORE_CONSENSUS_MIN_COUNT: "${{ vars.RANGING_CORE_CONSENSUS_MIN_COUNT }}"
-          SIGNAL_CONSENSUS_MIN_STRENGTH: "${{ vars.SIGNAL_CONSENSUS_MIN_STRENGTH }}"
-          MAX_OPEN_POSITIONS_PER_THEME: "${{ vars.MAX_OPEN_POSITIONS_PER_THEME }}"
-          SECTOR_MOMENTUM_BONUS_ENABLED: "${{ vars.SECTOR_MOMENTUM_BONUS_ENABLED }}"
-          SECTOR_MOMENTUM_LEADERSHIP_THRESHOLD_PCT: "${{ vars.SECTOR_MOMENTUM_LEADERSHIP_THRESHOLD_PCT }}"
-          SECTOR_MOMENTUM_MAX_BONUS: "${{ vars.SECTOR_MOMENTUM_MAX_BONUS }}"
-          CRYPTO_INTERNAL_ALIGN_ENABLED: "${{ vars.CRYPTO_INTERNAL_ALIGN_ENABLED }}"
-          LATE_CHASE_BLOCK_ENABLED: "${{ vars.LATE_CHASE_BLOCK_ENABLED }}"
-          LATE_CHASE_ATR_MULT: "${{ vars.LATE_CHASE_ATR_MULT }}"
-          RVOL_GATE_ENABLED: "${{ vars.RVOL_GATE_ENABLED }}"
-          RVOL_MIN_MULTIPLIER: "${{ vars.RVOL_MIN_MULTIPLIER }}"
-          VWAP_1M_CONFIRM_ENABLED: "${{ vars.VWAP_1M_CONFIRM_ENABLED }}"
-          GATE_CONTROLLER_ENABLED: "${{ vars.GATE_CONTROLLER_ENABLED }}"
-          B_SHADOW_PROMOTE_ENABLED: "${{ vars.B_SHADOW_PROMOTE_ENABLED }}"
-          THEME_MAX_CANDIDATES_PER_CYCLE: "${{ vars.THEME_MAX_CANDIDATES_PER_CYCLE }}"
-          THEME_MAX_LEVERAGED_CANDIDATES_PER_CYCLE: "${{ vars.THEME_MAX_LEVERAGED_CANDIDATES_PER_CYCLE }}"
-          DYNAMIC_UNIVERSE_SHADOW_ENABLED: "${{ vars.DYNAMIC_UNIVERSE_SHADOW_ENABLED }}"
-          DYNAMIC_UNIVERSE_MAX_SHADOW_PER_THEME: "${{ vars.DYNAMIC_UNIVERSE_MAX_SHADOW_PER_THEME }}"
-          BLOCKED_OPPORTUNITY_REPLAY_ENABLED: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_ENABLED }}"
-          BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES }}"
-          BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES }}"
-          BLOCKED_OPPORTUNITY_REPLAY_LIMIT: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_LIMIT }}"
-          BLOCKED_OPPORTUNITY_REPLAY_NEWEST_FIRST: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_NEWEST_FIRST }}"
           ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
           ADVISORY_MARKETS:     "${{ vars.ADVISORY_MARKETS }}"
           ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
@@ -259,24 +161,31 @@ jobs:
           ADVISORY_AUTO_ALLOC_A:           "${{ vars.ADVISORY_AUTO_ALLOC_A }}"
           ADVISORY_AUTO_ALLOC_B:           "${{ vars.ADVISORY_AUTO_ALLOC_B }}"
           ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN: "${{ vars.ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN }}"
+          ADVISORY_REPLAY_ENABLED:         "${{ vars.ADVISORY_REPLAY_ENABLED }}"
+          ADVISORY_REPLAY_LIMIT:           "${{ vars.ADVISORY_REPLAY_LIMIT }}"
+          ADVISORY_REPLAY_5D_LIMIT:        "${{ vars.ADVISORY_REPLAY_5D_LIMIT }}"
+          ADVISORY_LEARNER_MIN_SAMPLE:     "${{ vars.ADVISORY_LEARNER_MIN_SAMPLE }}"
+          ADVISORY_LEARNER_LOOKBACK_DAYS:  "${{ vars.ADVISORY_LEARNER_LOOKBACK_DAYS }}"
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
-          DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
+          LATE_CHASE_BLOCK_ENABLED: "${{ vars.LATE_CHASE_BLOCK_ENABLED }}"
+          LATE_CHASE_ATR_MULT:  "${{ vars.LATE_CHASE_ATR_MULT }}"
+          BLOCKED_OPPORTUNITY_REPLAY_ENABLED: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_ENABLED }}"
+          BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_MIN_AGE_MINUTES }}"
+          BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_HORIZON_MINUTES }}"
+          BLOCKED_OPPORTUNITY_REPLAY_LIMIT: "${{ vars.BLOCKED_OPPORTUNITY_REPLAY_LIMIT }}"
+          DISPATCH_MODE:        "${{ github.event.inputs.mode }}"
           EVENT_SCHEDULE:       "${{ github.event.schedule }}"
         run: |
           python <<'PY'
           import os
           from datetime import datetime, timezone
           from backend.agent import (
-              is_regular_us_market_hours,
-              run_signal_cycle,
               run_portfolio_review,
               run_weekly_digest,
               run_nightly_sweep,
               run_post_market_analytics,
               run_daily_eod_review,
-              re_evaluate_swing_positions,
-              _should_run_swing_recheck,
           )
           from backend.advisory import run_advisory_cycle
 
@@ -286,11 +195,11 @@ jobs:
                   return default
               return raw in {"1", "true", "yes", "on"}
 
-          # Manual override via workflow_dispatch input or repository_dispatch payload takes priority
           dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
           event_schedule = os.getenv("EVENT_SCHEDULE", "").strip()
           action_ran = False
           send_cycle_summary = True
+
           if dispatch_mode == "portfolio_review":
               print("Running weekly portfolio review (manual trigger)...")
               run_portfolio_review()
@@ -304,7 +213,7 @@ jobs:
               run_nightly_sweep()
               action_ran = True
           elif dispatch_mode == "analytics":
-              print("Running post-market analytics (manual trigger)...")
+              print("Running post-market analytics + advisory learner (manual trigger)...")
               run_post_market_analytics()
               action_ran = True
           elif dispatch_mode == "eod_review":
@@ -312,10 +221,6 @@ jobs:
               run_daily_eod_review()
               action_ran = True
               send_cycle_summary = False
-          elif dispatch_mode == "signal":
-              print("Running signal cycle (manual trigger)...")
-              run_signal_cycle()
-              action_ran = True
           elif dispatch_mode == "advisory":
               print("Running advisory cycle (manual trigger)...")
               run_advisory_cycle()
@@ -331,7 +236,7 @@ jobs:
           elif event_schedule == "5 21 * * 1-5":
               print("Running nightly sweep (scheduled trigger)...")
               run_nightly_sweep()
-              print("Running post-market analytics (scheduled trigger)...")
+              print("Running post-market analytics + advisory learner...")
               run_post_market_analytics()
               action_ran = True
           elif event_schedule == "25 21 * * 1-5":
@@ -340,6 +245,8 @@ jobs:
               action_ran = True
               send_cycle_summary = False
           else:
+              # Off-hours advisory scan (triggered by '0 */4 * * 1-5' cron or
+              # manual dispatch without a mode).
               now = datetime.now(timezone.utc)
               if now.weekday() == 6 and now.hour == 17:
                   print("Running weekly portfolio review...")
@@ -352,7 +259,7 @@ jobs:
               elif now.weekday() < 5 and now.hour == 21 and now.minute < 10:
                   print("Running nightly sweep...")
                   run_nightly_sweep()
-                  print("Running post-market analytics...")
+                  print("Running post-market analytics + advisory learner...")
                   run_post_market_analytics()
                   action_ran = True
               elif now.weekday() < 5 and now.hour == 21 and 20 <= now.minute < 35:
@@ -360,26 +267,15 @@ jobs:
                   run_daily_eod_review()
                   action_ran = True
                   send_cycle_summary = False
-              elif _should_run_swing_recheck(now):
-                  print("Running daily swing re-evaluation...")
-                  re_evaluate_swing_positions()
-                  action_ran = True
               else:
-                  advisory_result = None
                   advisory_enabled = _truthy(os.getenv("ADVISORY_MODE"), False)
-                  advisory_auto = _truthy(os.getenv("ADVISORY_AUTO_RUN"), True)
-                  advisory_window = now.weekday() < 5 and (7 <= now.hour <= 9 or 13 <= now.hour <= 15 or 18 <= now.hour <= 19)
-                  if advisory_enabled and advisory_auto and advisory_window:
-                      print("Running advisory scan...")
-                      advisory_result = run_advisory_cycle()
-                      print(f"Advisory result: {advisory_result}")
+                  if advisory_enabled:
+                      print("Running off-hours advisory scan...")
+                      run_advisory_cycle()
                       action_ran = True
-                  if is_regular_us_market_hours(now):
-                      print("Running signal cycle...")
-                      run_signal_cycle()
-                      action_ran = True
-                  elif advisory_result is None:
-                      print("Outside trading window — no action.")
+                  else:
+                      print("Advisory mode not enabled — no action.")
+
           with open(os.environ["GITHUB_ENV"], "a") as fh:
               fh.write(f"AGENT_ACTION_RAN={'true' if action_ran else 'false'}\n")
               fh.write(f"SEND_CYCLE_SUMMARY={'true' if send_cycle_summary else 'false'}\n")
