@@ -1451,6 +1451,34 @@ def get_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 
         return []
 
 
+def get_latest_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 100) -> list:
+    """Return the latest scan-log row per symbol for the dashboard's current scan table."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(hours=hours_back)).isoformat() + "Z"
+        db = get_client()
+        q = (db.table("advisory_scan_log")
+             .select("*")
+             .gte("scanned_at", cutoff)
+             .order("scanned_at", desc=True)
+             .limit(max(limit * 5, 200)))
+        if market and market.lower() != "all":
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        rows = result.data or []
+        latest_by_symbol = {}
+        for row in rows:
+            symbol = row.get("data_symbol")
+            if not symbol or symbol in latest_by_symbol:
+                continue
+            latest_by_symbol[symbol] = row
+            if len(latest_by_symbol) >= limit:
+                break
+        return list(latest_by_symbol.values())
+    except Exception as e:
+        print(f"[LATEST_ADVISORY_SCAN_LOG_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 # ── Advisory virtual positions ────────────────────────────────────────────────
 
 def create_virtual_position(record: dict) -> dict:

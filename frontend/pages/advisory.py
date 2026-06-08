@@ -308,6 +308,7 @@ def render():
     get_advisory_trades = getattr(db_client, "get_advisory_trades", _missing_rows)
     get_advisory_auto_trades = getattr(db_client, "get_advisory_auto_trades", _missing_rows)
     _get_advisory_scan_log = getattr(db_client, "get_advisory_scan_log", None)
+    _get_latest_scan_log = getattr(db_client, "get_latest_advisory_scan_log", None)
     _get_advisory_scoreboard = getattr(db_client, "get_advisory_scoreboard", None)
     _get_latest_scan_snapshots = getattr(db_client, "get_latest_advisory_scan_snapshots", None)
     _get_advisory_attribution_summary = getattr(db_client, "get_advisory_attribution_summary", None)
@@ -363,7 +364,9 @@ def render():
 
     st.divider()
 
-    if _get_latest_scan_snapshots is not None:
+    if _get_latest_scan_log is not None:
+        _render_live_scan_table(_get_latest_scan_log)
+    elif _get_latest_scan_snapshots is not None:
         _render_live_scan_table(_get_latest_scan_snapshots)
 
     st.divider()
@@ -901,7 +904,7 @@ def _render_live_scan_table(fetch_fn):
         st.write("")
         if st.button("Refresh", key="latest_scan_refresh", help="Reload the latest scan snapshot"):
             st.rerun()
-    st.caption("Current per-ticker advisory state from the latest scan cycle, including non-alert gate reasons.")
+    st.caption("Current per-ticker advisory state from the latest scan data, including non-alert gate reasons.")
 
     c_market, c_limit, _ = st.columns([2, 2, 6])
     with c_market:
@@ -912,15 +915,16 @@ def _render_live_scan_table(fetch_fn):
 
     rows = fetch_fn(market=market, limit=limit) or []
     if not rows:
-        st.info("No scan snapshots yet. Run one advisory cycle after applying the scan snapshot migration.")
+        st.info("No scan data yet. Run one advisory cycle after applying the scan-log migration.")
         return
 
     latest_cycle = rows[0].get("cycle_id")
-    latest_rows = [r for r in rows if r.get("cycle_id") == latest_cycle] or rows
+    latest_rows = [r for r in rows if r.get("cycle_id") == latest_cycle] if latest_cycle else rows
+    latest_rows = latest_rows or rows
     table = pd.DataFrame([
         {
-            "updated": _format_time(r.get("cycle_started_at") or r.get("created_at")),
-            "window": r.get("window"),
+            "updated": _format_time(r.get("scanned_at") or r.get("cycle_started_at") or r.get("created_at")),
+            "window": r.get("session_window") or r.get("window") or "—",
             "symbol": r.get("data_symbol"),
             "primary": r.get("primary_symbol") or r.get("data_symbol"),
             "name": r.get("broker_display_name"),
@@ -930,7 +934,16 @@ def _render_live_scan_table(fetch_fn):
             "composite": float(r.get("composite_score") or 0),
             "ev_pct": float(r.get("ev_net_pct") or 0) if r.get("ev_net_pct") is not None else None,
             "breakout": float(r.get("breakout_quality") or 0) if r.get("breakout_quality") is not None else None,
-            "price": float(r.get("last_price") or 0) if r.get("last_price") is not None else None,
+            "price": float(r.get("price_native") or r.get("last_price") or 0)
+            if (r.get("price_native") is not None or r.get("last_price") is not None)
+            else None,
+            "vwap": float(r.get("vwap_score") or 0) if r.get("vwap_score") is not None else None,
+            "macd": float(r.get("macd_score") or 0) if r.get("macd_score") is not None else None,
+            "rs": float(r.get("rel_strength_score") or 0) if r.get("rel_strength_score") is not None else None,
+            "tape": float(r.get("tape_score") or 0) if r.get("tape_score") is not None else None,
+            "rsi": float(r.get("rsi_score") or 0) if r.get("rsi_score") is not None else None,
+            "orb": bool(r.get("orb_active")) if r.get("orb_active") is not None else None,
+            "downside": bool(r.get("downside_risk")),
             "gate": r.get("gate_reason") or r.get("status"),
         }
         for r in latest_rows
