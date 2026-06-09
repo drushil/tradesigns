@@ -34,10 +34,10 @@ st.set_page_config(
 inject_theme()
 
 PAGES = {
-    "◉ Advisory Desk": "advisory",
-    "◇ Pre-Market": "premarket",
-    "▣ Intelligence": "intelligence",
-    "◧ Operations": "operations",
+    "Advisory Desk": "advisory",
+    "Pre-Market": "premarket",
+    "Intelligence": "intelligence",
+    "Operations": "operations",
 }
 
 if os.getenv("SHOW_LEGACY_DEBUG", "false").lower() in {"1", "true", "yes"}:
@@ -57,22 +57,22 @@ if os.getenv("SHOW_LEGACY_DEBUG", "false").lower() in {"1", "true", "yes"}:
 _SLUG_TO_PAGE = {module: label for label, module in PAGES.items()}
 # Also accept short aliases
 _SLUG_TO_PAGE.update({
-    "desk": "◉ Advisory Desk",
-    "advisory_desk": "◉ Advisory Desk",
-    "pre-market": "◇ Pre-Market",
-    "pre_market": "◇ Pre-Market",
-    "premarket": "◇ Pre-Market",
-    "outcomes": "▣ Intelligence",
-    "journal": "▣ Intelligence",
-    "recommendations": "▣ Intelligence",
-    "learning": "▣ Intelligence",
-    "ops": "◧ Operations",
-    "operations": "◧ Operations",
-    "reviews": "◧ Operations",
-    "eod": "◧ Operations",
-    "portfolio": "◧ Operations",
-    "config": "◧ Operations",
-    "logs": "◧ Operations",
+    "desk": "Advisory Desk",
+    "advisory_desk": "Advisory Desk",
+    "pre-market": "Pre-Market",
+    "pre_market": "Pre-Market",
+    "premarket": "Pre-Market",
+    "outcomes": "Intelligence",
+    "journal": "Intelligence",
+    "recommendations": "Intelligence",
+    "learning": "Intelligence",
+    "ops": "Operations",
+    "operations": "Operations",
+    "reviews": "Operations",
+    "eod": "Operations",
+    "portfolio": "Operations",
+    "config": "Operations",
+    "logs": "Operations",
 })
 
 def _query_param_present(name: str) -> bool:
@@ -88,7 +88,7 @@ def _page_from_query_params(page_names: list) -> str:
     """Return the page label to select based on ?page= or ?mark_id= query params."""
     try:
         if _query_param_present("mark_id"):
-            return "◉ Advisory Desk"
+            return "Advisory Desk"
         slug = st.query_params.get("page", "")
         if isinstance(slug, list):
             slug = slug[0] if slug else ""
@@ -133,7 +133,7 @@ with st.sidebar:
     if "main_navigation" not in st.session_state:
         st.session_state["main_navigation"] = default_page
     elif _query_param_present("mark_id"):
-        st.session_state["main_navigation"] = "◉ Advisory Desk"
+        st.session_state["main_navigation"] = "Advisory Desk"
     selection = st.radio(
         "Navigation",
         page_names,

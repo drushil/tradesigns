@@ -106,7 +106,7 @@ def inject_theme():
         }}
 
         .td-brand {{
-          padding: 8px 2px 10px;
+          padding: 16px 2px 10px;
           border-bottom: 1px solid var(--td-border);
         }}
 
