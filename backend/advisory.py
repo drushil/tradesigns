@@ -474,7 +474,8 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
     now_cet = now_cet or _now_cet()
     minutes = now_cet.hour * 60 + now_cet.minute
     if market == "EU":
-        if 7 * 60 + 30 <= minutes < 9 * 60 + 15:
+        tr_start = _env_int("ADVISORY_TR_MORNING_START_MINUTES", 7 * 60)
+        if tr_start <= minutes < 9 * 60 + 15:
             return "tr_morning_watch"
         if 9 * 60 + 15 <= minutes <= 11 * 60:
             return "eu_open"
@@ -497,9 +498,10 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
 
 
 def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
+    tr_start_minutes = _env_int("ADVISORY_TR_MORNING_START_MINUTES", 7 * 60)
     starts = {
         "EU": {
-            "tr_morning_watch": (7, 30),
+            "tr_morning_watch": (tr_start_minutes // 60, tr_start_minutes % 60),
             "eu_open":          (9, 15),
             "eu_catalyst_only": (14, 0),
         },

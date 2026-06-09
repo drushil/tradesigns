@@ -5,7 +5,8 @@ name: Trading Agent - Advisory EU
 # Runs independently from advisory-us.yml so EU and US cycles never compete.
 #
 # Trigger setup (cron-job.org):
-#   Schedule: every 2 min, 07:00-15:30 UTC, Mon-Fri
+#   Schedule: every 2 min, 05:00-14:00 UTC, Mon-Fri during CEST
+#             (06:00-15:00 UTC during CET)
 #   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
 #   Body: {"event_type": "advisory-eu-cycle"}
 
@@ -105,6 +106,7 @@ jobs:
           ADVISORY_SHADOW_DISCORD_MIN_GRADE: "${{ vars.ADVISORY_SHADOW_DISCORD_MIN_GRADE }}"
           ADVISORY_US_MIN_MINUTES_AFTER_OPEN: "${{ vars.ADVISORY_US_MIN_MINUTES_AFTER_OPEN }}"
           ADVISORY_US_EARLY_MIN_ROWS: "${{ vars.ADVISORY_US_EARLY_MIN_ROWS }}"
+          ADVISORY_TR_MORNING_START_MINUTES: "${{ vars.ADVISORY_TR_MORNING_START_MINUTES }}"
           ADVISORY_LATE_CHASE_ATR_MULT: "${{ vars.ADVISORY_LATE_CHASE_ATR_MULT }}"
           ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
           ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"

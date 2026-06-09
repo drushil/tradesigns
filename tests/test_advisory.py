@@ -44,7 +44,8 @@ def _cfg(**overrides):
 def test_window_name_enforces_trade_republic_friendly_sessions():
     berlin = timezone(timedelta(hours=2))
 
-    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 29, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 6, 59, tzinfo=berlin)) is None
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 0, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 0, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) == "tr_morning_watch"
@@ -62,6 +63,7 @@ def test_trade_republic_morning_start_can_be_lowered_after_data_verification(mon
     berlin = timezone(timedelta(hours=2))
     monkeypatch.setenv("ADVISORY_TR_MORNING_START_MINUTES", "450")
 
+    assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 29, tzinfo=berlin)) is None
     assert advisory._window_name("EU", datetime(2026, 5, 15, 7, 30, tzinfo=berlin)) == "tr_morning_watch"
 
 
