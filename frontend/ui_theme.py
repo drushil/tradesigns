@@ -26,17 +26,47 @@ def inject_theme():
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
 
         :root {{
-          --td-bg: #080a0d;
-          --td-surface: {SURFACE};
-          --td-surface-soft: {SURFACE_SOFT};
-          --td-border: {BORDER};
-          --td-text: #eef2f7;
-          --td-muted: {MUTED};
-          --td-positive: {POSITIVE};
-          --td-negative: {NEGATIVE};
-          --td-warning: {WARNING};
-          --td-info: {INFO};
-          --td-accent: {ACCENT};
+          color-scheme: light;
+          --td-bg: #f7f8fa;
+          --td-surface: #ffffff;
+          --td-surface-soft: #f1f3f5;
+          --td-border: rgba(15, 23, 42, 0.12);
+          --td-text: #111827;
+          --td-heading: #07090c;
+          --td-muted: #667085;
+          --td-positive: #047857;
+          --td-negative: #be123c;
+          --td-warning: #b45309;
+          --td-info: #2563eb;
+          --td-accent: #111827;
+          --td-sidebar: #ffffff;
+          --td-hover: rgba(15, 23, 42, 0.055);
+          --td-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+          --td-tooltip-bg: #ffffff;
+          --td-tooltip-text: #111827;
+        }}
+
+        @media (prefers-color-scheme: dark) {{
+          :root {{
+            color-scheme: dark;
+            --td-bg: #080a0d;
+            --td-surface: #111418;
+            --td-surface-soft: #171b21;
+            --td-border: rgba(148, 163, 184, 0.18);
+            --td-text: #eef2f7;
+            --td-heading: #f8fafc;
+            --td-muted: #8b949e;
+            --td-positive: #34d399;
+            --td-negative: #fb7185;
+            --td-warning: #fbbf24;
+            --td-info: #60a5fa;
+            --td-accent: #f8fafc;
+            --td-sidebar: #090b0f;
+            --td-hover: rgba(255, 255, 255, 0.055);
+            --td-shadow: 0 16px 40px rgba(0, 0, 0, 0.22);
+            --td-tooltip-bg: #05070a;
+            --td-tooltip-text: #dbe7f3;
+          }}
         }}
 
         html, body, [class*="css"] {{
@@ -45,38 +75,43 @@ def inject_theme():
         }}
 
         .stApp {{
-          background:
-            linear-gradient(180deg, rgba(12, 16, 22, 0.92), rgba(8, 10, 13, 1) 32%),
-            #080a0d;
+          background: var(--td-bg);
           color: var(--td-text);
         }}
 
         .block-container {{
-          padding-top: 3.25rem;
+          padding-top: 2.25rem;
           padding-bottom: 3rem;
           max-width: 1440px;
         }}
 
         div[data-testid="stSidebar"] {{
-          background: #090b0f;
+          background: var(--td-sidebar);
           border-right: 1px solid var(--td-border);
+        }}
+
+        div[data-testid="stSidebar"] section {{
+          background: var(--td-sidebar);
         }}
 
         div[data-testid="stSidebar"] [role="radiogroup"] label {{
           border-radius: 8px;
-          padding: 4px 8px;
+          padding: 6px 9px;
+          min-height: 36px;
+          color: var(--td-text);
         }}
 
         div[data-testid="stSidebar"] [role="radiogroup"] label:hover {{
-          background: rgba(255, 255, 255, 0.04);
+          background: var(--td-hover);
         }}
 
         .td-brand {{
-          padding: 8px 2px 2px;
+          padding: 8px 2px 10px;
+          border-bottom: 1px solid var(--td-border);
         }}
 
         .td-brand-title {{
-          color: #f8fafc;
+          color: var(--td-heading);
           font-size: 17px;
           font-weight: 700;
           letter-spacing: 0;
@@ -94,9 +129,9 @@ def inject_theme():
           justify-content: space-between;
           align-items: flex-end;
           gap: 20px;
-          padding: 4px 0 20px;
+          padding: 2px 0 22px;
           border-bottom: 1px solid var(--td-border);
-          margin-bottom: 18px;
+          margin-bottom: 20px;
         }}
 
         .td-eyebrow {{
@@ -109,8 +144,8 @@ def inject_theme():
         }}
 
         .td-page-title {{
-          color: #f8fafc;
-          font-size: 31px;
+          color: var(--td-heading);
+          font-size: 32px;
           font-weight: 700;
           letter-spacing: 0;
           line-height: 1.12;
@@ -123,6 +158,59 @@ def inject_theme():
           font-size: 14px;
           line-height: 1.55;
           margin-top: 8px;
+        }}
+
+        .td-toolbar {{
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 14px;
+          padding: 14px;
+          margin: 2px 0 18px;
+          border: 1px solid var(--td-border);
+          border-radius: 8px;
+          background: var(--td-surface);
+          box-shadow: var(--td-shadow);
+        }}
+
+        .td-toolbar-title {{
+          color: var(--td-heading);
+          font-size: 14px;
+          font-weight: 750;
+          margin-bottom: 3px;
+        }}
+
+        .td-toolbar-copy {{
+          color: var(--td-muted);
+          font-size: 12px;
+          line-height: 1.4;
+        }}
+
+        .td-insight-grid {{
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 12px;
+          margin: 8px 0 16px;
+        }}
+
+        .td-insight-card {{
+          border: 1px solid var(--td-border);
+          border-radius: 8px;
+          background: var(--td-surface);
+          padding: 14px;
+          min-height: 92px;
+        }}
+
+        .td-insight-card strong {{
+          color: var(--td-heading);
+          font-size: 14px;
+        }}
+
+        .td-insight-card div {{
+          color: var(--td-muted);
+          font-size: 12px;
+          line-height: 1.45;
+          margin-top: 6px;
         }}
 
         .td-header-meta {{
@@ -142,8 +230,8 @@ def inject_theme():
           padding: 0 10px;
           border-radius: 999px;
           border: 1px solid var(--td-border);
-          background: rgba(255, 255, 255, 0.035);
-          color: #cbd5e1;
+          background: var(--td-hover);
+          color: var(--td-text);
           font-size: 12px;
           font-weight: 600;
           white-space: nowrap;
@@ -167,10 +255,8 @@ def inject_theme():
           margin-bottom: 16px;
           border: 1px solid var(--td-border);
           border-radius: 8px;
-          background:
-            linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.015)),
-            var(--td-surface);
-          box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+          background: var(--td-surface);
+          box-shadow: var(--td-shadow);
         }}
 
         .td-has-tooltip {{
@@ -189,8 +275,8 @@ def inject_theme():
           padding: 9px 11px;
           border-radius: 7px;
           border: 1px solid rgba(148, 163, 184, 0.28);
-          background: #05070a;
-          color: #dbe7f3;
+          background: var(--td-tooltip-bg);
+          color: var(--td-tooltip-text);
           font-size: 12px;
           font-weight: 500;
           line-height: 1.35;
@@ -210,7 +296,7 @@ def inject_theme():
           width: 10px;
           height: 10px;
           transform: rotate(45deg);
-          background: #05070a;
+          background: var(--td-tooltip-bg);
           border-left: 1px solid rgba(148, 163, 184, 0.28);
           border-top: 1px solid rgba(148, 163, 184, 0.28);
           pointer-events: none;
@@ -239,7 +325,7 @@ def inject_theme():
         }}
 
         .td-metric-value {{
-          color: #f8fafc;
+          color: var(--td-heading);
           font-family: 'DM Mono', monospace;
           font-size: 25px;
           font-weight: 500;
@@ -277,7 +363,7 @@ def inject_theme():
         }}
 
         .td-section-title {{
-          color: #f1f5f9;
+          color: var(--td-heading);
           font-size: 15px;
           font-weight: 700;
           letter-spacing: 0;
@@ -293,9 +379,7 @@ def inject_theme():
         }}
 
         .signal-card, .td-panel {{
-          background:
-            linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.012)),
-            var(--td-surface);
+          background: var(--td-surface);
           border: 1px solid var(--td-border);
           border-radius: 8px;
           padding: 14px 16px;
@@ -340,11 +424,74 @@ def inject_theme():
           border: 1px solid var(--td-border);
         }}
 
+        div[data-testid="stVerticalBlockBorderWrapper"] {{
+          border-color: var(--td-border);
+          background: var(--td-surface);
+        }}
+
+        div[data-baseweb="tab-list"] {{
+          gap: 6px;
+          border-bottom: 1px solid var(--td-border);
+        }}
+
+        button[data-baseweb="tab"] {{
+          border-radius: 8px 8px 0 0;
+          color: var(--td-muted);
+          font-weight: 650;
+        }}
+
+        button[data-baseweb="tab"][aria-selected="true"] {{
+          color: var(--td-heading);
+          background: var(--td-surface);
+        }}
+
+        div[data-testid="stSegmentedControl"] label {{
+          background: var(--td-surface);
+          border-color: var(--td-border);
+          color: var(--td-text);
+        }}
+
+        div[data-testid="stSegmentedControl"] label[data-baseweb="radio"] {{
+          border-radius: 8px;
+        }}
+
+        div[data-baseweb="select"] > div,
+        div[data-baseweb="input"] input,
+        textarea,
+        input {{
+          background: var(--td-surface);
+          color: var(--td-text);
+          border-color: var(--td-border);
+        }}
+
+        div[data-baseweb="popover"],
+        div[data-baseweb="menu"] {{
+          background: var(--td-surface);
+          color: var(--td-text);
+        }}
+
+        label, p, span {{
+          letter-spacing: 0;
+        }}
+
         div[data-testid="stDataFrame"] {{
           border: 1px solid var(--td-border);
           border-radius: 8px;
           overflow: hidden;
           margin-top: 0 !important;
+        }}
+
+        .stButton > button {{
+          border-radius: 8px;
+          border: 1px solid var(--td-border);
+          background: var(--td-surface);
+          color: var(--td-heading);
+          font-weight: 650;
+        }}
+
+        .stButton > button:hover {{
+          border-color: var(--td-heading);
+          color: var(--td-heading);
         }}
 
         .element-container:has(div[data-testid="stDataFrame"]) {{
@@ -364,6 +511,13 @@ def inject_theme():
           margin: 24px 0;
         }}
 
+        @media (prefers-color-scheme: dark) {{
+          .stApp {{
+            background: var(--td-bg);
+            color: var(--td-text);
+          }}
+        }}
+
         @media (max-width: 760px) {{
           .td-page-header {{
             display: block;
@@ -377,6 +531,12 @@ def inject_theme():
           }}
           .td-metric-value {{
             font-size: 21px;
+          }}
+          .td-toolbar {{
+            display: block;
+          }}
+          .td-insight-grid {{
+            grid-template-columns: 1fr;
           }}
         }}
         </style>
@@ -450,20 +610,20 @@ def panel_html(title: str, body: str, meta: str | None = None) -> str:
     return (
         '<div class="td-panel">'
         f'<div class="signal-name">{html.escape(title)}</div>'
-        f'<div style="color:#e5edf7;font-size:14px;line-height:1.45">{body}</div>'
+        f'<div style="color:var(--td-text);font-size:14px;line-height:1.45">{body}</div>'
         f'{meta_html}</div>'
     )
 
 
 def apply_plotly_theme(fig, *, height: int | None = None, showlegend: bool | None = None):
     layout = dict(
-        template="plotly_dark",
+        template="plotly_white",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(gridcolor="rgba(148, 163, 184, 0.12)", zerolinecolor="rgba(148, 163, 184, 0.16)"),
         yaxis=dict(gridcolor="rgba(148, 163, 184, 0.12)", zerolinecolor="rgba(148, 163, 184, 0.16)"),
-        font=dict(family="Inter, sans-serif", color="#cbd5e1", size=12),
+        font=dict(family="Inter, sans-serif", color="#667085", size=12),
     )
     if height is not None:
         layout["height"] = height

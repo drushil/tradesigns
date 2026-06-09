@@ -25,8 +25,8 @@ except st.errors.StreamlitSecretNotFoundError:
     pass
 
 st.set_page_config(
-    page_title="AI Trading Agent",
-    page_icon="📈",
+    page_title="Tradesigns Advisory",
+    page_icon="◉",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -34,32 +34,45 @@ st.set_page_config(
 inject_theme()
 
 PAGES = {
-    "📊 Overview":         "overview",
-    "📅 EOD Review":       "eod_review",
-    "🚧 Blocked Ops":      "blocked_opportunities",
-    "📡 Live Signals":     "signals",
-    "🌅 Pre-Market":       "premarket",
-    "🎯 Advisory":         "advisory",
-    "🔄 Trades":           "trades",
-    "📈 Performance":      "performance",
-    "🏆 Grading":          "grading",
-    "🧠 Learning":         "learning",
-    "💰 Yield & Sweep":    "yield",
-    "📋 Portfolio Review": "portfolio_review",
-    "⚙️  Config":          "config_page",
-    "📋 Agent Logs":       "logs",
+    "◉ Advisory Desk": "advisory",
+    "◇ Pre-Market": "premarket",
+    "▣ Intelligence": "intelligence",
+    "◧ Operations": "operations",
 }
+
+if os.getenv("SHOW_LEGACY_DEBUG", "false").lower() in {"1", "true", "yes"}:
+    PAGES.update({
+        "· Overview Legacy": "overview",
+        "· Raw Signals": "signals",
+        "· Legacy Trades": "trades",
+        "· Performance": "performance",
+        "· Grading": "grading",
+        "· Blocked Ops": "blocked_opportunities",
+        "· Yield Sweep": "yield",
+        "· Old Learning": "learning",
+        "· Advisory Learning": "advisory_learning",
+    })
 
 # Reverse map: module slug → full page label (for ?page= deep-links)
 _SLUG_TO_PAGE = {module: label for label, module in PAGES.items()}
 # Also accept short aliases
 _SLUG_TO_PAGE.update({
-    "eod":       "📅 EOD Review",
-    "blocked":   "🚧 Blocked Ops",
-    "pre-market": "🌅 Pre-Market",
-    "pre_market": "🌅 Pre-Market",
-    "portfolio": "📋 Portfolio Review",
-    "config":    "⚙️  Config",
+    "desk": "◉ Advisory Desk",
+    "advisory_desk": "◉ Advisory Desk",
+    "pre-market": "◇ Pre-Market",
+    "pre_market": "◇ Pre-Market",
+    "premarket": "◇ Pre-Market",
+    "outcomes": "▣ Intelligence",
+    "journal": "▣ Intelligence",
+    "recommendations": "▣ Intelligence",
+    "learning": "▣ Intelligence",
+    "ops": "◧ Operations",
+    "operations": "◧ Operations",
+    "reviews": "◧ Operations",
+    "eod": "◧ Operations",
+    "portfolio": "◧ Operations",
+    "config": "◧ Operations",
+    "logs": "◧ Operations",
 })
 
 def _query_param_present(name: str) -> bool:
@@ -75,7 +88,7 @@ def _page_from_query_params(page_names: list) -> str:
     """Return the page label to select based on ?page= or ?mark_id= query params."""
     try:
         if _query_param_present("mark_id"):
-            return "🎯 Advisory"
+            return "◉ Advisory Desk"
         slug = st.query_params.get("page", "")
         if isinstance(slug, list):
             slug = slug[0] if slug else ""
@@ -108,8 +121,8 @@ with st.sidebar:
     st.markdown(
         """
         <div class="td-brand">
-          <div class="td-brand-title">AI Trading Agent</div>
-          <div class="td-brand-subtitle">Paper trading command center</div>
+          <div class="td-brand-title">Tradesigns Advisory</div>
+          <div class="td-brand-subtitle">Human-in-the-loop trading desk</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -117,10 +130,16 @@ with st.sidebar:
     st.markdown("---")
     page_names = list(PAGES.keys())
     default_page = _page_from_query_params(page_names)
+    if "main_navigation" not in st.session_state:
+        st.session_state["main_navigation"] = default_page
+    elif _query_param_present("mark_id"):
+        st.session_state["main_navigation"] = "◉ Advisory Desk"
     selection = st.radio(
         "Navigation",
         page_names,
-        index=page_names.index(default_page),
+        index=page_names.index(st.session_state["main_navigation"])
+        if st.session_state["main_navigation"] in page_names else page_names.index(default_page),
+        key="main_navigation",
         label_visibility="collapsed",
         help=help_text("Navigation"),
     )
@@ -133,12 +152,12 @@ with st.sidebar:
         latest = logs[0] if logs else {}
         last_seen = str(latest.get("logged_at") or latest.get("created_at") or "—")
         errors = sum(1 for row in logs if str(row.get("level") or "").upper() == "ERROR")
-        health_color = "#ff5c5c" if errors else "#00d4a0"
+        health_color = "var(--td-negative)" if errors else "var(--td-positive)"
         health_label = "needs attention" if errors else "healthy"
         st.markdown(
             f"""
-            <div style="font-size:11px;color:#777;line-height:1.55">
-              <div style="text-transform:uppercase;letter-spacing:.08em;color:#555">System health</div>
+            <div style="font-size:11px;color:var(--td-muted);line-height:1.55">
+              <div style="text-transform:uppercase;letter-spacing:.08em;color:var(--td-muted)">Advisory health</div>
               <div><span style="color:{health_color}">●</span> {health_label}</div>
               <div>Last log: {last_seen[:16]}</div>
               <div>Errors in recent log: {errors}</div>
@@ -148,12 +167,12 @@ with st.sidebar:
         )
     except Exception:
         st.markdown(
-            "<div style='font-size:11px;color:#777;'>System health unavailable</div>",
+            "<div style='font-size:11px;color:var(--td-muted);'>System health unavailable</div>",
             unsafe_allow_html=True,
         )
     st.markdown("---")
     st.markdown(
-        "<div style='font-size:11px;color:#555;'>Paper trading · Alpaca + Claude</div>",
+        "<div style='font-size:11px;color:var(--td-muted);'>Advisory · Pre-market · Learning</div>",
         unsafe_allow_html=True,
     )
 

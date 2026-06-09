@@ -6,12 +6,12 @@ from frontend.ui_theme import page_header, status_pill
 
 
 LEVEL_COLORS = {
-    "INFO":     "#888",
-    "WARN":     "#ffd166",
-    "ERROR":    "#ff5c5c",
-    "TRADE":    "#00d4a0",
-    "SIGNAL":   "#6c63ff",
-    "LEARNING": "#4ecdc4",
+    "INFO":     "var(--td-muted)",
+    "WARN":     "var(--td-warning)",
+    "ERROR":    "var(--td-negative)",
+    "TRADE":    "var(--td-positive)",
+    "SIGNAL":   "var(--td-info)",
+    "LEARNING": "var(--td-heading)",
 }
 
 
@@ -37,7 +37,7 @@ def render():
         limit = selectbox("Show", [50, 100, 200, 500], index=1)
     with col_ref:
         st.markdown("<br>", unsafe_allow_html=True)
-        refresh = button("🔄 Refresh", width="stretch")
+        refresh = button("Refresh", width="stretch")
 
     level_filter = None if sel_level == "All" else sel_level
     logs = get_logs(level=level_filter, limit=limit)
@@ -54,10 +54,10 @@ def render():
         for i, (level, color) in enumerate(LEVEL_COLORS.items()):
             count = len(df_all[df_all["level"] == level]) if "level" in df_all.columns else 0
             badge_cols[i].markdown(f"""
-            <div style="text-align:center;background:#111;border:0.5px solid #222;
+            <div style="text-align:center;background:var(--td-surface);border:1px solid var(--td-border);
                  border-radius:8px;padding:8px">
               <div style="font-size:18px;font-weight:500;color:{color}">{count}</div>
-              <div style="font-size:10px;color:#555;text-transform:uppercase;
+              <div style="font-size:10px;color:var(--td-muted);text-transform:uppercase;
                     letter-spacing:.06em">{level}</div>
             </div>""", unsafe_allow_html=True)
 
@@ -101,12 +101,12 @@ def render():
 
         st.markdown(f"""
         <div style="display:flex;gap:12px;align-items:baseline;padding:7px 0;
-             border-bottom:0.5px solid #111;font-size:12px">
-          <span style="color:#444;font-family:'DM Mono',monospace;
+             border-bottom:1px solid var(--td-border);font-size:12px">
+          <span style="color:var(--td-muted);font-family:'DM Mono',monospace;
                 min-width:140px;flex-shrink:0">{ts}</span>
           <span style="color:{color};font-weight:500;min-width:70px;
                 font-family:'DM Mono',monospace">{level}</span>
-          <span style="color:#ccc;min-width:180px;flex-shrink:0">{event}</span>
-          <span style="color:#555;font-family:'DM Mono',monospace;
+          <span style="color:var(--td-text);min-width:180px;flex-shrink:0">{event}</span>
+          <span style="color:var(--td-muted);font-family:'DM Mono',monospace;
                 overflow:hidden;text-overflow:ellipsis">{detail_str}</span>
         </div>""", unsafe_allow_html=True)

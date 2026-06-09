@@ -14,7 +14,7 @@ try:
 except ImportError:
     ZoneInfo = None
 
-from frontend.ui_theme import metric_card, status_pill
+from frontend.ui_theme import metric_card, page_header, status_pill
 
 
 CLASS_TONE = {
@@ -64,8 +64,12 @@ def _safe_float(value, default=0.0) -> float:
 
 
 def render():
-    st.title("Pre-Market Radar")
-    st.caption("Read-only gap watchlist with catalyst, liquidity, and opening-plan context.")
+    page_header(
+        "Pre-Market",
+        "Read-only gap watchlist with catalyst, liquidity, and opening-plan context.",
+        eyebrow="Radar",
+        pills=[status_pill("before open", "info")],
+    )
 
     try:
         from database import client as db_client
@@ -145,4 +149,4 @@ def render():
         summary = pd.DataFrame(
             [{"classification": k.replace("_", " "), "count": v} for k, v in counts.items()]
         )
-        st.dataframe(summary, hide_index=True, use_container_width=True)
+        st.dataframe(summary, hide_index=True, width="stretch")

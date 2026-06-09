@@ -34,10 +34,10 @@ STAGE_TONE = {
 }
 
 STAGE_LABEL = {
-    "trade": "🟢 TRADE",
-    "watch": "🟡 WATCH",
-    "ignition": "🔥 IGNITION",
-    "downside": "🔻 DOWNSIDE",
+    "trade": "TRADE",
+    "watch": "WATCH",
+    "ignition": "IGNITION",
+    "downside": "DOWNSIDE",
 }
 
 
@@ -278,9 +278,9 @@ def _render_live_scan_log(fetch_fn):
 
     try:
         styled = df.style.apply(_row_color, axis=1)
-        st.dataframe(styled, hide_index=True, use_container_width=True)
+        st.dataframe(styled, hide_index=True, width="stretch")
     except Exception:
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, width="stretch")
 
     with st.expander("Gate Reason Legend", expanded=False):
         for reason, desc in _GATE_REASON_LABELS.items():
@@ -330,7 +330,7 @@ def render():
     last_alert_ts = today_rows[0].get("created_at") if today_rows else None
 
     page_header(
-        "Advisory",
+        "Advisory Desk",
         "Trade Republic-friendly cards with EUR levels, ignition pings, "
         "tier escalation and on-demand ticker checks.",
         eyebrow="Discord Alerts",
@@ -350,9 +350,9 @@ def render():
 
     c1, c2, c3, c4 = st.columns(4)
     metric_card(c1, "Alerts today", len(today_rows), tone="info")
-    metric_card(c2, "🔥 Ignitions", by_stage["ignition"], tone="info")
-    metric_card(c3, "🟡 Watches", by_stage["watch"], tone="warning")
-    metric_card(c4, "🟢 Trades", by_stage["trade"], tone="positive")
+    metric_card(c2, "Ignitions", by_stage["ignition"], tone="info")
+    metric_card(c3, "Watches", by_stage["watch"], tone="warning")
+    metric_card(c4, "Trades", by_stage["trade"], tone="positive")
 
     st.divider()
 
@@ -384,10 +384,10 @@ def render():
     st.divider()
 
     # ── On-demand ticker scan ───────────────────────────────────────────────
-    st.subheader("🔍 Check a ticker on demand")
+    st.subheader("Check a ticker on demand")
     st.caption(
         "Runs the advisory scan pipeline against the chosen symbol right now — "
-        "same logic the cron runs every 5 min. Does not send to Discord and does "
+        "same scan pipeline used by scheduled advisory runs. Does not send to Discord and does "
         "not affect daily alert caps."
     )
 
@@ -429,7 +429,7 @@ def render():
     # ── Recent alert feed ──────────────────────────────────────────────────
     alerts_title, alerts_refresh = st.columns([8, 1])
     with alerts_title:
-        st.subheader("📡 Recent alerts (last 24h)")
+        st.subheader("Recent alerts (last 24h)")
     with alerts_refresh:
         st.write("")
         if st.button("Refresh", key="recent_alerts_refresh", help="Reload recent advisory alerts"):
@@ -635,7 +635,7 @@ def _render_open_positions(fetch_open_fn, record_exit_fn):
             "size": f"€{size_eur:.0f}" if size_eur else "—",
             "alerts": ", ".join(monitor.get("alerts") or []) or "—",
         })
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     for pos in positions:
         signal_id = int(pos.get("id"))
@@ -707,7 +707,7 @@ def _render_attribution_summary(summary_fn):
                 }
                 for r in summary["by_grade"]
             ]
-            st.dataframe(pd.DataFrame(grade_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(grade_rows), hide_index=True, width="stretch")
 
         if summary.get("by_ticker"):
             st.caption("By ticker")
@@ -721,7 +721,7 @@ def _render_attribution_summary(summary_fn):
                 }
                 for r in summary["by_ticker"]
             ]
-            st.dataframe(pd.DataFrame(ticker_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(ticker_rows), hide_index=True, width="stretch")
 
         if summary.get("signal_vs_execution"):
             st.caption("Signal vs execution (where 60m forward return is available)")
@@ -734,7 +734,7 @@ def _render_attribution_summary(summary_fn):
                 }
                 for r in summary["signal_vs_execution"]
             ]
-            st.dataframe(pd.DataFrame(sve_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(sve_rows), hide_index=True, width="stretch")
 
         if summary.get("missed_winners"):
             st.caption(
@@ -750,7 +750,7 @@ def _render_attribution_summary(summary_fn):
                 }
                 for r in summary["missed_winners"]
             ]
-            st.dataframe(pd.DataFrame(mw_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(mw_rows), hide_index=True, width="stretch")
 
 
 # ── Closed Advisory Trades ───────────────────────────────────────────────────
@@ -773,7 +773,7 @@ def _render_closed_advisory_trades(fetch_manual_fn, fetch_auto_fn=None):
     st.subheader("Closed advisory trades")
     st.caption(
         "Manual advisory trades and advisory-auto paper trades are tracked separately. "
-        "Regular autonomous agent P&L stays on the Trades and Performance pages."
+        "Longer outcome analysis lives in Intelligence."
     )
 
     def _history_frame(trades: list, label: str, caption: str):
@@ -833,7 +833,7 @@ def _render_closed_advisory_trades(fetch_manual_fn, fetch_auto_fn=None):
             }
             for row in summary_rows
         ])
-        st.dataframe(compare_df, hide_index=True, use_container_width=True)
+        st.dataframe(compare_df, hide_index=True, width="stretch")
 
 
 def _render_advisory_trade_table(trades):
@@ -880,9 +880,9 @@ def _render_advisory_trade_table(trades):
             try:
                 num = float(val.replace("€", "").replace(",", ""))
                 if num > 0:
-                    return "color: #00d4a0"
+                    return "color: var(--td-positive)"
                 if num < 0:
-                    return "color: #ff5c5c"
+                    return "color: var(--td-negative)"
             except ValueError:
                 pass
         return ""
@@ -890,7 +890,7 @@ def _render_advisory_trade_table(trades):
     st.dataframe(
         display_df.style.map(_highlight, subset=["P&L €", "P&L %"] if "P&L €" in display_df.columns else []),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -963,29 +963,19 @@ def _render_live_scan_table(fetch_fn):
 # ── Replay Scoreboard ───────────────────────────────────────────────────────
 
 def _fmt_ret(val) -> str:
-    """Format a forward-return value as a coloured +/-% string with emoji."""
+    """Format a forward-return value as a compact signed percent string."""
     try:
         v = float(val)
     except (TypeError, ValueError):
         return "—"
-    if v >= 0.5:
-        return f"🟢 {v:+.2f}%"
-    if v >= 0.1:
-        return f"🟡 {v:+.2f}%"
-    if v >= -0.1:
-        return f"⬜ {v:+.2f}%"
-    return f"🔴 {v:+.2f}%"
+    return f"{v:+.2f}%"
 
 
 def _fmt_win(rate_pct) -> str:
     if pd.isna(rate_pct):
         return "—"
     r = float(rate_pct)
-    if r >= 60:
-        return f"🟢 {r:.0f}%"
-    if r >= 45:
-        return f"🟡 {r:.0f}%"
-    return f"🔴 {r:.0f}%"
+    return f"{r:.0f}%"
 
 
 def _render_scoreboard(fetch_fn):
@@ -995,7 +985,7 @@ def _render_scoreboard(fetch_fn):
     except ImportError:
         px = None
 
-    st.subheader("📊 Replay Scoreboard")
+    st.subheader("Replay Scoreboard")
     st.caption(
         "Forward-return performance of advisory alerts, scored automatically "
         "5 / 15 / 30 / 60 min after each alert fires. "
@@ -1112,7 +1102,7 @@ def _render_scoreboard(fetch_fn):
             .drop(columns=["_sort"])
             .reset_index(drop=True)
         )
-        st.dataframe(agg_df, hide_index=True, use_container_width=True)
+        st.dataframe(agg_df, hide_index=True, width="stretch")
     else:
         st.info("Not enough data to build the breakdown table yet.")
 
@@ -1135,16 +1125,19 @@ def _render_scoreboard(fetch_fn):
                 color_continuous_scale=["#ef4444", "#6b7280", "#22c55e"],
                 color_continuous_midpoint=0,
                 labels={"avg_15m": "Avg 15m return (%)", "date": ""},
-                template="plotly_dark",
+                template="plotly_white",
                 height=220,
                 hover_data={"alerts": True, "avg_15m": ":.2f"},
             )
             fig.update_layout(
                 showlegend=False,
                 coloraxis_showscale=False,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(color="#667085"),
                 margin=dict(t=16, b=28, l=0, r=0),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # ── Ticker breakdown ──────────────────────────────────────────────────
     if "data_symbol" in df.columns:
@@ -1167,7 +1160,7 @@ def _render_scoreboard(fetch_fn):
                 "avg_15m": "avg 15m return",
                 "win_pct": "win %",
             })
-            st.dataframe(sym_agg, hide_index=True, use_container_width=True)
+            st.dataframe(sym_agg, hide_index=True, width="stretch")
 
 
 # ── On-demand preview ───────────────────────────────────────────────────────
@@ -1349,11 +1342,11 @@ def _render_preview(result: dict, symbol: str):
     ev_pct = result.get("ev_net_pct")
     flags = []
     if result.get("ignition_json"):
-        flags.append("🔥 Momentum ignition detected")
+        flags.append("Momentum ignition detected")
     if result.get("late_chase_json"):
         d = result["late_chase_json"]
         flags.append(
-            f"⚠️ Late-chase active — dev {d.get('pct_deviation')}% vs "
+            f"Late-chase active: dev {d.get('pct_deviation')}% vs "
             f"threshold {d.get('threshold_pct')}%"
         )
     if not flags:
