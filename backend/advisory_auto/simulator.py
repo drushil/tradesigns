@@ -65,6 +65,13 @@ SIM_CANCEL_GRADE_DROP = int(os.getenv("ADVISORY_AUTO_SIM_CANCEL_GRADE_DROP", "2"
 SIM_NEAR_T1_ARM_FRAC = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_ARM_FRAC", "0.8"))
 SIM_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_RETRACE_R", "0.5"))
 
+# Momentum-continuation simulator: for strong watch signals, measure the
+# alternative "buy the signal price" policy next to the normal pullback limit.
+SIM_MOMENTUM_ENABLED = (
+    os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_ENABLED", "true").strip().lower() != "false"
+)
+SIM_MOMENTUM_MIN_GRADE = os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_MIN_GRADE", "A")
+
 _GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
 
 
@@ -116,6 +123,44 @@ def _entry_policy_quality(fill_price: float,
         return round((fill_price - entry_min) / band, 3)
     except (TypeError, ValueError):
         return None
+
+
+def _float_or_none(value) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        val = float(value)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _signal_reference_price(sig: dict) -> Optional[float]:
+    """Best available price at the time the advisory card was generated."""
+    for key in ("reference_price", "price_native", "last_price"):
+        val = _float_or_none(sig.get(key))
+        if val:
+            return val
+
+    quality = sig.get("data_quality_json") or {}
+    if isinstance(quality, dict):
+        val = _float_or_none(quality.get("last_price"))
+        if val:
+            return val
+
+    sj = sig.get("signal_json") or {}
+    if isinstance(sj, dict):
+        for key in ("reference_price", "price_native", "last_price", "current_price", "price"):
+            val = _float_or_none(sj.get(key))
+            if val:
+                return val
+        atr = sj.get("atr_data") or {}
+        if isinstance(atr, dict):
+            val = _float_or_none(atr.get("current_price"))
+            if val:
+                return val
+
+    return None
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -317,6 +362,88 @@ def _create_chase_tracker_sims(market: str = "US") -> int:
         if "error" not in result:
             created += 1
             existing.add((sig_id, "chase_tracker"))
+    return created
+
+
+def _create_momentum_continuation_sims(market: str = "US") -> int:
+    """Create filled sims for strong watch signals that never reach trade stage.
+
+    This is intentionally independent of the executor's strict "trade" stage:
+    A/A+ watches often move without revisiting the pullback band, so this policy
+    measures buying the advisory reference price head-to-head against
+    watch_pullback rather than assuming "no trade" means "no edge".
+    """
+    if not SIM_MOMENTUM_ENABLED:
+        return 0
+    eligible = get_eligible_advisory_signals_for_simulation(
+        market=market, max_age_minutes=SIM_CREATION_LOOKBACK_MIN, limit=200
+    )
+    if not eligible:
+        return 0
+
+    min_rank = _grade_rank(SIM_MOMENTUM_MIN_GRADE)
+    existing = get_advisory_auto_sim_signal_ids()
+    created = 0
+    for sig in eligible:
+        sig_id = int(sig.get("id") or 0)
+        if not sig_id or (sig_id, "momentum_continuation") in existing:
+            continue
+        if _grade_rank(sig.get("grade")) < min_rank:
+            continue
+
+        sj = sig.get("signal_json") or {}
+        stage = str(sj.get("alert_stage") or "").lower() if isinstance(sj, dict) else ""
+        if stage != "watch":
+            continue
+
+        fill_price = _signal_reference_price(sig)
+        entry_min = float(sig.get("entry_min") or 0)
+        entry_max = float(sig.get("entry_max") or 0)
+        stop_price = float(sig.get("stop_price") or 0)
+        side = str(sig.get("side") or "BUY").upper()
+        if not (fill_price and stop_price and entry_min and entry_max):
+            continue
+        if side == "BUY" and fill_price <= stop_price:
+            continue
+        if side == "SELL" and fill_price >= stop_price:
+            continue
+
+        composite = sig.get("composite_score")
+        breakout = sig.get("breakout_quality")
+        fill_at = sig.get("created_at")
+        payload = {
+            "advisory_signal_id": sig_id,
+            "data_symbol": sig.get("data_symbol"),
+            "market": sig.get("market"),
+            "side": side,
+            "grade": sig.get("grade"),
+            "alert_stage": stage,
+            "mode": "momentum_continuation",
+            "composite_score": float(composite) if composite is not None else None,
+            "breakout_quality": float(breakout) if breakout is not None else None,
+            "currency": sig.get("currency"),
+            "entry_min": entry_min,
+            "entry_max": entry_max,
+            "stop_price": stop_price,
+            "target_1": float(sig.get("target_1")) if sig.get("target_1") is not None else None,
+            "target_2": float(sig.get("target_2")) if sig.get("target_2") is not None else None,
+            "suggested_size_eur": sig.get("suggested_size_eur"),
+            "simulated_at": fill_at,
+            "valid_until": sig.get("valid_until"),
+            "status": "filled",
+            "fill_at": fill_at,
+            "fill_price": round(float(fill_price), 4),
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+            "notes": {"synthetic_fill": "signal_reference_price"},
+            "entry_policy": "momentum_continuation",
+            "entry_policy_quality": _entry_policy_quality(fill_price, entry_min, entry_max),
+            "sim_version": SIM_VERSION,
+        }
+        result = insert_advisory_auto_simulation(payload)
+        if "error" not in result:
+            created += 1
+            existing.add((sig_id, "momentum_continuation"))
     return created
 
 
@@ -541,6 +668,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
     now_utc = datetime.now(timezone.utc)
     created = _create_pending_sims(market=market)
     created_chase = _create_chase_tracker_sims(market=market)
+    created_momentum = _create_momentum_continuation_sims(market=market)
     active = get_active_advisory_auto_simulations(limit=200)
     transitions: dict = {
         "pending_checked": 0,
@@ -615,6 +743,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "market": market,
         "created": created,
         "created_chase": created_chase,
+        "created_momentum": created_momentum,
         "active": len(active),
         "eod_closed": eod_closed,
         **transitions,
@@ -624,6 +753,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "market": market,
         "created": created,
         "created_chase": created_chase,
+        "created_momentum": created_momentum,
         "active": len(active),
         "eod_closed": eod_closed,
         **transitions,
@@ -647,6 +777,23 @@ def _us_session_close_utc(fill_at: datetime) -> Optional[datetime]:
         # close enough — the 30-min buffer in the caller absorbs the error.
         return fill_at.replace(hour=20, minute=0, second=0, microsecond=0,
                                tzinfo=timezone.utc)
+
+
+def _eod_close_price_fallback(sim: dict, session_close: datetime) -> Optional[float]:
+    """Return the last available close at/before session close.
+
+    _process_filled can legitimately return no last_price if yfinance's final
+    slice is empty. For EOD accounting, use the latest available 1m close from
+    the filled session before falling back to any previously stored last_price.
+    """
+    fill_at = _parse_dt(sim.get("fill_at"))
+    start = fill_at or (session_close - timedelta(hours=7))
+    bars = _fetch_1m_bars(str(sim.get("data_symbol") or ""), start, session_close)
+    if bars is not None and not bars.empty and "Close" in bars:
+        close = _float_or_none(bars["Close"].iloc[-1])
+        if close:
+            return close
+    return _float_or_none(sim.get("last_price"))
 
 
 def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> int:
@@ -714,6 +861,11 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
             else:
                 # No terminal — mark as closed_eod with win/loss status and new cols.
                 eod_price = float(update.get("last_price") or 0)
+                if eod_price <= 0:
+                    fallback_price = _eod_close_price_fallback(sim, session_close)
+                    eod_price = float(fallback_price or 0)
+                    if eod_price > 0:
+                        update["last_price"] = round(eod_price, 4)
                 if eod_price > 0 and fill_price > 0:
                     eod_win = (eod_price > fill_price) if side == "BUY" else (eod_price < fill_price)
                     eod_status = "closed_eod_win" if eod_win else "closed_eod_loss"
