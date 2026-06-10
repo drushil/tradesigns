@@ -67,20 +67,94 @@ def _to_dataframe(rows: list[dict], columns: list[str]) -> pd.DataFrame:
     return df[existing].copy() if existing else df
 
 
+def _display_table(df: pd.DataFrame):
+    if df.empty:
+        st.dataframe(df, hide_index=True, width="stretch")
+        return
+    df = df.rename(columns={
+        "utc_date": "Date",
+        "created_at": "Created",
+        "simulated_at": "Simulated",
+        "closed_at": "Closed",
+        "fill_at": "Filled",
+        "data_symbol": "Stock",
+        "ticker": "Stock",
+        "market": "Market",
+        "mode": "Mode",
+        "entry_policy": "Entry policy",
+        "policy_name": "Policy",
+        "grade": "Grade",
+        "side": "Side",
+        "session_window": "Session",
+        "regime": "Regime",
+        "picks_total": "Picks",
+        "picks_scored": "Scored",
+        "picks_tp1_hit": "TP1",
+        "picks_stop_hit": "Stops",
+        "picks_dir_correct_60m": "Dir 60m",
+        "picks_dir_correct_5d": "Dir 5d",
+        "avg_fwd_15m": "Avg 15m",
+        "avg_fwd_30m": "Avg 30m",
+        "avg_fwd_60m": "Avg 60m",
+        "avg_fwd_5d": "Avg 5d",
+        "avg_mfe_pct": "Avg MFE",
+        "avg_mae_pct": "Avg MAE",
+        "avg_max_favorable_pct": "Avg MFE",
+        "avg_max_adverse_pct": "Avg MAE",
+        "composite_score": "Composite",
+        "breakout_quality": "Breakout",
+        "forward_return_15m": "Fwd 15m",
+        "forward_return_30m": "Fwd 30m",
+        "forward_return_60m": "Fwd 60m",
+        "forward_return_5d": "Fwd 5d",
+        "max_favorable_pct": "MFE",
+        "max_adverse_pct": "MAE",
+        "pick_outcome_bucket": "Outcome",
+        "status": "Status",
+        "closure_reason": "Close reason",
+        "total": "Total",
+        "filled_or_closed": "Filled/closed",
+        "tp1_hit": "TP1",
+        "tp2_hit": "TP2",
+        "stopped": "Stops",
+        "eod_closed": "EOD",
+        "expired": "Expired",
+        "cancelled_weak": "Cancelled weak",
+        "avg_r": "Avg R",
+        "r_multiple": "R",
+        "mfe_pct": "MFE",
+        "mae_pct": "MAE",
+        "fill_price": "Fill",
+        "last_price": "Last",
+        "entry_min": "Entry min",
+        "entry_max": "Entry max",
+        "stop_price": "Stop",
+        "target_1": "T1",
+        "target_2": "T2",
+        "entry_policy_quality": "Entry quality",
+        "trade_source": "Source",
+        "pnl_eur": "P&L EUR",
+        "net_pnl_pct": "P&L %",
+        "advisory_signal_id": "Signal ID",
+    })
+    st.dataframe(df, hide_index=True, width="stretch")
+
+
 def _render_pick_scoreboard(rows: list[dict], fallback_rows: list[dict]):
     if rows:
         df = _to_dataframe(
             rows,
             [
-                "utc_date", "market", "mode", "grade", "side", "picks_scored",
-                "win_rate_60m", "avg_fwd_15m", "avg_fwd_30m", "avg_fwd_60m",
-                "avg_max_favorable_pct", "avg_max_adverse_pct",
+                "utc_date", "market", "session_window", "regime", "grade", "side",
+                "picks_total", "picks_scored", "picks_tp1_hit", "picks_stop_hit",
+                "picks_dir_correct_60m", "picks_dir_correct_5d",
+                "avg_fwd_60m", "avg_fwd_5d", "avg_mfe_pct", "avg_mae_pct",
             ],
         )
-        for col in ["win_rate_60m", "avg_fwd_15m", "avg_fwd_30m", "avg_fwd_60m"]:
+        for col in ["avg_fwd_60m", "avg_fwd_5d", "avg_mfe_pct", "avg_mae_pct"]:
             if col in df.columns:
                 df[col] = df[col].map(lambda value: _fmt_pct(value))
-        st.dataframe(df, hide_index=True, width="stretch")
+        _display_table(df)
         return
 
     if fallback_rows:
@@ -90,13 +164,38 @@ def _render_pick_scoreboard(rows: list[dict], fallback_rows: list[dict]):
             [
                 "created_at", "data_symbol", "market", "mode", "grade", "side",
                 "composite_score", "breakout_quality", "forward_return_15m",
-                "forward_return_30m", "forward_return_60m", "max_favorable_pct", "max_adverse_pct",
+                "forward_return_30m", "forward_return_60m", "forward_return_5d",
+                "max_favorable_pct", "max_adverse_pct", "pick_outcome_bucket",
             ],
         )
-        st.dataframe(df, hide_index=True, width="stretch")
+        _display_table(df)
         return
 
     st.info("No scored advisory picks yet.")
+
+
+def _render_pick_details(rows: list[dict]):
+    if not rows:
+        st.info("No stock-level scored advisory picks yet.")
+        return
+    df = _to_dataframe(
+        rows,
+        [
+            "created_at", "data_symbol", "market", "mode", "grade", "side",
+            "composite_score", "breakout_quality", "forward_return_15m",
+            "forward_return_30m", "forward_return_60m", "forward_return_5d",
+            "max_favorable_pct", "max_adverse_pct", "pick_outcome_bucket",
+        ],
+    )
+    for col in [
+        "forward_return_15m", "forward_return_30m", "forward_return_60m",
+        "forward_return_5d", "max_favorable_pct", "max_adverse_pct",
+    ]:
+        if col in df.columns:
+            df[col] = df[col].map(lambda value: _fmt_pct(value))
+    if "created_at" in df.columns:
+        df["created_at"] = df["created_at"].map(_fmt_time)
+    _display_table(df)
 
 
 def _render_execution_scoreboard(rows: list[dict]):
@@ -106,17 +205,45 @@ def _render_execution_scoreboard(rows: list[dict]):
     df = _to_dataframe(
         rows,
         [
-            "utc_date", "market", "mode", "policy_name", "trades_closed", "win_rate",
-            "avg_r", "median_r", "avg_pnl_pct", "stops", "targets", "expired",
+            "utc_date", "market", "entry_policy", "grade", "side", "source",
+            "total", "filled_or_closed", "tp1_hit", "tp2_hit", "stopped",
+            "eod_closed", "expired", "cancelled_weak", "avg_r",
+            "avg_mfe_pct", "avg_mae_pct", "avg_entry_quality",
         ],
     )
-    for col in ["win_rate", "avg_pnl_pct"]:
+    for col in ["avg_mfe_pct", "avg_mae_pct"]:
         if col in df.columns:
             df[col] = df[col].map(lambda value: _fmt_pct(value))
-    for col in ["avg_r", "median_r"]:
+    for col in ["avg_r", "avg_entry_quality"]:
         if col in df.columns:
             df[col] = df[col].map(lambda value: _fmt_number(value))
-    st.dataframe(df, hide_index=True, width="stretch")
+    _display_table(df)
+
+
+def _render_simulation_details(rows: list[dict]):
+    if not rows:
+        st.info("No stock-level simulator rows yet.")
+        return
+    df = _to_dataframe(
+        rows,
+        [
+            "simulated_at", "data_symbol", "market", "side", "grade", "alert_stage",
+            "entry_policy", "status", "closure_reason", "fill_at", "fill_price",
+            "closed_at", "last_price", "entry_min", "entry_max", "stop_price",
+            "target_1", "target_2", "composite_score", "breakout_quality",
+            "r_multiple", "mfe_pct", "mae_pct", "entry_policy_quality", "advisory_signal_id",
+        ],
+    )
+    for col in ["simulated_at", "fill_at", "closed_at"]:
+        if col in df.columns:
+            df[col] = df[col].map(_fmt_time)
+    for col in ["mfe_pct", "mae_pct"]:
+        if col in df.columns:
+            df[col] = df[col].map(lambda value: _fmt_pct(value))
+    for col in ["r_multiple", "entry_policy_quality"]:
+        if col in df.columns:
+            df[col] = df[col].map(lambda value: _fmt_number(value))
+    _display_table(df)
 
 
 def _render_journal(manual: list[dict], auto: list[dict]):
@@ -225,6 +352,7 @@ def render():
     pick_rows = db_client.get_advisory_pick_scoreboard(days_back=int(days), market=market)
     execution_rows = db_client.get_advisory_execution_scoreboard(days_back=int(days), market=market)
     fallback_rows = db_client.get_advisory_scoreboard(days_back=int(days), market=market)
+    simulation_details = db_client.get_advisory_auto_simulation_details(days_back=int(days), market=market)
     recommendations = db_client.get_proposed_advisory_policy_recommendations(limit=50)
     manual_trades = db_client.get_advisory_trades(days=int(days))
     auto_trades = db_client.get_advisory_auto_trades(days=int(days))
@@ -233,8 +361,8 @@ def render():
     avg_60 = _weighted_average(pick_rows, "avg_fwd_60m", "picks_scored")
     if avg_60 is None and fallback_rows:
         avg_60 = sum(_safe_float(row.get("forward_return_60m")) for row in fallback_rows) / max(len(fallback_rows), 1)
-    closed_count = sum(_safe_int(row.get("trades_closed")) for row in execution_rows)
-    avg_r = _weighted_average(execution_rows, "avg_r", "trades_closed")
+    closed_count = sum(_safe_int(row.get("filled_or_closed")) for row in execution_rows)
+    avg_r = _weighted_average(execution_rows, "avg_r", "filled_or_closed")
 
     m1, m2, m3, m4 = st.columns(4)
     metric_card(m1, "Scored picks", str(pick_count), help_text="Pick-level advisory cards with forward outcome evidence.")
@@ -267,24 +395,28 @@ def render():
         unsafe_allow_html=True,
     )
 
-    outcomes_tab, execution_tab, journal_tab, recs_tab = st.tabs(
-        ["Outcomes", "Execution", "Journal", "Recommendations"]
-    )
+    modern_section("Pick Outcome Aggregates", "Whether the advisory engine is pointing in the right direction.")
+    _render_pick_scoreboard(pick_rows, fallback_rows)
 
-    with outcomes_tab:
-        modern_section("Pick Outcomes", "Whether the advisory engine is pointing in the right direction.")
-        _render_pick_scoreboard(pick_rows, fallback_rows)
+    modern_section("Stock-Level Pick Details", "Individual advisory cards with stock, grade, score, and realized forward moves.")
+    _render_pick_details(fallback_rows)
 
-    with execution_tab:
-        modern_section("Execution Outcomes", "Whether the simulated or dry-run policy is using picks well.")
-        if avg_r is not None:
-            st.caption(f"Weighted average R over the selected window: {_fmt_number(avg_r)}")
-        _render_execution_scoreboard(execution_rows)
+    st.divider()
 
-    with journal_tab:
-        modern_section("Trade Journal", "What you actually did with advisory ideas.")
-        _render_journal(manual_trades, auto_trades)
+    modern_section("Execution Aggregates", "Whether the simulated or dry-run policy is using picks well.")
+    if avg_r is not None:
+        st.caption(f"Weighted average R over the selected window: {_fmt_number(avg_r)}")
+    _render_execution_scoreboard(execution_rows)
 
-    with recs_tab:
-        modern_section("Policy Recommendations", "Proposed changes generated from advisory outcome evidence.")
-        _render_recommendations(recommendations)
+    modern_section("Stock-Level Simulation Details", "Individual simulated entries with stock, fill, stop, target, R, MFE, and MAE.")
+    _render_simulation_details(simulation_details)
+
+    st.divider()
+
+    modern_section("Trade Journal", "What you actually did with advisory ideas.")
+    _render_journal(manual_trades, auto_trades)
+
+    st.divider()
+
+    modern_section("Policy Recommendations", "Proposed changes generated from advisory outcome evidence.")
+    _render_recommendations(recommendations)

@@ -1547,6 +1547,31 @@ def get_advisory_execution_scoreboard(days_back: int = 90, market: str = None, l
         return []
 
 
+def get_advisory_auto_simulation_details(days_back: int = 90, market: str = None, limit: int = 500) -> list:
+    """Fetch recent stock-level simulator rows for the Intelligence execution tab."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat() + "Z"
+        db = get_client()
+        q = (db.table("advisory_auto_simulations")
+             .select(
+                 "id,advisory_signal_id,data_symbol,market,side,grade,alert_stage,"
+                 "mode,entry_policy,status,closure_reason,simulated_at,valid_until,"
+                 "fill_at,fill_price,closed_at,last_price,entry_min,entry_max,"
+                 "stop_price,target_1,target_2,composite_score,breakout_quality,"
+                 "r_multiple,mfe_pct,mae_pct,entry_policy_quality"
+             )
+             .gte("simulated_at", cutoff)
+             .order("simulated_at", desc=True)
+             .limit(limit))
+        if market and market.upper() not in ("ALL", ""):
+            q = q.eq("market", market.upper())
+        result = q.execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_SIM_DETAILS_READ_FAILED] {str(e)[:200]}")
+        return []
+
+
 # ── Advisory scan log ─────────────────────────────────────────────────────────
 
 def insert_advisory_scan_log(record: dict) -> dict:
