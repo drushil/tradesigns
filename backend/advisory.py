@@ -101,6 +101,10 @@ ADVISORY_UNIVERSE = {
         {"data_symbol": "MU", "broker_display_name": "Micron Technology", "exchange": "NASDAQ", "currency": "USD",
          "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "SPCX", "broker_display_name": "SpaceX", "exchange": "NASDAQ", "currency": "USD",
+         "category": "space", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "IPO June 2026 — minimal price history; signals partial until ~14 sessions of bars; IPO volatility, use limit orders"},
         # --- Benchmark/context only: computed for regime signals, no trade alerts ---
         {"data_symbol": "QQQ", "broker_display_name": "Invesco QQQ", "exchange": "NASDAQ", "currency": "USD",
          "category": "etf_benchmark", "priority": "low", "trade_target": False, "benchmark_only": True,
