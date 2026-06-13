@@ -1376,6 +1376,31 @@ def get_open_filled_simulations(market: str = "US", limit: int = 200) -> list:
         return []
 
 
+def get_resolved_sims_missing_bars(market: str = "US", days_back: int = 3,
+                                   limit: int = 200) -> list:
+    """Fetch recently-resolved sims that have no stored bar path yet, so the
+    EOD bar-capture pass can snapshot their fill->close 1m bars for the replay
+    harness before yfinance drops the intraday history."""
+    try:
+        cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat() + "Z"
+        db = get_client()
+        result = (db.table("advisory_auto_simulations")
+                  .select("id,data_symbol,market,fill_at,closed_at,status")
+                  .eq("market", market.upper())
+                  .is_("bars_json", "null")
+                  .gte("fill_at", cutoff)
+                  .in_("status", ["hit_stop", "hit_target_1", "hit_target_2",
+                                  "hit_near_t1_protection", "closed_eod_win",
+                                  "closed_eod_loss", "closed_eod"])
+                  .order("fill_at", desc=True)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_SIM_MISSING_BARS_FAILED] {str(e)[:200]}")
+        return []
+
+
 def update_advisory_auto_simulation(sim_id: int, fields: dict) -> dict:
     """Patch a simulation row by primary key."""
     try:

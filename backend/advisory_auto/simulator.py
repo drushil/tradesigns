@@ -39,6 +39,7 @@ from database.client import (
     get_eligible_advisory_signals_for_simulation,
     get_latest_advisory_signal_for_symbol,
     get_open_filled_simulations,
+    get_resolved_sims_missing_bars,
     insert_advisory_auto_simulation,
     log_event,
     update_advisory_auto_simulation,
@@ -778,6 +779,8 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
             })
     # ── EOD mark-to-close: runs automatically when session is past close ─────
     eod_closed = _eod_close_fills(market=market, now_utc=now_utc)
+    # ── Snapshot 1m bar paths for replay before yfinance drops them ──────────
+    bars_captured = _capture_bar_paths_eod(market=market, now_utc=now_utc)
 
     log_event("INFO", "advisory_auto_sim_cycle", {
         "market": market,
@@ -786,6 +789,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "created_momentum": created_momentum,
         "active": len(active),
         "eod_closed": eod_closed,
+        "bars_captured": bars_captured,
         **transitions,
     })
     return {
@@ -796,6 +800,7 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
         "created_momentum": created_momentum,
         "active": len(active),
         "eod_closed": eod_closed,
+        "bars_captured": bars_captured,
         **transitions,
     }
 
@@ -939,6 +944,53 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
                 "error": str(e)[:160],
             })
     return closed
+
+
+def _capture_bar_path(symbol: str, fill_at: datetime,
+                      end: datetime) -> Optional[dict]:
+    """Snapshot the fill->end 1m bars into a compact, replayable structure:
+    {date, bars: [[HH:MM, low, high, close], ...]}. Returns None if no bars."""
+    bars = _fetch_1m_bars(_yfinance_symbol(symbol), fill_at, end)
+    if bars is None or bars.empty:
+        return None
+    out = []
+    for ts, bar in bars.iterrows():
+        low = float(bar.get("Low") or 0)
+        high = float(bar.get("High") or 0)
+        close = float(bar.get("Close") or 0)
+        if low <= 0 or high <= 0:
+            continue
+        out.append([ts.strftime("%H:%M"), round(low, 4), round(high, 4), round(close, 4)])
+    if not out:
+        return None
+    return {"date": fill_at.astimezone(timezone.utc).strftime("%Y-%m-%d"), "bars": out}
+
+
+def _capture_bar_paths_eod(market: str = "US", now_utc: Optional[datetime] = None) -> int:
+    """After the session is over, snapshot the fill->session-close 1m path for
+    every resolved sim that doesn't have one yet, so the replay harness keeps a
+    permanent record once yfinance drops the intraday bars (~1-2 days)."""
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    pending = get_resolved_sims_missing_bars(market=market, days_back=3, limit=200)
+    captured = 0
+    for sim in pending:
+        fill_at = _parse_dt(sim.get("fill_at"))
+        if fill_at is None:
+            continue
+        session_close = _us_session_close_utc(fill_at)
+        if session_close is None or now_utc < session_close + timedelta(minutes=30):
+            continue  # capture only once the day is definitively over
+        path = _capture_bar_path(sim.get("data_symbol"), fill_at, session_close)
+        if not path:
+            continue
+        res = update_advisory_auto_simulation(int(sim["id"]), {"bars_json": path})
+        if "error" not in res:
+            captured += 1
+    if captured:
+        log_event("INFO", "advisory_auto_sim_bars_captured",
+                  {"market": market, "captured": captured})
+    return captured
 
 
 def run_advisory_auto_eod_close(market: str = "US") -> dict:

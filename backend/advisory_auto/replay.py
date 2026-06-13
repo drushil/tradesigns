@@ -19,8 +19,10 @@ Permanent reproducibility would require storing the fill->close bar path per sim
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+import pandas as pd
 
 from backend.advisory_auto.simulator import (
     _scan_bars_for_exit,
@@ -30,6 +32,29 @@ from backend.advisory_auto.simulator import (
     _us_session_close_utc,
     _r_multiple,
 )
+
+
+def _bars_from_json(bars_json: dict):
+    """Rebuild a 1m OHLC DataFrame from a stored bar path (see
+    simulator._capture_bar_path). Returns None if the payload is empty."""
+    if not isinstance(bars_json, dict):
+        return None
+    rows = bars_json.get("bars") or []
+    day = bars_json.get("date")
+    if not rows or not day:
+        return None
+    idx, lows, highs, closes = [], [], [], []
+    for r in rows:
+        try:
+            hhmm, low, high, close = r[0], float(r[1]), float(r[2]), float(r[3])
+            idx.append(pd.Timestamp(f"{day} {hhmm}", tz="UTC"))
+            lows.append(low); highs.append(high); closes.append(close)
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not idx:
+        return None
+    return pd.DataFrame({"Low": lows, "High": highs, "Close": closes},
+                        index=pd.DatetimeIndex(idx))
 
 BASELINE_ARM = 0.8
 BASELINE_RETRACE = 0.5
@@ -70,7 +95,11 @@ def replay_one(sim: dict, arm_frac: float, retrace_r: float,
     t2 = float(sim["target_2"]) if sim.get("target_2") is not None else None
     session_close = _us_session_close_utc(fill_at) or (fill_at + timedelta(hours=7))
     if bars is None:
-        bars = _fetch_1m_bars(_yfinance_symbol(sim.get("data_symbol")), fill_at, session_close)
+        # Prefer the stored bar path (survives yfinance's ~1-2 day 1m window);
+        # fall back to a live re-fetch for very recent sims not yet captured.
+        bars = _bars_from_json(sim.get("bars_json"))
+        if bars is None:
+            bars = _fetch_1m_bars(_yfinance_symbol(sim.get("data_symbol")), fill_at, session_close)
     if bars is None or bars.empty:
         return None
 
@@ -103,11 +132,14 @@ def sweep(sims: list, arms: list, retraces: list) -> list:
     def bars_for(sim):
         key = (sim.get("data_symbol"), sim.get("fill_at"))
         if key not in bar_cache:
-            fill_at = _parse_dt(sim.get("fill_at"))
-            session_close = _us_session_close_utc(fill_at) if fill_at else None
-            bar_cache[key] = _fetch_1m_bars(
-                _yfinance_symbol(sim.get("data_symbol")), fill_at, session_close
-            ) if fill_at and session_close else None
+            bars = _bars_from_json(sim.get("bars_json"))
+            if bars is None:
+                fill_at = _parse_dt(sim.get("fill_at"))
+                session_close = _us_session_close_utc(fill_at) if fill_at else None
+                bars = _fetch_1m_bars(
+                    _yfinance_symbol(sim.get("data_symbol")), fill_at, session_close
+                ) if fill_at and session_close else None
+            bar_cache[key] = bars
         return bar_cache[key]
 
     # Baseline outcome per sim (current production defaults).
@@ -158,7 +190,7 @@ def load_replayable_sims(market: str = "US", days_back: int = 7, limit: int = 50
     db = get_client()
     res = (db.table("advisory_auto_simulations")
            .select("id,data_symbol,market,side,grade,mode,entry_policy,status,"
-                   "fill_at,fill_price,stop_price,target_1,target_2,closed_at")
+                   "fill_at,fill_price,stop_price,target_1,target_2,closed_at,bars_json")
            .eq("market", market.upper())
            .eq("side", "BUY")
            .in_("status", list(REPLAYABLE_STATUSES))

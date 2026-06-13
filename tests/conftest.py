@@ -198,6 +198,7 @@ if "database.client" not in sys.modules:
     _db.get_eligible_advisory_signals_for_simulation = MagicMock(return_value=[])
     _db.get_latest_advisory_signal_for_symbol = MagicMock(return_value=None)
     _db.get_open_filled_simulations = MagicMock(return_value=[])
+    _db.get_resolved_sims_missing_bars = MagicMock(return_value=[])
     _db.insert_advisory_auto_simulation = MagicMock(return_value={})
     _db.update_advisory_auto_simulation = MagicMock(return_value={})
     _db.get_fx_rate_cache = MagicMock(return_value=None)

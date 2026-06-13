@@ -70,6 +70,20 @@ def test_replay_no_terminal_marks_eod():
     assert res["exit_price"] == 101.2
 
 
+def test_stored_bar_path_round_trips_to_same_result():
+    # A sim with a stored bars_json must replay identically to one fed live bars.
+    bars = _bars([(1, 100.0, 101.0, 100.5), (2, 102.0, 105.0, 104.5)])  # hits T1
+    live = replay.replay_one(_sim(), 0.8, 0.5, bars=bars)
+    stored_sim = _sim(bars_json={
+        "date": "2026-06-10",
+        "bars": [["14:01", 100.0, 101.0, 100.5], ["14:02", 102.0, 105.0, 104.5]],
+    })
+    # bars=None forces it to read bars_json (no network).
+    from_storage = replay.replay_one(stored_sim, 0.8, 0.5, bars=None)
+    assert from_storage["status"] == live["status"] == "hit_target_1"
+    assert from_storage["r"] == live["r"] == 2.0
+
+
 def test_sweep_reports_per_policy_rows(monkeypatch):
     bars = _bars([(1, 100.0, 105.0, 104.5)])  # immediate T1
     monkeypatch.setattr(replay, "_fetch_1m_bars", lambda *a, **k: bars)
