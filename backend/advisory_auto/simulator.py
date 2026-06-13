@@ -86,7 +86,12 @@ def _grade_rank(grade) -> int:
 
 # Current simulator version. Bump when logic changes materially so old rows
 # don't contaminate new learning queries.
-SIM_VERSION = 2
+#   v2 — watch-limit + chase_tracker + near-T1 protection + EOD mark-to-close
+#   v3 — momentum_continuation fills at the next bar after the signal (no more
+#        look-ahead reference-price fills); shared exit scanner. Sims < 3 carry
+#        the contaminated momentum fills and should be filtered out of honest
+#        old-vs-new comparisons.
+SIM_VERSION = 3
 
 _STATUS_TO_CLOSURE_REASON = {
     "hit_target_1":          "target_1",
