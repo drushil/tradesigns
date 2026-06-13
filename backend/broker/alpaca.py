@@ -469,18 +469,25 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     if bool(portfolio_state.get("trading_blocked") or portfolio_state.get("account_blocked")):
         return False, "broker account trading blocked"
 
-    # Intraday margin pre-check (Alpaca retired the PDT rule, June 2026).
-    # Orders that would put the account into a margin deficit are rejected
-    # broker-side; reject locally first so the cycle logs a clean gate reason
-    # instead of a broker rejection.
-    buying_power_usd = float(portfolio_state.get("buying_power_usd") or 0)
-    if buying_power_usd > 0:
-        size_usd = size_eur * float(portfolio_state.get("fx_rate") or 1.08)
-        if size_usd > buying_power_usd:
-            return False, (
-                f"insufficient intraday buying power: order ${size_usd:.2f} "
-                f"> available ${buying_power_usd:.2f}"
-            )
+    # Intraday margin guard (Alpaca retired the PDT rule, June 2026).
+    # Reject orders that would consume more than the usable buying power
+    # (available buying power minus a safety buffer), mirroring Alpaca's
+    # broker-side pre-trade margin check so the cycle logs a clean gate reason
+    # instead of eating a broker rejection. Exposure-based, not trade-count-based.
+    from backend.runtime.env import _env_bool, _env_float
+    if _env_bool("INTRADAY_MARGIN_GUARD_ENABLED", True):
+        buying_power_usd = float(portfolio_state.get("buying_power_usd") or 0)
+        if buying_power_usd > 0:
+            buffer_pct = _env_float("INTRADAY_BUYING_POWER_BUFFER_PCT", 10.0)
+            min_after = _env_float("MIN_BUYING_POWER_AFTER_ORDER_USD", 0.0)
+            usable = buying_power_usd * (1.0 - buffer_pct / 100.0)
+            size_usd = size_eur * float(portfolio_state.get("fx_rate") or 1.08)
+            if size_usd > usable or (buying_power_usd - size_usd) < min_after:
+                return False, (
+                    f"insufficient intraday buying power: order ${size_usd:.2f} "
+                    f"> usable ${usable:.2f} (bp ${buying_power_usd:.2f}, "
+                    f"buffer {buffer_pct:.0f}%)"
+                )
 
     # Dominant-signal veto: block a BUY when any single signal is at floor (-0.8 or worse),
     # or a SELL when any single signal is at ceiling (+0.8 or better).

@@ -72,3 +72,37 @@ def test_pre_trade_gate_blocks_when_broker_account_blocked():
 
     assert allowed is False
     assert reason == "broker account trading blocked"
+
+
+def test_pre_trade_gate_ignores_legacy_daytrade_count():
+    # Deprecated PDT fields must no longer influence the gate.
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 500.0, 0.35,
+        _profile(),
+        _portfolio(daytrade_count=99, pattern_day_trader=True),
+    )
+
+    assert allowed is True
+    assert reason == "pass"
+
+
+def test_pre_trade_gate_buffer_blocks_near_full_buying_power():
+    # Order fits raw buying power but not after the 10% safety buffer.
+    # 1850 EUR * 1.08 = 1998 USD; usable = 2000 * 0.9 = 1800 -> block.
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 1850.0, 0.35, _profile(), _portfolio()
+    )
+
+    assert allowed is False
+    assert "insufficient intraday buying power" in reason
+
+
+def test_pre_trade_gate_margin_guard_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("INTRADAY_MARGIN_GUARD_ENABLED", "false")
+    # Order far exceeds buying power, but the guard is disabled.
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 5000.0, 0.35, _profile(), _portfolio(buying_power_usd=400.0)
+    )
+
+    assert allowed is True
+    assert reason == "pass"
