@@ -100,8 +100,7 @@ def _decision_packet(snapshot: dict) -> dict:
             "near_miss_runner_count": int(near.get("runner_count") or 0),
         },
         "broker_context": {
-            "daytrade_count": broker.get("daytrade_count"),
-            "pattern_day_trader": broker.get("pattern_day_trader"),
+            "buying_power": broker.get("buying_power"),
             "trading_blocked": broker.get("trading_blocked"),
         },
         "recommendations": review.get("recommendations") or [],

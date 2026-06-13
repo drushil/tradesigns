@@ -70,7 +70,7 @@ _last_shock_result: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# PDT day-trade tracking
+# Day-trade telemetry (PDT rule retired June 2026 — informational only)
 # [(date, ticker)] — same-day round trips
 # ---------------------------------------------------------------------------
 _day_trade_log: list = []

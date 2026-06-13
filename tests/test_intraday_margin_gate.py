@@ -15,9 +15,6 @@ def _profile(**overrides):
         "cash_buffer_pct": 5.0,
         "min_signal_score": 0.10,
         "max_trades_per_day": 20,
-        "pdt_protection_enabled": True,
-        "pdt_max_day_trades_5d": 3,
-        "pdt_min_equity_usd": 25000,
     }
     profile.update(overrides)
     return profile
@@ -31,7 +28,8 @@ def _portfolio(**overrides):
         "trades_today": 0,
         "positions": [],
         "broker_equity_usd": 5000.0,
-        "daytrade_count": 3,
+        "buying_power_usd": 2000.0,
+        "fx_rate": 1.08,
         "trading_blocked": False,
         "account_blocked": False,
     }
@@ -39,33 +37,38 @@ def _portfolio(**overrides):
     return portfolio
 
 
-def test_pre_trade_gate_blocks_when_pdt_limit_reached_under_25k():
+def test_pre_trade_gate_blocks_when_order_exceeds_buying_power():
+    # 500 EUR * 1.08 = 540 USD > 400 USD available
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 500.0, 0.35, _profile(), _portfolio(buying_power_usd=400.0)
+    )
+
+    assert allowed is False
+    assert "insufficient intraday buying power" in reason
+
+
+def test_pre_trade_gate_allows_when_order_within_buying_power():
     allowed, reason = pre_trade_gate(
         "AMZN", "buy", 500.0, 0.35, _profile(), _portfolio()
     )
 
+    assert allowed is True
+    assert reason == "pass"
+
+
+def test_pre_trade_gate_skips_margin_check_when_buying_power_unknown():
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 500.0, 0.35, _profile(), _portfolio(buying_power_usd=0)
+    )
+
+    assert allowed is True
+    assert reason == "pass"
+
+
+def test_pre_trade_gate_blocks_when_broker_account_blocked():
+    allowed, reason = pre_trade_gate(
+        "AMZN", "buy", 500.0, 0.35, _profile(), _portfolio(trading_blocked=True)
+    )
+
     assert allowed is False
-    assert "pdt_protection" in reason
-
-
-def test_pre_trade_gate_allows_when_pdt_count_below_limit():
-    allowed, reason = pre_trade_gate(
-        "AMZN", "buy", 500.0, 0.35, _profile(), _portfolio(daytrade_count=2)
-    )
-
-    assert allowed is True
-    assert reason == "pass"
-
-
-def test_pre_trade_gate_allows_pdt_guard_to_be_disabled():
-    allowed, reason = pre_trade_gate(
-        "AMZN",
-        "buy",
-        500.0,
-        0.35,
-        _profile(pdt_protection_enabled=False),
-        _portfolio(),
-    )
-
-    assert allowed is True
-    assert reason == "pass"
+    assert reason == "broker account trading blocked"

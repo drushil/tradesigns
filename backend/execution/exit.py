@@ -429,10 +429,10 @@ def _hydrate_open_trades(broker_positions: list[dict] = None):
     state._open_trades.update(rebuilt)
 
 
-# ── PDT (Pattern Day Trader) tracking ────────────────────────────────────────
+# ── Day-trade telemetry (PDT rule retired June 2026 — informational only) ────
 
 def _record_day_trade(ticker: str):
-    """Record a same-day round trip for PDT monitoring."""
+    """Record a same-day round trip for day-trade frequency telemetry."""
     state._day_trade_log.append((datetime.utcnow().date(), ticker))
 
 
@@ -440,19 +440,6 @@ def _count_day_trades_5d() -> int:
     """Count round trips (same-day open + close) in the last 5 calendar days."""
     cutoff = datetime.utcnow().date() - timedelta(days=7)
     return sum(1 for d, _ in state._day_trade_log if d >= cutoff)
-
-
-def _check_pdt_warning(ticker: str, count: int):
-    from backend.agent import _send_discord_alert  # lazy — avoids circular at load time
-    log_event("WARN", "pdt_warning", {
-        "day_trade_count_5d": count,
-        "trigger_ticker": ticker,
-        "note": "Approaching 4-round-trip PDT limit",
-    })
-    _send_discord_alert(
-        f"PDT WARNING: {count} day trades in 5 days "
-        f"(last: {ticker}). Stop at 3 to avoid PDT violation on live account."
-    )
 
 
 def _check_thesis_invalidation(ticker: str, trade: dict) -> Optional[str]:
@@ -1401,16 +1388,15 @@ def _close_trade(ticker: str, trade: dict, exit_price: float, exit_reason: str):
     hold_minutes_actual = int((now_close - trade["entry_time"]).total_seconds() / 60)
     hold_days_actual    = max(0, int((now_close - trade["entry_time"]).total_seconds() // 86400))
 
-    # PDT tracking: same-day round trips on BUY trades
+    # Day-trade telemetry: same-day round trips on BUY trades (informational —
+    # the PDT rule was retired June 2026; throughput is governed by intraday
+    # buying power, not a trade count)
     entry_dt = trade.get("entry_time") or now_close
     if entry_dt.date() == now_close.date() and trade.get("side") == "BUY":
         _record_day_trade(ticker)
-        day_trade_count = _count_day_trades_5d()
         log_event("INFO", "day_trade_recorded", {
-            "ticker": ticker, "count_5d": day_trade_count,
+            "ticker": ticker, "count_5d": _count_day_trades_5d(),
         })
-        if day_trade_count >= 3:
-            _check_pdt_warning(ticker, day_trade_count)
 
     trade_record = {
         "ticker":          ticker,

@@ -123,7 +123,6 @@ from backend.execution.exit      import (_open_position_tickers,
                                           _rehydrated_open_trade,
                                           _hydrate_open_trades,
                                           _record_day_trade, _count_day_trades_5d,
-                                          _check_pdt_warning,
                                           _check_thesis_invalidation,
                                           _trim_position, _check_hold_score,
                                           _check_breakeven_promotion,
@@ -195,7 +194,7 @@ _llm_hour_reset      = datetime.utcnow()
 _open_trades         = {}   # {ticker: {entry_price, entry_time, stop_price, hold_minutes, ...}}
 _swing_trades        = {}   # {ticker: {entry_price, entry_time, hold_days, ...}}
 _last_shock_refresh  = None
-_day_trade_log: list = []   # [(date, ticker)] same-day round trips for PDT tracking
+_day_trade_log: list = []   # [(date, ticker)] same-day round trips (telemetry only)
 _last_shock_result   = {
     "shock_detected": False,
     "classification": "NORMAL",
@@ -317,7 +316,7 @@ def _refresh_macro_shock_if_needed() -> dict:
 # _apply_execution_overrides → moved to backend/runtime/overrides.py
 
 
-# _apply_learned_hold_extension .. _check_pdt_warning → moved to backend/execution/exit.py
+# _apply_learned_hold_extension .. _count_day_trades_5d → moved to backend/execution/exit.py
 
 # _try_promote_to_swing → moved to backend/execution/swing.py
 # ── Percentile window update ─────────────────────────────────────────────────

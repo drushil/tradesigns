@@ -414,8 +414,6 @@ def _broker_account_snapshot() -> dict:
             "equity": account.get("equity"),
             "cash": account.get("cash"),
             "buying_power": account.get("buying_power"),
-            "daytrade_count": account.get("daytrade_count"),
-            "pattern_day_trader": account.get("pattern_day_trader"),
             "trading_blocked": account.get("trading_blocked"),
             "account_blocked": account.get("account_blocked"),
             "status": account.get("status"),

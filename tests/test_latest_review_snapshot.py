@@ -30,8 +30,7 @@ def test_decision_packet_extracts_top_level_fields():
             "recommendations": [{"category": "instrumentation", "reason": "Track saves"}],
         },
         "broker_account_snapshot": {
-            "daytrade_count": 3,
-            "pattern_day_trader": False,
+            "buying_power": 2200.0,
             "trading_blocked": False,
         },
         "metrics": {
@@ -59,4 +58,4 @@ def test_decision_packet_extracts_top_level_fields():
     }
     assert packet["what_worked"]["bad_avoid_tickers"] == ["NVDA", "PLTR"]
     assert packet["needs_more_data"]["shadow_review_candidates"][0]["ticker"] == "MU"
-    assert packet["broker_context"]["daytrade_count"] == 3
+    assert packet["broker_context"]["buying_power"] == 2200.0

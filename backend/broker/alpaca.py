@@ -62,8 +62,6 @@ def get_account() -> dict:
             "buying_power":        round(min(float(account.buying_power), max_capital_usd), 2),
             "currency":            account.currency,
             "status":              str(account.status),
-            "daytrade_count":      int(getattr(account, "daytrade_count", 0) or 0),
-            "pattern_day_trader":  bool(getattr(account, "pattern_day_trader", False)),
             "trading_blocked":     bool(getattr(account, "trading_blocked", False)),
             "account_blocked":     bool(getattr(account, "account_blocked", False)),
             "alpaca_actual_usd":   round(alpaca_actual_usd, 2),
@@ -468,17 +466,20 @@ def pre_trade_gate(ticker: str, side: str, size_eur: float,
     allowed = profile.get("allowed_instruments", [])
     open_tickers = {p.get("ticker") for p in portfolio_state.get("positions", [])}
 
-    if bool(profile.get("pdt_protection_enabled", True)):
-        broker_equity = float(portfolio_state.get("broker_equity_usd") or portfolio_state.get("equity") or 0)
-        daytrade_count = int(portfolio_state.get("daytrade_count") or 0)
-        pdt_limit = int(profile.get("pdt_max_day_trades_5d", 3) or 3)
-        pdt_min_equity = float(profile.get("pdt_min_equity_usd", 25000) or 25000)
-        if bool(portfolio_state.get("trading_blocked") or portfolio_state.get("account_blocked")):
-            return False, "broker account trading blocked"
-        if broker_equity < pdt_min_equity and daytrade_count >= pdt_limit:
+    if bool(portfolio_state.get("trading_blocked") or portfolio_state.get("account_blocked")):
+        return False, "broker account trading blocked"
+
+    # Intraday margin pre-check (Alpaca retired the PDT rule, June 2026).
+    # Orders that would put the account into a margin deficit are rejected
+    # broker-side; reject locally first so the cycle logs a clean gate reason
+    # instead of a broker rejection.
+    buying_power_usd = float(portfolio_state.get("buying_power_usd") or 0)
+    if buying_power_usd > 0:
+        size_usd = size_eur * float(portfolio_state.get("fx_rate") or 1.08)
+        if size_usd > buying_power_usd:
             return False, (
-                f"pdt_protection: {daytrade_count} day trades in 5d "
-                f"with equity ${broker_equity:.2f} < ${pdt_min_equity:.0f}"
+                f"insufficient intraday buying power: order ${size_usd:.2f} "
+                f"> available ${buying_power_usd:.2f}"
             )
 
     # Dominant-signal veto: block a BUY when any single signal is at floor (-0.8 or worse),

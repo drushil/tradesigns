@@ -39,9 +39,6 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("max_new_intraday_trades_per_cycle", 2)
     p.setdefault("autonomous_min_composite_for_entry", 0.30)
     p.setdefault("ranging_min_composite_for_entry", 0.45)
-    p.setdefault("pdt_protection_enabled", True)
-    p.setdefault("pdt_max_day_trades_5d", 3)
-    p.setdefault("pdt_min_equity_usd", 25000)
     p.setdefault("leveraged_etf_stop_scalar", 1.35)
     p.setdefault("a_plus_full_size_max_atr_pct", 2.5)
     p.setdefault("a_plus_full_size_max_stop_pct", 5.0)
@@ -179,15 +176,6 @@ def _apply_execution_overrides(profile: dict) -> dict:
         p["high_atr_stop_threshold_pct"] = _env_float("HIGH_ATR_STOP_THRESHOLD_PCT", p["high_atr_stop_threshold_pct"])
     if os.getenv("HIGH_ATR_STOP_MULTIPLIER"):
         p["high_atr_stop_multiplier"] = _env_float("HIGH_ATR_STOP_MULTIPLIER", p["high_atr_stop_multiplier"])
-    if os.getenv("PDT_PROTECTION_ENABLED") is not None:
-        p["pdt_protection_enabled"] = _env_bool("PDT_PROTECTION_ENABLED", True)
-    if os.getenv("PDT_MAX_DAY_TRADES_5D"):
-        p["pdt_max_day_trades_5d"] = _env_int(
-            "PDT_MAX_DAY_TRADES_5D",
-            int(p["pdt_max_day_trades_5d"]),
-        )
-    if os.getenv("PDT_MIN_EQUITY_USD"):
-        p["pdt_min_equity_usd"] = _env_float("PDT_MIN_EQUITY_USD", p["pdt_min_equity_usd"])
     if os.getenv("RANGING_MAX_TRADES_PER_DAY"):
         p["ranging_max_trades_per_day"] = _env_int("RANGING_MAX_TRADES_PER_DAY", int(p["ranging_max_trades_per_day"]))
     if os.getenv("RANGING_ATR_STOP_MULTIPLE"):

@@ -56,8 +56,6 @@ The JSON snapshot should include:
   - equity
   - cash
   - buying_power
-  - daytrade_count
-  - pattern_day_trader
   - trading_blocked
   - account_blocked
 - `broker_rejections`
