@@ -577,6 +577,63 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
     }
 
 
+def _scan_bars_for_exit(bars, fill_price: float, stop_price: float,
+                        t1: Optional[float], t2: Optional[float],
+                        mfe_pct: float = 0.0, mae_pct: float = 0.0,
+                        arm_frac: Optional[float] = None,
+                        retrace_r: Optional[float] = None) -> tuple:
+    """Pure terminal scan over 1m bars (BUY semantics). Shared by the live
+    simulator (_process_filled) and the offline replay harness so the two can
+    never drift. Terminal priority is pessimistic: stop wins ties, then T2, T1,
+    then near-T1 protection.
+
+    Returns (status, terminal_close, ts, mfe_pct, mae_pct, peak_price):
+      status            — hit_stop / hit_target_2 / hit_target_1 /
+                          hit_near_t1_protection, or None if nothing fired.
+      terminal_close    — Close of the terminal bar (or the last bar's Close
+                          when no terminal fired).
+      ts                — timestamp of the terminal bar (None if none).
+      peak_price        — set only for near-T1 protection.
+    """
+    if arm_frac is None:
+        arm_frac = SIM_NEAR_T1_ARM_FRAC
+    if retrace_r is None:
+        retrace_r = SIM_NEAR_T1_RETRACE_R
+    last_close = None
+    for ts, bar in bars.iterrows():
+        bar_low = float(bar.get("Low") or 0)
+        bar_high = float(bar.get("High") or 0)
+        if bar_low <= 0 or bar_high <= 0:
+            continue
+        last_close = float(bar.get("Close") or 0)
+        # Running MFE / MAE (signed % from fill, BUY direction).
+        bar_mfe = (bar_high - fill_price) / fill_price * 100.0
+        bar_mae = (bar_low - fill_price) / fill_price * 100.0
+        if bar_mfe > mfe_pct:
+            mfe_pct = bar_mfe
+        if bar_mae < mae_pct:
+            mae_pct = bar_mae
+        # Terminal checks, in pessimistic order: stop wins ties.
+        if bar_low <= stop_price:
+            return "hit_stop", last_close, ts, mfe_pct, mae_pct, None
+        if t2 is not None and bar_high >= t2:
+            return "hit_target_2", last_close, ts, mfe_pct, mae_pct, None
+        if t1 is not None and bar_high >= t1:
+            return "hit_target_1", last_close, ts, mfe_pct, mae_pct, None
+        # Near-T1 protection (lowest priority). Once the run-up has covered
+        # arm_frac of the fill→T1 distance, book if price gives back retrace_r
+        # of risk (R = fill - stop) from the peak.
+        if t1 is not None and t1 > fill_price:
+            arm_pct = arm_frac * (t1 - fill_price) / fill_price * 100.0
+            if mfe_pct >= arm_pct:
+                peak_price = fill_price * (1.0 + mfe_pct / 100.0)
+                retrace_price = peak_price - retrace_r * (fill_price - stop_price)
+                if bar_low <= retrace_price:
+                    return ("hit_near_t1_protection", last_close, ts,
+                            mfe_pct, mae_pct, peak_price)
+    return None, last_close, None, mfe_pct, mae_pct, None
+
+
 def _process_filled(sim: dict, now_utc: datetime) -> dict:
     """Track MFE/MAE and detect terminal hits for a filled sim."""
     fill_at = _parse_dt(sim.get("fill_at")) or now_utc
@@ -606,68 +663,24 @@ def _process_filled(sim: dict, now_utc: datetime) -> dict:
         return {"last_checked_at": _iso_z(now_utc)}
     mfe_pct = float(sim.get("mfe_pct") or 0)
     mae_pct = float(sim.get("mae_pct") or 0)
-    for ts, bar in bars.iterrows():
-        bar_low = float(bar.get("Low") or 0)
-        bar_high = float(bar.get("High") or 0)
-        if bar_low <= 0 or bar_high <= 0:
-            continue
-        # Running MFE / MAE (signed % from fill, BUY direction).
-        bar_mfe = (bar_high - fill_price) / fill_price * 100.0
-        bar_mae = (bar_low - fill_price) / fill_price * 100.0
-        if bar_mfe > mfe_pct:
-            mfe_pct = bar_mfe
-        if bar_mae < mae_pct:
-            mae_pct = bar_mae
-        # Terminal checks, in pessimistic order: stop wins ties.
-        if bar_low <= stop_price:
-            return {
-                "status": "hit_stop",
-                "last_price": round(float(bar.get("Close") or 0), 4),
-                "mfe_pct": round(mfe_pct, 4),
-                "mae_pct": round(mae_pct, 4),
-                "last_checked_at": _iso_z(now_utc),
-                "closed_at": _iso_z(ts.to_pydatetime()),
+    status, term_close, ts, mfe_pct, mae_pct, peak_price = _scan_bars_for_exit(
+        bars, fill_price, stop_price, t1, t2, mfe_pct, mae_pct
+    )
+    if status is not None:
+        result = {
+            "status": status,
+            "last_price": round(float(term_close or 0), 4),
+            "mfe_pct": round(mfe_pct, 4),
+            "mae_pct": round(mae_pct, 4),
+            "last_checked_at": _iso_z(now_utc),
+            "closed_at": _iso_z(ts.to_pydatetime()),
+        }
+        if status == "hit_near_t1_protection" and peak_price is not None:
+            result["notes"] = {
+                **(sim.get("notes") or {}),
+                "near_t1_peak_price": round(peak_price, 4),
             }
-        if t2 is not None and bar_high >= t2:
-            return {
-                "status": "hit_target_2",
-                "last_price": round(float(bar.get("Close") or 0), 4),
-                "mfe_pct": round(mfe_pct, 4),
-                "mae_pct": round(mae_pct, 4),
-                "last_checked_at": _iso_z(now_utc),
-                "closed_at": _iso_z(ts.to_pydatetime()),
-            }
-        if t1 is not None and bar_high >= t1:
-            return {
-                "status": "hit_target_1",
-                "last_price": round(float(bar.get("Close") or 0), 4),
-                "mfe_pct": round(mfe_pct, 4),
-                "mae_pct": round(mae_pct, 4),
-                "last_checked_at": _iso_z(now_utc),
-                "closed_at": _iso_z(ts.to_pydatetime()),
-            }
-        # Near-T1 protection (lowest priority — T1/T2 take it first). Once the
-        # run-up has covered ARM_FRAC of the fill→T1 distance, book the trade if
-        # price gives back RETRACE_R of risk (R = fill - stop) from the peak.
-        # mfe_pct already encodes the peak, so peak = fill * (1 + mfe_pct/100).
-        if t1 is not None and t1 > fill_price:
-            arm_pct = SIM_NEAR_T1_ARM_FRAC * (t1 - fill_price) / fill_price * 100.0
-            if mfe_pct >= arm_pct:
-                peak_price = fill_price * (1.0 + mfe_pct / 100.0)
-                retrace_price = peak_price - SIM_NEAR_T1_RETRACE_R * (fill_price - stop_price)
-                if bar_low <= retrace_price:
-                    return {
-                        "status": "hit_near_t1_protection",
-                        "last_price": round(float(bar.get("Close") or 0), 4),
-                        "mfe_pct": round(mfe_pct, 4),
-                        "mae_pct": round(mae_pct, 4),
-                        "last_checked_at": _iso_z(now_utc),
-                        "closed_at": _iso_z(ts.to_pydatetime()),
-                        "notes": {
-                            **(sim.get("notes") or {}),
-                            "near_t1_peak_price": round(peak_price, 4),
-                        },
-                    }
+        return result
     return {
         "mfe_pct": round(mfe_pct, 4),
         "mae_pct": round(mae_pct, 4),
