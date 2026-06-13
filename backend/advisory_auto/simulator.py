@@ -1003,7 +1003,12 @@ def run_advisory_auto_eod_close(market: str = "US") -> dict:
     """
     now_utc = datetime.now(timezone.utc)
     closed = _eod_close_fills(market=market, now_utc=now_utc)
+    # Snapshot 1m bar paths here too — this entry point runs reliably after the
+    # close via the daily EOD-review job, so capture happens within a day of
+    # resolution (before yfinance drops the intraday bars).
+    bars_captured = _capture_bar_paths_eod(market=market, now_utc=now_utc)
     log_event("INFO", "advisory_auto_sim_eod_cycle", {
-        "market": market, "closed_eod": closed,
+        "market": market, "closed_eod": closed, "bars_captured": bars_captured,
     })
-    return {"ran": True, "market": market, "closed_eod": closed}
+    return {"ran": True, "market": market, "closed_eod": closed,
+            "bars_captured": bars_captured}
