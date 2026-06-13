@@ -71,6 +71,11 @@ SIM_MOMENTUM_ENABLED = (
     os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_ENABLED", "true").strip().lower() != "false"
 )
 SIM_MOMENTUM_MIN_GRADE = os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_MIN_GRADE", "A")
+# Momentum fill realism: buy at the next 1m bar after the signal (+latency),
+# NOT the stale pre-signal reference price (which let the sim book entries at
+# prices that were already gone — look-ahead). Skip if price already ran to T1.
+SIM_MOMENTUM_FILL_LATENCY_MIN = int(os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_FILL_LATENCY_MIN", "1"))
+SIM_MOMENTUM_FILL_WINDOW_MIN = int(os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_FILL_WINDOW_MIN", "20"))
 
 _GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
 
@@ -135,32 +140,23 @@ def _float_or_none(value) -> Optional[float]:
         return None
 
 
-def _signal_reference_price(sig: dict) -> Optional[float]:
-    """Best available price at the time the advisory card was generated."""
-    for key in ("reference_price", "price_native", "last_price"):
-        val = _float_or_none(sig.get(key))
-        if val:
-            return val
+def _next_bar_fill(symbol: str, signal_at: datetime) -> Optional[tuple]:
+    """Realistic momentum entry: the price of the first 1m bar at/after the
+    signal time plus a latency — i.e. "saw the card, bought at the next print".
 
-    quality = sig.get("data_quality_json") or {}
-    if isinstance(quality, dict):
-        val = _float_or_none(quality.get("last_price"))
-        if val:
-            return val
-
-    sj = sig.get("signal_json") or {}
-    if isinstance(sj, dict):
-        for key in ("reference_price", "price_native", "last_price", "current_price", "price"):
-            val = _float_or_none(sj.get(key))
-            if val:
-                return val
-        atr = sj.get("atr_data") or {}
-        if isinstance(atr, dict):
-            val = _float_or_none(atr.get("current_price"))
-            if val:
-                return val
-
-    return None
+    Replaces filling at the pre-signal reference price, which let the sim book
+    entries at prices that were already gone (look-ahead). Returns
+    (fill_price, fill_at) or None if no post-signal bar is available yet."""
+    start = signal_at + timedelta(minutes=SIM_MOMENTUM_FILL_LATENCY_MIN)
+    end = start + timedelta(minutes=SIM_MOMENTUM_FILL_WINDOW_MIN)
+    bars = _fetch_1m_bars(_yfinance_symbol(symbol), start, end)
+    if bars is None or bars.empty:
+        return None
+    first = bars.iloc[0]
+    px = _float_or_none(first.get("Open")) or _float_or_none(first.get("Close"))
+    if not px:
+        return None
+    return px, bars.index[0].to_pydatetime()
 
 
 def _parse_dt(value) -> Optional[datetime]:
@@ -396,21 +392,46 @@ def _create_momentum_continuation_sims(market: str = "US") -> int:
         if stage != "watch":
             continue
 
-        fill_price = _signal_reference_price(sig)
         entry_min = float(sig.get("entry_min") or 0)
         entry_max = float(sig.get("entry_max") or 0)
         stop_price = float(sig.get("stop_price") or 0)
         side = str(sig.get("side") or "BUY").upper()
-        if not (fill_price and stop_price and entry_min and entry_max):
+        t1 = float(sig["target_1"]) if sig.get("target_1") is not None else None
+        if not (stop_price and entry_min and entry_max):
             continue
+
+        # Realistic fill: the first 1m bar after the signal, not the stale
+        # reference price (which produced look-ahead "instant target" wins).
+        signal_at = _parse_dt(sig.get("created_at"))
+        if signal_at is None:
+            continue
+        fill = _next_bar_fill(sig.get("data_symbol"), signal_at)
+        if fill is None:
+            # No post-signal bar available yet — retry on a later cycle.
+            continue
+        fill_price, fill_at_dt = fill
+        fill_at = _iso_z(fill_at_dt)
+
         if side == "BUY" and fill_price <= stop_price:
             continue
         if side == "SELL" and fill_price >= stop_price:
             continue
+        # If price already reached the target by the time we could buy, the move
+        # is gone — that's a missed entry, not a momentum win. Skip it.
+        if t1 is not None and (
+            (side == "BUY" and fill_price >= t1) or (side == "SELL" and fill_price <= t1)
+        ):
+            log_event("INFO", "advisory_auto_sim_momentum_missed", {
+                "advisory_signal_id": sig_id,
+                "symbol": sig.get("data_symbol"),
+                "fill_price": round(fill_price, 4),
+                "target_1": t1,
+                "reason": "price_past_t1_before_fill",
+            })
+            continue
 
         composite = sig.get("composite_score")
         breakout = sig.get("breakout_quality")
-        fill_at = sig.get("created_at")
         payload = {
             "advisory_signal_id": sig_id,
             "data_symbol": sig.get("data_symbol"),
@@ -425,7 +446,7 @@ def _create_momentum_continuation_sims(market: str = "US") -> int:
             "entry_min": entry_min,
             "entry_max": entry_max,
             "stop_price": stop_price,
-            "target_1": float(sig.get("target_1")) if sig.get("target_1") is not None else None,
+            "target_1": t1,
             "target_2": float(sig.get("target_2")) if sig.get("target_2") is not None else None,
             "suggested_size_eur": sig.get("suggested_size_eur"),
             "simulated_at": fill_at,
@@ -435,7 +456,8 @@ def _create_momentum_continuation_sims(market: str = "US") -> int:
             "fill_price": round(float(fill_price), 4),
             "mfe_pct": 0.0,
             "mae_pct": 0.0,
-            "notes": {"synthetic_fill": "signal_reference_price"},
+            "notes": {"synthetic_fill": "next_bar_after_signal",
+                      "signal_at": _iso_z(signal_at)},
             "entry_policy": "momentum_continuation",
             "entry_policy_quality": _entry_policy_quality(fill_price, entry_min, entry_max),
             "sim_version": SIM_VERSION,

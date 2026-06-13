@@ -29,19 +29,55 @@ def test_create_momentum_continuation_sim_for_high_grade_watch(monkeypatch):
         },
     }
     inserted = []
+    fill_at = datetime(2026, 6, 10, 14, 36, tzinfo=timezone.utc)
 
     monkeypatch.setattr(sim, "SIM_MOMENTUM_ENABLED", True)
     monkeypatch.setattr(sim, "SIM_MOMENTUM_MIN_GRADE", "A")
     monkeypatch.setattr(sim, "get_eligible_advisory_signals_for_simulation", lambda **_: [signal])
     monkeypatch.setattr(sim, "get_advisory_auto_sim_signal_ids", lambda: set())
+    # Realistic next-bar fill (within band, below T1) instead of stale reference price.
+    monkeypatch.setattr(sim, "_next_bar_fill", lambda symbol, signal_at: (142.5, fill_at))
     monkeypatch.setattr(sim, "insert_advisory_auto_simulation", lambda payload: inserted.append(payload) or {})
 
     assert sim._create_momentum_continuation_sims(market="US") == 1
     payload = inserted[0]
     assert payload["mode"] == "momentum_continuation"
     assert payload["status"] == "filled"
-    assert payload["fill_price"] == 144.25
-    assert payload["entry_policy_quality"] > 1
+    assert payload["fill_price"] == 142.5
+    assert payload["fill_at"] == "2026-06-10T14:36:00Z"
+    assert payload["notes"]["synthetic_fill"] == "next_bar_after_signal"
+    # Filled mid-band (142.5 in [142,143]) → entry quality 0.5.
+    assert payload["entry_policy_quality"] == 0.5
+
+
+def test_momentum_continuation_skips_when_price_already_past_t1(monkeypatch):
+    # Look-ahead guard: if the next available bar is already at/through T1, the
+    # move is gone — record nothing rather than booking a fictitious win.
+    signal = {
+        "id": 125,
+        "created_at": "2026-06-10T14:35:00Z",
+        "data_symbol": "AMD",
+        "market": "US",
+        "side": "BUY",
+        "grade": "A",
+        "entry_min": 142.0,
+        "entry_max": 143.0,
+        "stop_price": 139.5,
+        "target_1": 147.0,
+        "signal_json": {"alert_stage": "watch"},
+    }
+    fill_at = datetime(2026, 6, 10, 14, 36, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(sim, "SIM_MOMENTUM_ENABLED", True)
+    monkeypatch.setattr(sim, "SIM_MOMENTUM_MIN_GRADE", "A")
+    monkeypatch.setattr(sim, "get_eligible_advisory_signals_for_simulation", lambda **_: [signal])
+    monkeypatch.setattr(sim, "get_advisory_auto_sim_signal_ids", lambda: set())
+    monkeypatch.setattr(sim, "_next_bar_fill", lambda symbol, signal_at: (148.0, fill_at))  # already > T1
+    monkeypatch.setattr(sim, "log_event", lambda *_, **__: None)
+    monkeypatch.setattr(sim, "insert_advisory_auto_simulation",
+                        lambda payload: (_ for _ in ()).throw(AssertionError(payload)))
+
+    assert sim._create_momentum_continuation_sims(market="US") == 0
 
 
 def test_create_momentum_continuation_skips_lower_grade_watch(monkeypatch):
