@@ -1,6 +1,6 @@
 name: Trading Agent - Advisory US
 
-# US-only advisory cycle. Scans ADVISORY_UNIVERSE["US"] only (14 tickers).
+# US-only advisory cycle. Scans ADVISORY_UNIVERSE["US"] only (19 tickers).
 # Triggered every 2 min by cron-job.org during NYSE/NASDAQ session hours.
 # Runs independently from advisory-eu.yml so EU and US cycles never compete.
 #
