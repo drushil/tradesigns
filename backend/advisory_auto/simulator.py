@@ -975,13 +975,15 @@ def _capture_bar_paths_eod(market: str = "US", now_utc: Optional[datetime] = Non
     pending = get_resolved_sims_missing_bars(market=market, days_back=3, limit=200)
     captured = 0
     for sim in pending:
-        fill_at = _parse_dt(sim.get("fill_at"))
-        if fill_at is None:
+        # Filled sims store fill->close; expired sims (never filled) store
+        # simulated->close so the missed-entry analysis can see the path.
+        start = _parse_dt(sim.get("fill_at")) or _parse_dt(sim.get("simulated_at"))
+        if start is None:
             continue
-        session_close = _us_session_close_utc(fill_at)
+        session_close = _us_session_close_utc(start)
         if session_close is None or now_utc < session_close + timedelta(minutes=30):
             continue  # capture only once the day is definitively over
-        path = _capture_bar_path(sim.get("data_symbol"), fill_at, session_close)
+        path = _capture_bar_path(sim.get("data_symbol"), start, session_close)
         if not path:
             continue
         res = update_advisory_auto_simulation(int(sim["id"]), {"bars_json": path})

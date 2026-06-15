@@ -1385,14 +1385,14 @@ def get_resolved_sims_missing_bars(market: str = "US", days_back: int = 3,
         cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat() + "Z"
         db = get_client()
         result = (db.table("advisory_auto_simulations")
-                  .select("id,data_symbol,market,fill_at,closed_at,status")
+                  .select("id,data_symbol,market,fill_at,simulated_at,closed_at,status")
                   .eq("market", market.upper())
                   .is_("bars_json", "null")
-                  .gte("fill_at", cutoff)
+                  .gte("simulated_at", cutoff)
                   .in_("status", ["hit_stop", "hit_target_1", "hit_target_2",
                                   "hit_near_t1_protection", "closed_eod_win",
-                                  "closed_eod_loss", "closed_eod"])
-                  .order("fill_at", desc=True)
+                                  "closed_eod_loss", "closed_eod", "expired"])
+                  .order("simulated_at", desc=True)
                   .limit(limit)
                   .execute())
         return result.data or []

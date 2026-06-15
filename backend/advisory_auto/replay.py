@@ -124,6 +124,114 @@ def _is_win(status: str) -> bool:
                       "hit_near_t1_protection", "closed_eod_win")
 
 
+# ── Missed-entry analysis (stale-level classification + counterfactual R) ─────
+
+def classify_entry(placement_price: float, entry_max: float,
+                   t1: Optional[float], tol_pct: float, dnc_pct: float) -> str:
+    """Classify where price sat at limit-placement time relative to the band:
+      in_or_near_band  — would fill (or within tolerance) under watch_pullback
+      stale_past_t1    — price already at/above target; recognised too late, no trade
+      too_extended     — above band beyond the do-not-chase limit; skip
+      reroute_candidate — above band, below T1, within chase limit -> momentum entry
+    """
+    if entry_max <= 0 or placement_price <= 0:
+        return "unknown"
+    if placement_price <= entry_max * (1 + tol_pct / 100.0):
+        return "in_or_near_band"
+    if t1 is not None and placement_price >= t1:
+        return "stale_past_t1"
+    if placement_price > entry_max * (1 + dnc_pct / 100.0):
+        return "too_extended"
+    return "reroute_candidate"
+
+
+def _scan_to_r(bars, fill_price, stop, t1, t2, arm, retrace, side="BUY"):
+    """Run the shared exit scanner from a hypothetical fill and return R."""
+    status, term_close, _ts, _mfe, _mae, _peak = _scan_bars_for_exit(
+        bars, fill_price, stop, t1, t2, 0.0, 0.0, arm, retrace
+    )
+    if status is None:
+        eod = term_close or fill_price
+        exit_px = eod
+    else:
+        exit_px = _exit_price(status, fill_price, stop, t1, t2, term_close or fill_price)
+    return _r_multiple(fill_price, stop, exit_px, side)
+
+
+def analyze_missed_entry(sim: dict, *, tol_pct: float = 0.15, dnc_pct: float = 1.5,
+                         arm: float = BASELINE_ARM, retrace: float = BASELINE_RETRACE,
+                         bars=None) -> Optional[dict]:
+    """For a watch_pullback sim, classify the entry vs where price actually was
+    at placement, and compute the counterfactual R of (a) a next-bar momentum
+    reroute and (b) an entry-tolerance fill at the band top."""
+    sim_at = _parse_dt(sim.get("simulated_at")) or _parse_dt(sim.get("fill_at"))
+    entry_max = float(sim.get("entry_max") or 0)
+    stop = float(sim.get("stop_price") or 0)
+    t1 = float(sim["target_1"]) if sim.get("target_1") is not None else None
+    t2 = float(sim["target_2"]) if sim.get("target_2") is not None else None
+    if sim_at is None or entry_max <= 0 or stop <= 0:
+        return None
+    if bars is None:
+        bars = _bars_from_json(sim.get("bars_json"))
+        if bars is None:
+            sc = _us_session_close_utc(sim_at) or (sim_at + timedelta(hours=7))
+            bars = _fetch_1m_bars(_yfinance_symbol(sim.get("data_symbol")), sim_at, sc)
+    if bars is None or bars.empty:
+        return None
+
+    placement = float(bars.iloc[0].get("Close") or 0)
+    if placement <= 0:
+        return None
+    cls = classify_entry(placement, entry_max, t1, tol_pct, dnc_pct)
+    out = {
+        "classification": cls,
+        "placement": round(placement, 4),
+        "dist_to_entry_max_pct": round((placement - entry_max) / entry_max * 100, 3),
+        "dist_to_t1_pct": round((placement - t1) / t1 * 100, 3) if t1 else None,
+        "momentum_r": None,
+        "tolerance_r": None,
+    }
+    # (a) momentum reroute — buy at next bar, but only when it's a fair candidate.
+    if cls == "reroute_candidate":
+        out["momentum_r"] = _scan_to_r(bars, placement, stop, t1, t2, arm, retrace)
+    # (b) entry tolerance — fill at the band top if price dipped within tolerance.
+    if cls != "stale_past_t1":
+        touch_lvl = entry_max * (1 + tol_pct / 100.0)
+        rows = list(bars.iterrows())
+        for i, (_ts, bar) in enumerate(rows):
+            if float(bar.get("Low") or 1e18) <= touch_lvl:
+                out["tolerance_r"] = _scan_to_r(
+                    bars.iloc[i:], entry_max, stop, t1, t2, arm, retrace
+                )
+                break
+    return out
+
+
+def missed_entry_report(sims: list, **params) -> list:
+    """Aggregate analyze_missed_entry across sims, grouped by classification."""
+    by_cls: dict = defaultdict(lambda: {"n": 0, "mom": [], "tol": []})
+    for sim in sims:
+        a = analyze_missed_entry(sim, **params)
+        if a is None:
+            continue
+        c = by_cls[a["classification"]]
+        c["n"] += 1
+        if a["momentum_r"] is not None:
+            c["mom"].append(a["momentum_r"])
+        if a["tolerance_r"] is not None:
+            c["tol"].append(a["tolerance_r"])
+    rows = []
+    for cls, c in sorted(by_cls.items()):
+        rows.append({
+            "classification": cls, "n": c["n"],
+            "n_momentum": len(c["mom"]),
+            "avg_momentum_r": round(sum(c["mom"]) / len(c["mom"]), 3) if c["mom"] else None,
+            "n_tolerance": len(c["tol"]),
+            "avg_tolerance_r": round(sum(c["tol"]) / len(c["tol"]), 3) if c["tol"] else None,
+        })
+    return rows
+
+
 def sweep(sims: list, arms: list, retraces: list) -> list:
     """Replay every sim across the arm x retrace grid. Bars are fetched once per
     sim and reused. Returns a list of per-(arm, retrace, policy) report rows."""

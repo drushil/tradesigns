@@ -84,6 +84,34 @@ def test_stored_bar_path_round_trips_to_same_result():
     assert from_storage["r"] == live["r"] == 2.0
 
 
+def test_classify_entry_buckets():
+    # placement, entry_max, t1, tol, dnc
+    assert replay.classify_entry(100.1, 100.0, 104.0, 0.15, 1.5) == "in_or_near_band"  # within 0.15% tol
+    assert replay.classify_entry(105.0, 100.0, 104.0, 0.15, 1.5) == "stale_past_t1"     # past T1
+    assert replay.classify_entry(102.0, 100.0, 104.0, 0.15, 1.5) == "too_extended"      # >1.5% above
+    assert replay.classify_entry(101.0, 100.0, 104.0, 0.15, 1.5) == "reroute_candidate" # above band, below T1
+
+
+def test_analyze_missed_entry_reroute_recovers_a_winner():
+    # Placement 101 (above band top 100, below T1 104) -> reroute candidate;
+    # price then runs to T1.
+    bars = _bars([(1, 100.8, 101.2, 101.0), (2, 103.5, 105.0, 104.6)])
+    sim = _sim(simulated_at="2026-06-10T14:00:00Z", entry_min=99.0, entry_max=100.0,
+               stop_price=98.0, target_1=104.0, target_2=108.0)
+    a = replay.analyze_missed_entry(sim, bars=bars)
+    assert a["classification"] == "reroute_candidate"
+    assert a["momentum_r"] == 1.0  # fill 101, stop 98 (R=3); exit T1 104 -> +3/3 = 1.0
+
+
+def test_analyze_missed_entry_stale_is_no_trade():
+    bars = _bars([(1, 104.5, 105.0, 104.8)])  # placement 104.8 already past T1 104
+    sim = _sim(simulated_at="2026-06-10T14:00:00Z", entry_min=99.0, entry_max=100.0,
+               stop_price=98.0, target_1=104.0)
+    a = replay.analyze_missed_entry(sim, bars=bars)
+    assert a["classification"] == "stale_past_t1"
+    assert a["momentum_r"] is None  # correctly not rerouted
+
+
 def test_sweep_reports_per_policy_rows(monkeypatch):
     bars = _bars([(1, 100.0, 105.0, 104.5)])  # immediate T1
     monkeypatch.setattr(replay, "_fetch_1m_bars", lambda *a, **k: bars)
