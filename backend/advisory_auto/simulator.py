@@ -187,28 +187,61 @@ def _iso_z(dt: datetime) -> str:
     return dt.isoformat() + "Z"
 
 
-def _fetch_1m_bars(symbol: str, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
-    """Fetch 1-minute bars covering [start, end] in UTC. Returns None on failure."""
-    if end <= start:
+def _filter_regular_session(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Keep only US regular-session bars (09:30–16:00 ET), DST-safe. Alpaca
+    returns pre/post-market 1m bars; the simulator only ever fills/exits during
+    the regular session, so extended-hours prints must be dropped or the
+    High/Low scan would trigger on illiquid quotes a live limit never sees."""
+    if df is None or df.empty:
+        return df
+    try:
+        from zoneinfo import ZoneInfo
+        ny = df.index.tz_convert(ZoneInfo("America/New_York"))
+        mins = ny.hour * 60 + ny.minute
+        return df[(mins >= 570) & (mins <= 960)]  # 09:30 .. 16:00 ET inclusive
+    except Exception:
+        return df
+
+
+def _alpaca_1m_bars(symbol: str, start: datetime, end: datetime) -> Optional["pd.DataFrame"]:
+    """Exact [start, end] 1-minute bars from Alpaca (deep history, unlike
+    yfinance's ~1-2 day 1m window). Returns tz-aware UTC OHLC, or None."""
+    try:
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from backend.signals.engine import _get_alpaca_data_client
+        client = _get_alpaca_data_client()
+        if client is None:
+            return None
+        resp = client.get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
+            start=start, end=end,
+        ))
+        df = getattr(resp, "df", None)
+        if df is None or df.empty:
+            return None
+        if isinstance(df.index, pd.MultiIndex):
+            df = df.droplevel(0)
+        df.index = pd.to_datetime(df.index, utc=True)
+        df.columns = [c.title() for c in df.columns]
+        return df
+    except Exception:
         return None
+
+
+def _yfinance_1m_bars(symbol: str, start: datetime, end: datetime) -> Optional["pd.DataFrame"]:
+    """yfinance fallback — only the last ~1-2 trading days of 1m bars exist."""
     try:
         import yfinance as yf
         period_minutes = (end - start).total_seconds() / 60.0
-        # yfinance 1m bars limited to ~7 days; pick the smallest period that covers.
         if period_minutes <= 60 * 6:
             period = "1d"
         elif period_minutes <= 60 * 24 * 2:
             period = "2d"
         else:
             period = "5d"
-        df = yf.download(
-            symbol,
-            period=period,
-            interval="1m",
-            prepost=False,
-            progress=False,
-            auto_adjust=True,
-        )
+        df = yf.download(symbol, period=period, interval="1m",
+                         prepost=False, progress=False, auto_adjust=True)
         if df is None or df.empty:
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -219,9 +252,27 @@ def _fetch_1m_bars(symbol: str, start: datetime, end: datetime) -> Optional[pd.D
             df.index = df.index.tz_localize(timezone.utc)
         else:
             df.index = df.index.tz_convert(timezone.utc)
-        return df[(df.index >= start) & (df.index <= end)]
+        return df
     except Exception:
         return None
+
+
+def _fetch_1m_bars(symbol: str, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
+    """Fetch regular-session 1-minute bars covering [start, end] in UTC.
+
+    Alpaca first (deep, real-time-ish minute history), yfinance as fallback.
+    Both are clipped to the US regular session and to [start, end]."""
+    if end <= start:
+        return None
+    df = _alpaca_1m_bars(symbol, start, end)
+    if df is None or df.empty:
+        df = _yfinance_1m_bars(symbol, start, end)
+    if df is None or df.empty:
+        return None
+    df = _filter_regular_session(df)
+    if df is None or df.empty:
+        return None
+    return df[(df.index >= start) & (df.index <= end)]
 
 
 def _create_pending_sims(market: str = "US") -> int:
