@@ -1,0 +1,71 @@
+name: Trading Agent - German Broker Morning Watch
+
+# Advisory-only pre-open watchlist for Trade Republic / Scalable (LS / gettex).
+# Overnight ES/NQ futures tone + the prior US session's strongest advisory names.
+# No broker orders, no advisory-auto execution — Discord card only.
+
+on:
+  schedule:
+    # 05:10 UTC = 07:10 CEST (summer), ~20 min before the 07:30 German open.
+    # In winter (CET) this lands at 06:10 — still pre-open, an hour early.
+    - cron: '10 5 * * 1-5'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [german-morning-cycle]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: german-morning-cycle
+  cancel-in-progress: true
+
+jobs:
+  run-german-morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        run: |
+          for attempt in 1 2 3; do
+            echo "Checkout attempt $attempt..."
+            curl -fsSL "https://api.github.com/repos/drushil/tradesigns/tarball/main" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              -o repo.tar.gz && \
+            file repo.tar.gz | grep -q "gzip" && \
+            tar -xzf repo.tar.gz --strip-components=1 && \
+            rm repo.tar.gz && \
+            echo "Checkout succeeded on attempt $attempt" && break
+            echo "Attempt $attempt failed, retrying in 15s..."
+            rm -f repo.tar.gz
+            sleep 15
+          done
+          [ -f requirements-agent.txt ] || { echo "Checkout failed after 3 attempts"; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements-agent.txt
+
+      - name: Run German morning watch
+        env:
+          ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
+          ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
+          SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
+          SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
+          SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
+          DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          GERMAN_MORNING_WATCH_ENABLED: "${{ vars.GERMAN_MORNING_WATCH_ENABLED }}"
+          GERMAN_MORNING_MAX_NAMES: "${{ vars.GERMAN_MORNING_MAX_NAMES }}"
+        run: |
+          python - <<'PY'
+          from backend.advisory_auto.german_morning import run_german_morning_watch
+          print(run_german_morning_watch())
+          PY
