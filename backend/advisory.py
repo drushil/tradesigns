@@ -2147,6 +2147,7 @@ def _build_downside_candidate(
         },
         "market_context_json": {
             **_market_context(market),
+            "regime": getattr(regime_state, "market_regime", None),
             "at_signal": market_context_at_signal or {},
         },
     }
@@ -2362,6 +2363,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "signal_json": _compact_signal_payload(signal_result),
         "market_context_json": {
             **_market_context(market),
+            "regime": getattr(regime_state, "market_regime", None),
             "at_signal": market_context_at_signal,
         },
         "data_quality_json": quality,
