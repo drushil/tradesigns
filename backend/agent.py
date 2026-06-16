@@ -187,6 +187,11 @@ HORIZON  = _env_value("INVESTMENT_HORIZON", "short")
 LLM_HOUR_LIMIT = _env_int("LLM_CALLS_PER_HOUR_LIMIT", 20)
 IS_PAPER_TRADING = _env_value("ALPACA_PAPER", "true").lower() != "false"
 
+
+def _auto_trade_enabled() -> bool:
+    """Master gate for main-agent new entries; exit management still runs."""
+    return _env_bool("AUTO_TRADE_ENABLED", True)
+
 # Global learning engine (persists in memory between cycles)
 _learning_engine: Optional[RegimeAwareWeightEngine] = None
 _llm_calls_this_hour = 0
@@ -754,13 +759,26 @@ def run_signal_cycle():
                 )
             for candidate in candidates[:max_per_cycle]:
                 try:
-                    _execute_trade_candidate(candidate, effective_profile, portfolio_state)
+                    if _auto_trade_enabled():
+                        _execute_trade_candidate(candidate, effective_profile, portfolio_state)
+                    else:
+                        log_event("INFO", "auto_trade_entry_skipped", {
+                            "ticker": candidate["ticker"],
+                            "reason": "AUTO_TRADE_ENABLED=false",
+                            "entry_path": "ranked_candidate",
+                        })
                 except Exception as e:
                     log_event("ERROR", f"candidate_execution_error_{candidate['ticker']}", {"error": str(e)})
 
-    _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile, regime_state)
+    if _auto_trade_enabled():
+        _run_dip_buy_scan(TICKERS, portfolio_state, macro_regime, effective_profile, regime_state)
+    else:
+        log_event("INFO", "auto_trade_entry_skipped", {
+            "reason": "AUTO_TRADE_ENABLED=false",
+            "entry_path": "dip_buy_scan",
+        })
 
-    if _should_run_swing_recheck():
+    if _auto_trade_enabled() and _should_run_swing_recheck():
         run_swing_cycle(
             portfolio_state=portfolio_state,
             profile=effective_profile,
@@ -768,6 +786,11 @@ def run_signal_cycle():
             regime_state=regime_state,
             macro_regime=macro_regime,
         )
+    elif not _auto_trade_enabled():
+        log_event("INFO", "auto_trade_entry_skipped", {
+            "reason": "AUTO_TRADE_ENABLED=false",
+            "entry_path": "swing_cycle",
+        })
 
     # Check open trades for stop-loss / time exit
     _check_exits(portfolio_state, effective_profile)

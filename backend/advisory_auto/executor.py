@@ -1,6 +1,6 @@
 """
 backend/advisory_auto/executor.py
-Advisory-auto dry-run executor (Phase 2).
+Advisory-auto executor.
 
 Grades A+, A, B are evaluated. Eligible signals are sized using the advisory
 signal's own suggested_size_eur scaled by a grade multiplier:
@@ -14,10 +14,10 @@ tiebreaker within the same grade. Each trade sizes independently — no
 proportional scaling based on concurrent count. The hard position cap
 (MAX_POSITIONS) stops new entries once reached.
 
-Phase 2 only — no broker orders are submitted (ADVISORY_AUTO_DRY_RUN=true).
-Phase 3 (actual paper bracket orders) requires:
-  - Validated dry-run history (10+ eligible decisions, skip reasons look sane)
-  - ADVISORY_AUTO_DRY_RUN=false set explicitly
+Dry-run decisions and paper execution are intentionally separate. Keep
+ADVISORY_AUTO_DRY_RUN=true to retain the control-group decision log; set
+ADVISORY_AUTO_PAPER_EXECUTION=true to submit qualifying orders to the dedicated
+Alpaca paper account at the same time.
 
 Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_CAPITAL_EUR         Paper capital budget (default: 20000)
@@ -27,22 +27,27 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_ALLOC_A             % of suggested_size_eur for A  (default: 70)
   ADVISORY_AUTO_ALLOC_B             % of suggested_size_eur for B  (default: 50)
   ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN  Max signal age to consider (default: 5)
-  ADVISORY_AUTO_DRY_RUN             Set false to enable live orders (default: true)
+  ADVISORY_AUTO_DRY_RUN             Keep dry-run decision logging (default: true)
+  ADVISORY_AUTO_PAPER_EXECUTION     Submit paper bracket orders (default: false)
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
 from __future__ import annotations
 
+import math
 import os
 from datetime import datetime, timezone
 from typing import Optional
 
 from database.client import (
+    get_active_advisory_auto_signals,
     get_advisory_auto_eligible,
     get_advisory_auto_daily_pnl,
     get_advisory_auto_open_count,
+    insert_trade,
     mark_advisory_auto_decision,
     log_event,
+    update_advisory_auto_fields,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -55,6 +60,7 @@ ALLOC_A            = float(os.getenv("ADVISORY_AUTO_ALLOC_A",      "70"))  / 100
 ALLOC_B            = float(os.getenv("ADVISORY_AUTO_ALLOC_B",      "50"))  / 100   # 0.50
 MAX_SIGNAL_AGE_MIN = float(os.getenv("ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN", "5"))
 DRY_RUN            = os.getenv("ADVISORY_AUTO_DRY_RUN", "true").strip().lower() != "false"
+PAPER_EXECUTION    = os.getenv("ADVISORY_AUTO_PAPER_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
@@ -70,6 +76,9 @@ _SKIP_ALPACA_LONG  = "skipped_existing_alpaca_exposure"
 _SKIP_PENDING      = "skipped_pending_order"
 _SKIP_POSITION_CAP = "skipped_position_cap"
 _SKIP_DAILY_LOSS   = "skipped_daily_loss"
+_SKIP_ORDER_FAILED = "paper_order_failed"
+
+_TERMINAL_CANCEL_STATUSES = {"canceled", "cancelled", "expired", "rejected"}
 
 
 def _get_auto_client():
@@ -103,6 +112,236 @@ def _get_alpaca_open_orders() -> set[str]:
     except Exception as e:
         log_event("WARN", "advisory_auto_orders_failed", {"error": str(e)[:160]})
         return set()
+
+
+def _get_auto_order(order_id: str):
+    """Fetch a paper order, including bracket legs when supported by the SDK."""
+    from alpaca.trading.requests import GetOrderByIdRequest
+
+    client = _get_auto_client()
+    try:
+        return client.get_order_by_id(order_id, GetOrderByIdRequest(nested=True))
+    except TypeError:
+        return client.get_order_by_id(order_id)
+
+
+def _status_text(value) -> str:
+    raw = str(value or "").strip().lower()
+    return raw.split(".")[-1]
+
+
+def _float_attr(obj, name: str, default: float = 0.0) -> float:
+    try:
+        return float(getattr(obj, name, None) or default)
+    except Exception:
+        return default
+
+
+def _eurusd_rate(signal: dict = None) -> float:
+    signal = signal or {}
+    for value in (signal.get("fx_rate"), os.getenv("EURUSD_RATE")):
+        try:
+            rate = float(value or 0)
+            if rate > 0:
+                return rate
+        except Exception:
+            pass
+    return 1.08
+
+
+def _round_price(price: float) -> float:
+    return round(float(price), 2) if float(price) >= 1 else round(float(price), 4)
+
+
+def _client_order_id(signal_id: int, ticker: str) -> str:
+    ticker_safe = "".join(ch for ch in str(ticker).upper() if ch.isalnum())[:10]
+    return f"advauto-{signal_id}-{ticker_safe}".lower()
+
+
+def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> dict:
+    ticker = str(signal.get("data_symbol") or "").upper()
+    entry_min = float(signal.get("entry_min") or 0)
+    entry_max = float(signal.get("entry_max") or 0)
+    stop_price = float(signal.get("stop_price") or 0)
+    target_1 = float(signal.get("target_1") or 0)
+    if not ticker or entry_min <= 0 or entry_max <= 0 or stop_price <= 0 or target_1 <= 0:
+        return {"error": "invalid_order_levels"}
+    if current_price <= 0:
+        current_price = entry_max
+    limit_price = min(max(float(current_price), entry_min), entry_max)
+    if not (stop_price < limit_price < target_1):
+        return {
+            "error": "invalid_bracket_geometry",
+            "limit_price": limit_price,
+            "stop_price": stop_price,
+            "target_1": target_1,
+        }
+
+    size_usd = float(size_eur) * _eurusd_rate(signal)
+    qty = math.floor(size_usd / limit_price)
+    if qty <= 0:
+        return {
+            "error": "quantity_below_one_share",
+            "limit_price": limit_price,
+            "size_usd": round(size_usd, 2),
+        }
+
+    return {
+        "ticker": ticker,
+        "qty": qty,
+        "limit_price": _round_price(limit_price),
+        "take_profit_price": _round_price(target_1),
+        "stop_price": _round_price(stop_price),
+        "size_usd": round(qty * limit_price, 2),
+        "size_eur": round((qty * limit_price) / _eurusd_rate(signal), 2),
+    }
+
+
+def _submit_paper_bracket_order(signal: dict, current_price: float, size_eur: float) -> dict:
+    """Submit a long-only limit bracket order to the advisory-auto paper account."""
+    levels = _paper_order_levels(signal, current_price, size_eur)
+    if "error" in levels:
+        return levels
+
+    try:
+        from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+
+        signal_id = int(signal["id"])
+        req = LimitOrderRequest(
+            symbol=levels["ticker"],
+            qty=levels["qty"],
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+            limit_price=levels["limit_price"],
+            order_class=OrderClass.BRACKET,
+            take_profit=TakeProfitRequest(limit_price=levels["take_profit_price"]),
+            stop_loss=StopLossRequest(stop_price=levels["stop_price"]),
+            client_order_id=_client_order_id(signal_id, levels["ticker"]),
+        )
+        order = _get_auto_client().submit_order(req)
+        return {
+            **levels,
+            "order_id": str(order.id),
+            "client_order_id": _client_order_id(signal_id, levels["ticker"]),
+            "status": _status_text(getattr(order, "status", "")),
+            "submitted_qty": _float_attr(order, "qty", levels["qty"]),
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:200], **levels}
+
+
+def _filled_exit_leg(order) -> Optional[dict]:
+    for leg in getattr(order, "legs", None) or []:
+        status = _status_text(getattr(leg, "status", ""))
+        filled_qty = _float_attr(leg, "filled_qty", 0.0)
+        filled_price = _float_attr(leg, "filled_avg_price", 0.0)
+        if status == "filled" and filled_qty > 0 and filled_price > 0:
+            order_type = _status_text(getattr(leg, "order_type", ""))
+            return {
+                "price": filled_price,
+                "qty": filled_qty,
+                "exit_reason": "take_profit" if "limit" in order_type else "stop_loss",
+                "order_id": str(getattr(leg, "id", "")),
+            }
+    return None
+
+
+def _insert_closed_trade(signal: dict, exit_leg: dict, order) -> dict:
+    entry_price = float(signal.get("auto_fill_price") or _float_attr(order, "filled_avg_price", 0.0))
+    qty = float(signal.get("auto_fill_qty") or exit_leg.get("qty") or _float_attr(order, "filled_qty", 0.0))
+    exit_price = float(exit_leg["price"])
+    pnl_usd = (exit_price - entry_price) * qty
+    pnl_eur = pnl_usd / _eurusd_rate(signal)
+    entry_time = getattr(order, "filled_at", None) or getattr(order, "updated_at", None)
+    exit_time = datetime.utcnow().isoformat() + "Z"
+    return insert_trade({
+        "ticker": signal.get("data_symbol"),
+        "side": "BUY",
+        "entry_price": round(entry_price, 4),
+        "exit_price": round(exit_price, 4),
+        "quantity": round(qty, 6),
+        "stop_price": signal.get("stop_price"),
+        "take_profit_price": signal.get("target_1"),
+        "order_id": signal.get("auto_order_id"),
+        "close_order_id": exit_leg.get("order_id"),
+        "size_eur": round((entry_price * qty) / _eurusd_rate(signal), 2),
+        "size_usd": round(entry_price * qty, 2),
+        "pnl_pct": round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None,
+        "net_pnl_pct": round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None,
+        "pnl_eur": round(pnl_eur, 2),
+        "entry_time": str(entry_time) if entry_time else None,
+        "exit_time": exit_time,
+        "exit_reason": exit_leg["exit_reason"],
+        "composite_score": signal.get("composite_score"),
+        "signals_json": signal.get("signal_json") or {},
+        "trade_source": "advisory_auto",
+        "advisory_signal_id": signal.get("id"),
+        "horizon": "intraday",
+        "strategy_family": "advisory_auto",
+    })
+
+
+def _reconcile_active_orders() -> dict:
+    """Sync submitted/filled advisory-auto paper orders from Alpaca into Supabase."""
+    active = get_active_advisory_auto_signals(limit=100)
+    result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0, "errors": 0}
+    for signal in active:
+        result["checked"] += 1
+        signal_id = signal.get("id")
+        order_id = signal.get("auto_order_id")
+        try:
+            order = _get_auto_order(order_id)
+            status = _status_text(getattr(order, "status", ""))
+            if status in _TERMINAL_CANCEL_STATUSES:
+                mapped = "cancelled" if status in {"canceled", "cancelled", "expired"} else "rejected"
+                update_advisory_auto_fields(signal_id, {
+                    "auto_status": mapped,
+                    "auto_exit_reason": status,
+                })
+                result["terminal"] += 1
+                continue
+
+            filled_price = _float_attr(order, "filled_avg_price", 0.0)
+            filled_qty = _float_attr(order, "filled_qty", 0.0)
+            if status == "filled" and str(signal.get("auto_status")) == "submitted":
+                update_advisory_auto_fields(signal_id, {
+                    "auto_status": "filled",
+                    "auto_fill_price": round(filled_price, 4) if filled_price else None,
+                    "auto_fill_qty": round(filled_qty, 6) if filled_qty else None,
+                })
+                signal = {**signal, "auto_status": "filled",
+                          "auto_fill_price": filled_price, "auto_fill_qty": filled_qty}
+                result["filled"] += 1
+
+            exit_leg = _filled_exit_leg(order)
+            if status == "filled" and exit_leg:
+                trade = _insert_closed_trade(signal, exit_leg, order)
+                if "error" in trade:
+                    result["errors"] += 1
+                    log_event("WARN", "advisory_auto_trade_insert_failed", {
+                        "advisory_signal_id": signal_id,
+                        "error": str(trade["error"])[:160],
+                    })
+                    continue
+                pnl_eur = trade.get("pnl_eur")
+                update_advisory_auto_fields(signal_id, {
+                    "auto_status": "closed",
+                    "auto_pnl_eur": pnl_eur,
+                    "auto_exit_reason": exit_leg["exit_reason"],
+                })
+                result["closed"] += 1
+        except Exception as exc:
+            result["errors"] += 1
+            log_event("WARN", "advisory_auto_reconcile_failed", {
+                "advisory_signal_id": signal_id,
+                "order_id": order_id,
+                "error": str(exc)[:160],
+            })
+
+    if result["checked"] or result["errors"]:
+        log_event("INFO", "advisory_auto_reconcile", result)
+    return result
 
 
 def _signal_age_minutes(signal: dict) -> float:
@@ -188,7 +427,10 @@ def run_advisory_auto_cycle() -> dict:
     results: dict = {
         "cycle_at": datetime.utcnow().isoformat() + "Z",
         "dry_run": DRY_RUN,
+        "paper_execution": PAPER_EXECUTION,
+        "reconcile": _reconcile_active_orders(),
         "eligible": [],
+        "submitted": [],
         "skipped": [],
         "errors": [],
     }
@@ -289,21 +531,54 @@ def run_advisory_auto_cycle() -> dict:
                 size_eur = _compute_size_eur(sig)
                 accepted_tickers.add(ticker)
                 eligible_this_cycle += 1
-                results["eligible"].append({
+                eligible_record = {
                     "signal_id": signal_id, "ticker": ticker,
                     "grade": grade,
                     "alloc_pct": round(_GRADE_ALLOC.get(grade, ALLOC_B) * 100),
                     "composite": sig.get("composite_score"),
                     "size_eur": size_eur,
                     "dry_run": DRY_RUN,
-                })
+                }
+                results["eligible"].append(eligible_record)
                 log_event("INFO", "advisory_auto_eligible", {
                     "signal_id": signal_id, "ticker": ticker,
                     "grade": grade,
                     "alloc_pct": round(_GRADE_ALLOC.get(grade, ALLOC_B) * 100),
                     "size_eur": size_eur,
                     "dry_run": DRY_RUN,
+                    "paper_execution": PAPER_EXECUTION,
                 })
+                if PAPER_EXECUTION:
+                    order = _submit_paper_bracket_order(sig, current or 0.0, size_eur)
+                    if "error" in order:
+                        reason = f"{_SKIP_ORDER_FAILED}:{order['error']}"
+                        mark_advisory_auto_decision(signal_id, "rejected", reason)
+                        results["errors"].append({
+                            "signal_id": signal_id,
+                            "ticker": ticker,
+                            "error": reason,
+                        })
+                        log_event("ERROR", "advisory_auto_order_failed", {
+                            "signal_id": signal_id,
+                            "ticker": ticker,
+                            "error": str(order["error"])[:160],
+                        })
+                    else:
+                        mark_advisory_auto_decision(signal_id, "submitted", extra_fields={
+                            "auto_order_id": order["order_id"],
+                        })
+                        submitted_record = {
+                            **eligible_record,
+                            "order_id": order["order_id"],
+                            "client_order_id": order.get("client_order_id"),
+                            "qty": order.get("submitted_qty") or order.get("qty"),
+                            "limit_price": order.get("limit_price"),
+                            "take_profit_price": order.get("take_profit_price"),
+                            "stop_price": order.get("stop_price"),
+                            "broker_status": order.get("status"),
+                        }
+                        results["submitted"].append(submitted_record)
+                        log_event("TRADE", "advisory_auto_order_submitted", submitted_record)
 
         except Exception as e:
             results["errors"].append({
@@ -314,8 +589,10 @@ def run_advisory_auto_cycle() -> dict:
 
     log_event("INFO", "advisory_auto_cycle", {
         "eligible": len(results["eligible"]),
+        "submitted": len(results["submitted"]),
         "skipped": len(results["skipped"]),
         "errors": len(results["errors"]),
         "dry_run": DRY_RUN,
+        "paper_execution": PAPER_EXECUTION,
     })
     return results
