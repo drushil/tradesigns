@@ -29,6 +29,8 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN  Max signal age to consider (default: 5)
   ADVISORY_AUTO_DRY_RUN             Keep dry-run decision logging (default: true)
   ADVISORY_AUTO_PAPER_EXECUTION     Submit paper bracket orders (default: false)
+  ADVISORY_AUTO_ALLOWED_STAGES      Comma-separated alert_stage values to accept (default: trade,watch)
+                                    trade = signal says price is in band now; watch = limit order left to work
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
@@ -61,6 +63,8 @@ ALLOC_B            = float(os.getenv("ADVISORY_AUTO_ALLOC_B",      "50"))  / 100
 MAX_SIGNAL_AGE_MIN = float(os.getenv("ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN", "5"))
 DRY_RUN            = os.getenv("ADVISORY_AUTO_DRY_RUN", "true").strip().lower() != "false"
 PAPER_EXECUTION    = os.getenv("ADVISORY_AUTO_PAPER_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
+_ALLOWED_STAGES_RAW = os.getenv("ADVISORY_AUTO_ALLOWED_STAGES", "trade,watch")
+ALLOWED_STAGES     = {s.strip().lower() for s in _ALLOWED_STAGES_RAW.split(",") if s.strip()}
 
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
@@ -478,16 +482,19 @@ def run_advisory_auto_cycle() -> dict:
             elif not _is_valid(sig):
                 skip_reason = _SKIP_EXPIRED
 
-            # Gate 3: alert_stage must be 'trade'
-            elif _alert_stage(sig) != "trade":
+            # Gate 3: alert_stage must be in ALLOWED_STAGES
+            elif _alert_stage(sig) not in ALLOWED_STAGES:
                 skip_reason = f"{_SKIP_STAGE}:{_alert_stage(sig)}"
 
             # Gate 4: price levels must exist
             elif not (sig.get("entry_min") and sig.get("entry_max") and sig.get("stop_price")):
                 skip_reason = _SKIP_INVALID
 
-            # Gate 5: live price within entry band / below do-not-chase
+            # Gate 5: live price check — mode-sensitive
+            #   trade: price must be inside entry band (signal says it's in band now)
+            #   watch: only reject if price has blown past do_not_chase (limit order handles fill)
             else:
+                stage       = _alert_stage(sig)
                 entry_min_n = float(sig.get("entry_min") or 0)
                 entry_max_n = float(sig.get("entry_max") or 0)
                 dnc_n       = float(sig.get("do_not_chase_price") or entry_max_n * 1.05)
@@ -495,7 +502,7 @@ def run_advisory_auto_cycle() -> dict:
                 if current is not None:
                     if current > dnc_n:
                         skip_reason = f"{_SKIP_CHASE}:{current:.2f}>{dnc_n:.2f}"
-                    elif not (entry_min_n <= current <= entry_max_n):
+                    elif stage == "trade" and not (entry_min_n <= current <= entry_max_n):
                         skip_reason = (
                             f"{_SKIP_OUTSIDE_BAND}:{current:.2f} "
                             f"band=[{entry_min_n:.2f},{entry_max_n:.2f}]"
