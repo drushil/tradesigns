@@ -22,9 +22,14 @@ from database.client import get_recent_advisory_signals, log_event
 GERMAN_MORNING_ENABLED = (
     os.getenv("GERMAN_MORNING_WATCH_ENABLED", "true").strip().lower() != "false"
 )
-MAX_NAMES = int(os.getenv("GERMAN_MORNING_MAX_NAMES", "8"))
+# `or` fallbacks (not getenv defaults): GitHub Actions passes unset repo vars as
+# empty strings, so int("")/empty-split would break a plain default.
+MAX_NAMES = int(os.getenv("GERMAN_MORNING_MAX_NAMES") or "8")
 STRONG_GRADES = {"A+", "A", "B"}
 _GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
+# Always-shown symbols (e.g. an IPO being tracked), even on days they don't
+# grade A/B. Comma-separated; default pins SPCX.
+PINNED = {s.strip().upper() for s in (os.getenv("GERMAN_MORNING_PINNED") or "SPCX").split(",") if s.strip()}
 
 
 def _overnight_futures() -> dict:
@@ -61,16 +66,15 @@ def _latest_session_strong_names() -> tuple:
     """Strong BUY advisory names from the most recent US session that produced
     signals (handles Mondays / holidays by taking the latest date present).
     Returns (picks, session_date)."""
-    rows = get_recent_advisory_signals(days=4, market="US", limit=400)
-    rows = [r for r in (rows or [])
-            if str(r.get("side", "")).upper() == "BUY" and r.get("grade") in STRONG_GRADES]
-    if not rows:
-        return [], None
+    raw = [r for r in (get_recent_advisory_signals(days=4, market="US", limit=400) or [])
+           if str(r.get("side", "")).upper() == "BUY"]
+    strong = [r for r in raw if r.get("grade") in STRONG_GRADES]
     day = lambda r: str(r.get("created_at") or "")[:10]
-    latest = max((day(r) for r in rows), default=None)
-    rows = [r for r in rows if day(r) == latest]
+    latest = max((day(r) for r in strong), default=None) or max((day(r) for r in raw), default=None)
+    if latest is None and not PINNED:
+        return [], None
     best: dict = {}
-    for r in rows:
+    for r in (r for r in strong if day(r) == latest):
         sym = r.get("data_symbol")
         if not sym:
             continue
@@ -80,8 +84,19 @@ def _latest_session_strong_names() -> tuple:
     picks = sorted((v[1] for v in best.values()),
                    key=lambda r: (_GRADE_RANK.get(r.get("grade"), 0),
                                   float(r.get("composite_score") or 0)),
-                   reverse=True)
-    return picks[:MAX_NAMES], latest
+                   reverse=True)[:MAX_NAMES]
+    # Always include pinned symbols even if they didn't grade strong today.
+    have = {p.get("data_symbol") for p in picks}
+    for psym in sorted(PINNED):
+        if psym in have:
+            continue
+        cands = sorted((r for r in raw if r.get("data_symbol") == psym),
+                       key=lambda r: r.get("created_at") or "", reverse=True)
+        if cands:
+            picks.append({**cands[0], "_pinned": True})
+        else:
+            picks.append({"data_symbol": psym, "grade": "-", "_pinned": True, "_no_signal": True})
+    return picks, latest
 
 
 def _fmt_card(futures: dict, picks: list, session_date: Optional[str]) -> str:
@@ -98,13 +113,17 @@ def _fmt_card(futures: dict, picks: list, session_date: Optional[str]) -> str:
     if picks:
         lines.append(f"Watch (from {session_date or 'prior'} US session):")
         for r in picks:
+            pin = "📌 " if r.get("_pinned") else ""
+            if r.get("_no_signal"):
+                lines.append(f"{pin}**{r.get('data_symbol')}** (tracked) · no recent signal")
+                continue
             g = r.get("grade")
             gm = {"A+": "🟢", "A": "🟢", "B": "🟡"}.get(g, "⚪")
             cur = str(r.get("currency") or "USD")
             emn, emx = r.get("entry_min"), r.get("entry_max")
             band = f" · {cur} {float(emn):.2f}–{float(emx):.2f}" if emn and emx else ""
             reason = "breakout" if float(r.get("breakout_quality") or 0) >= 0.5 else "momentum"
-            lines.append(f"{gm} **{r.get('data_symbol')}** ({g}) · {reason}{band}")
+            lines.append(f"{pin}{gm} **{r.get('data_symbol')}** ({g}) · {reason}{band}")
     else:
         lines.append("No strong prior-session names — trade the tape with caution.")
     lines += [

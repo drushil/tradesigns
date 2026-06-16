@@ -40,6 +40,30 @@ def test_card_handles_no_names():
     assert "No strong prior-session names" in card
 
 
+def test_pinned_symbol_always_included(monkeypatch):
+    # SPCX graded C (not strong) but is pinned -> must still appear, tagged.
+    rows = [_sig("NVDA", "A", 0.5, day="2026-06-12"),
+            _sig("SPCX", "C", 0.2, day="2026-06-12")]
+    monkeypatch.setattr(gm, "get_recent_advisory_signals", lambda **_: rows)
+    monkeypatch.setattr(gm, "PINNED", {"SPCX"})
+    picks, _ = gm._latest_session_strong_names()
+    syms = [p["data_symbol"] for p in picks]
+    assert "NVDA" in syms and "SPCX" in syms
+    spcx = next(p for p in picks if p["data_symbol"] == "SPCX")
+    assert spcx.get("_pinned") is True
+
+
+def test_pinned_symbol_with_no_signal_shows_tracked(monkeypatch):
+    monkeypatch.setattr(gm, "get_recent_advisory_signals",
+                        lambda **_: [_sig("NVDA", "A", 0.5)])
+    monkeypatch.setattr(gm, "PINNED", {"SPCX"})
+    picks, _ = gm._latest_session_strong_names()
+    spcx = next(p for p in picks if p["data_symbol"] == "SPCX")
+    assert spcx.get("_no_signal") is True
+    card = gm._fmt_card({"tone": "mixed"}, picks, "2026-06-12")
+    assert "SPCX" in card and "no recent signal" in card
+
+
 def test_run_disabled_short_circuits(monkeypatch):
     monkeypatch.setattr(gm, "GERMAN_MORNING_ENABLED", False)
     out = gm.run_german_morning_watch()

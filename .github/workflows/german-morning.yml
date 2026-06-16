@@ -64,6 +64,7 @@ jobs:
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
           GERMAN_MORNING_WATCH_ENABLED: "${{ vars.GERMAN_MORNING_WATCH_ENABLED }}"
           GERMAN_MORNING_MAX_NAMES: "${{ vars.GERMAN_MORNING_MAX_NAMES }}"
+          GERMAN_MORNING_PINNED: "${{ vars.GERMAN_MORNING_PINNED }}"
         run: |
           python - <<'PY'
           from backend.advisory_auto.german_morning import run_german_morning_watch
