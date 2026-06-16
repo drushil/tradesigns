@@ -248,14 +248,6 @@ TICKER_PROFILES = {
         "source": "Vanguard",
         "url": "https://investor.vanguard.com/investment-products/etfs/profile/vti",
     },
-    "SPCX": {
-        "name": "SpaceX",
-        "type": "Space launch and satellite communications",
-        "summary": "Designs and operates orbital launch vehicles (Falcon, Starship) and the Starlink satellite-internet network; public since its June 2026 IPO.",
-        "agent_role": "Space-sector momentum and post-IPO growth signal; minimal price history with elevated IPO volatility — traded with limit orders.",
-        "source": "SpaceX",
-        "url": "https://www.spacex.com/",
-    },
 }
 
 
