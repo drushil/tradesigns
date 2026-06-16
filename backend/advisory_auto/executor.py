@@ -75,7 +75,7 @@ ALLOWED_STAGES     = {s.strip().lower() for s in _ALLOWED_STAGES_RAW.split(",") 
 # is unaffected — this only gates which eligible signals reach Alpaca. Default 'B'
 # is backwards-compatible (all grades submit). Set to 'A' / 'A+' to reduce order
 # count and collect cleaner paper-vs-sim comparison data.
-MIN_PAPER_GRADE    = (os.getenv("ADVISORY_AUTO_MIN_PAPER_GRADE", "B") or "B").strip()
+MIN_PAPER_GRADE    = (os.getenv("ADVISORY_AUTO_MIN_PAPER_GRADE", "B") or "B").strip().upper()
 
 # Transient broker-error retry on order submission (e.g. Alpaca paper 5xx).
 SUBMIT_MAX_RETRIES   = int(os.getenv("ADVISORY_AUTO_SUBMIT_RETRIES", "2"))
@@ -88,8 +88,8 @@ _GRADE_ALLOC    = {"A+": ALLOC_A_PLUS, "A": ALLOC_A, "B": ALLOC_B}
 
 def _grade_meets_paper_min(grade: str) -> bool:
     """True if `grade` is at or above the configured paper-execution floor."""
-    threshold = _GRADE_PRIORITY.get(MIN_PAPER_GRADE, 2)
-    return _GRADE_PRIORITY.get(str(grade), 9) <= threshold
+    threshold = _GRADE_PRIORITY.get(str(MIN_PAPER_GRADE).strip().upper(), 2)
+    return _GRADE_PRIORITY.get(str(grade).strip().upper(), 9) <= threshold
 
 _SKIP_STALE        = "skipped_stale"
 _SKIP_INVALID      = "skipped_invalid_levels"

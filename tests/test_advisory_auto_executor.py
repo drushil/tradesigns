@@ -229,6 +229,13 @@ def test_grade_meets_paper_min_a_plus_only(monkeypatch):
     assert not executor._grade_meets_paper_min("B")
 
 
+def test_grade_meets_paper_min_normalizes_case(monkeypatch):
+    monkeypatch.setattr(executor, "MIN_PAPER_GRADE", "a")
+    assert executor._grade_meets_paper_min("a+")
+    assert executor._grade_meets_paper_min("a")
+    assert not executor._grade_meets_paper_min("b")
+
+
 def test_is_transient_broker_error_classification():
     assert executor._is_transient_broker_error(SimpleNamespace_exc(500))
     assert executor._is_transient_broker_error(SimpleNamespace_exc(503))
