@@ -1256,7 +1256,8 @@ def get_advisory_auto_eligible(market: str = "US", max_age_minutes: int = 6,
 
 
 def mark_advisory_auto_decision(signal_id: int, auto_status: str,
-                                 skip_reason: str = None) -> dict:
+                                 skip_reason: str = None,
+                                 extra_fields: dict = None) -> dict:
     """Set auto_status and auto_checked_at on an advisory_signals row."""
     try:
         db = get_client(write=True)
@@ -1266,6 +1267,8 @@ def mark_advisory_auto_decision(signal_id: int, auto_status: str,
         }
         if skip_reason:
             record["auto_skip_reason"] = skip_reason
+        if extra_fields:
+            record.update(_json_safe(extra_fields))
         result = (db.table("advisory_signals")
                   .update(record)
                   .eq("id", signal_id)
@@ -1274,6 +1277,37 @@ def mark_advisory_auto_decision(signal_id: int, auto_status: str,
     except Exception as e:
         print(f"[ADVISORY_AUTO_DECISION_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
+
+
+def update_advisory_auto_fields(signal_id: int, fields: dict) -> dict:
+    """Patch advisory-auto lifecycle fields on one advisory signal."""
+    try:
+        db = get_client(write=True)
+        result = (db.table("advisory_signals")
+                  .update(_json_safe(fields))
+                  .eq("id", signal_id)
+                  .execute())
+        return result.data[0] if result.data else {}
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_UPDATE_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def get_active_advisory_auto_signals(limit: int = 100) -> list:
+    """Fetch advisory-auto signals with broker orders that still need reconciliation."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("*")
+                  .in_("auto_status", ["submitted", "filled"])
+                  .not_.is_("auto_order_id", "null")
+                  .order("auto_checked_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        return result.data or []
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_ACTIVE_FAILED] {str(e)[:200]}")
+        return []
 
 
 def get_advisory_auto_daily_pnl() -> float:
