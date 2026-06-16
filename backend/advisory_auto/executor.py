@@ -31,6 +31,10 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_PAPER_EXECUTION     Submit paper bracket orders (default: false)
   ADVISORY_AUTO_ALLOWED_STAGES      Comma-separated alert_stage values to accept (default: trade,watch)
                                     trade = signal says price is in band now; watch = limit order left to work
+  ADVISORY_AUTO_MIN_PAPER_GRADE     Min grade submitted to paper (default: B → all). Set A/A+ to gate.
+                                    Dry-run eligibility tracking is unaffected.
+  ADVISORY_AUTO_SUBMIT_RETRIES      Retries on transient broker errors (5xx/timeout) (default: 2)
+  ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S  Delay between submit retries in seconds (default: 2)
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
@@ -38,6 +42,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -66,9 +71,25 @@ PAPER_EXECUTION    = os.getenv("ADVISORY_AUTO_PAPER_EXECUTION", "false").strip()
 _ALLOWED_STAGES_RAW = os.getenv("ADVISORY_AUTO_ALLOWED_STAGES", "trade,watch")
 ALLOWED_STAGES     = {s.strip().lower() for s in _ALLOWED_STAGES_RAW.split(",") if s.strip()}
 
+# Minimum grade eligible for paper-order submission. Dry-run eligibility tracking
+# is unaffected — this only gates which eligible signals reach Alpaca. Default 'B'
+# is backwards-compatible (all grades submit). Set to 'A' / 'A+' to reduce order
+# count and collect cleaner paper-vs-sim comparison data.
+MIN_PAPER_GRADE    = (os.getenv("ADVISORY_AUTO_MIN_PAPER_GRADE", "B") or "B").strip()
+
+# Transient broker-error retry on order submission (e.g. Alpaca paper 5xx).
+SUBMIT_MAX_RETRIES   = int(os.getenv("ADVISORY_AUTO_SUBMIT_RETRIES", "2"))
+SUBMIT_RETRY_DELAY_S = float(os.getenv("ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S", "2"))
+
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
 _GRADE_ALLOC    = {"A+": ALLOC_A_PLUS, "A": ALLOC_A, "B": ALLOC_B}
+
+
+def _grade_meets_paper_min(grade: str) -> bool:
+    """True if `grade` is at or above the configured paper-execution floor."""
+    threshold = _GRADE_PRIORITY.get(MIN_PAPER_GRADE, 2)
+    return _GRADE_PRIORITY.get(str(grade), 9) <= threshold
 
 _SKIP_STALE        = "skipped_stale"
 _SKIP_INVALID      = "skipped_invalid_levels"
@@ -201,6 +222,36 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
     }
 
 
+def _is_transient_broker_error(exc: Exception) -> bool:
+    """Retry server-side (5xx) and connection/timeout errors; never retry 4xx
+    (e.g. 422 invalid order — retrying would just fail again)."""
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            return int(status) >= 500
+        except (TypeError, ValueError):
+            return False
+    name = exc.__class__.__name__.lower()
+    return any(k in name for k in ("timeout", "connection", "transport"))
+
+
+def _submit_order_with_retry(req):
+    """Submit an order, retrying transient broker errors up to SUBMIT_MAX_RETRIES."""
+    for attempt in range(SUBMIT_MAX_RETRIES + 1):
+        try:
+            return _get_auto_client().submit_order(req)
+        except Exception as exc:
+            if attempt < SUBMIT_MAX_RETRIES and _is_transient_broker_error(exc):
+                log_event("WARN", "advisory_auto_submit_retry", {
+                    "symbol": getattr(req, "symbol", None),
+                    "attempt": attempt + 1,
+                    "error": str(exc)[:160],
+                })
+                time.sleep(SUBMIT_RETRY_DELAY_S)
+                continue
+            raise
+
+
 def _submit_paper_bracket_order(signal: dict, current_price: float, size_eur: float) -> dict:
     """Submit a long-only limit bracket order to the advisory-auto paper account."""
     levels = _paper_order_levels(signal, current_price, size_eur)
@@ -223,7 +274,7 @@ def _submit_paper_bracket_order(signal: dict, current_price: float, size_eur: fl
             stop_loss=StopLossRequest(stop_price=levels["stop_price"]),
             client_order_id=_client_order_id(signal_id, levels["ticker"]),
         )
-        order = _get_auto_client().submit_order(req)
+        order = _submit_order_with_retry(req)
         return {
             **levels,
             "order_id": str(order.id),
@@ -555,7 +606,12 @@ def run_advisory_auto_cycle() -> dict:
                     "dry_run": DRY_RUN,
                     "paper_execution": PAPER_EXECUTION,
                 })
-                if PAPER_EXECUTION:
+                if PAPER_EXECUTION and not _grade_meets_paper_min(grade):
+                    log_event("INFO", "advisory_auto_paper_grade_withheld", {
+                        "signal_id": signal_id, "ticker": ticker,
+                        "grade": grade, "min_paper_grade": MIN_PAPER_GRADE,
+                    })
+                elif PAPER_EXECUTION:
                     order = _submit_paper_bracket_order(sig, current or 0.0, size_eur)
                     if "error" in order:
                         reason = f"{_SKIP_ORDER_FAILED}:{order['error']}"
