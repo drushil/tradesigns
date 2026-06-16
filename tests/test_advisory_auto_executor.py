@@ -1,4 +1,5 @@
 import backend.advisory_auto.executor as executor
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 
@@ -8,7 +9,7 @@ def _signal(**overrides):
         "data_symbol": "NVDA",
         "grade": "A",
         "side": "BUY",
-        "created_at": "2026-06-16T13:45:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "entry_min": 100.0,
         "entry_max": 102.0,
         "do_not_chase_price": 103.0,
@@ -30,6 +31,7 @@ def test_dry_run_only_keeps_eligible_decision_without_order(monkeypatch):
 
     monkeypatch.setattr(executor, "DRY_RUN", True)
     monkeypatch.setattr(executor, "PAPER_EXECUTION", False)
+    monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
     monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
     monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
@@ -59,6 +61,7 @@ def test_paper_execution_submits_order_and_preserves_eligible_log(monkeypatch):
 
     monkeypatch.setattr(executor, "DRY_RUN", True)
     monkeypatch.setattr(executor, "PAPER_EXECUTION", True)
+    monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
     monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
     monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
@@ -88,6 +91,65 @@ def test_paper_execution_submits_order_and_preserves_eligible_log(monkeypatch):
     assert decisions[0][0][:2] == (101, "eligible")
     assert decisions[1][0][:2] == (101, "submitted")
     assert decisions[1][1]["extra_fields"] == {"auto_order_id": "ord-123"}
+
+
+def test_watch_stage_can_be_eligible_with_limit_order(monkeypatch):
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})
+
+    monkeypatch.setattr(executor, "DRY_RUN", True)
+    monkeypatch.setattr(executor, "PAPER_EXECUTION", True)
+    monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
+    monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
+    monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
+    monkeypatch.setattr(executor, "_get_alpaca_positions", lambda: {})
+    monkeypatch.setattr(executor, "_get_alpaca_open_orders", lambda: set())
+    monkeypatch.setattr(executor, "get_advisory_auto_eligible", lambda **_: [signal])
+    monkeypatch.setattr(executor, "_get_current_price", lambda ticker: 102.8)
+    monkeypatch.setattr(executor, "mark_advisory_auto_decision",
+                        lambda *args, **kwargs: decisions.append((args, kwargs)) or {})
+    monkeypatch.setattr(executor, "_submit_paper_bracket_order", lambda sig, current, size_eur: {
+        "order_id": "ord-watch",
+        "client_order_id": "advauto-101-nvda",
+        "submitted_qty": 10,
+        "limit_price": 102.0,
+        "take_profit_price": 106.0,
+        "stop_price": 98.0,
+        "status": "accepted",
+    })
+    monkeypatch.setattr(executor, "log_event", lambda *args, **kwargs: None)
+
+    result = executor.run_advisory_auto_cycle()
+
+    assert len(result["eligible"]) == 1
+    assert result["submitted"][0]["order_id"] == "ord-watch"
+    assert decisions[0][0][:2] == (101, "eligible")
+
+
+def test_watch_stage_still_respects_do_not_chase(monkeypatch):
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})
+
+    monkeypatch.setattr(executor, "DRY_RUN", True)
+    monkeypatch.setattr(executor, "PAPER_EXECUTION", True)
+    monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
+    monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
+    monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
+    monkeypatch.setattr(executor, "_get_alpaca_positions", lambda: {})
+    monkeypatch.setattr(executor, "_get_alpaca_open_orders", lambda: set())
+    monkeypatch.setattr(executor, "get_advisory_auto_eligible", lambda **_: [signal])
+    monkeypatch.setattr(executor, "_get_current_price", lambda ticker: 103.5)
+    monkeypatch.setattr(executor, "mark_advisory_auto_decision",
+                        lambda *args, **kwargs: decisions.append((args, kwargs)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *args, **kwargs: None)
+
+    result = executor.run_advisory_auto_cycle()
+
+    assert result["eligible"] == []
+    assert result["submitted"] == []
+    assert result["skipped"][0]["reason"] == "skipped_chase:103.50>103.00"
 
 
 def test_paper_order_levels_use_entry_band_and_targets():
