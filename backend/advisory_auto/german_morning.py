@@ -69,13 +69,13 @@ def _latest_session_strong_names() -> tuple:
     Returns (picks, session_date)."""
     raw = [r for r in (get_recent_advisory_signals(days=4, market="US", limit=400) or [])
            if str(r.get("side", "")).upper() == "BUY"]
-    strong = [r for r in raw if r.get("grade") in STRONG_GRADES]
     day = lambda r: str(r.get("created_at") or "")[:10]
-    latest = max((day(r) for r in strong), default=None) or max((day(r) for r in raw), default=None)
+    latest = max((day(r) for r in raw), default=None)
     if latest is None and not PINNED:
         return [], None
+    strong = [r for r in raw if day(r) == latest and r.get("grade") in STRONG_GRADES]
     best: dict = {}
-    for r in (r for r in strong if day(r) == latest):
+    for r in strong:
         sym = r.get("data_symbol")
         if not sym:
             continue

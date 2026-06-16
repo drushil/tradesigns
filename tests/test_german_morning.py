@@ -40,6 +40,18 @@ def test_card_handles_no_names():
     assert "No strong prior-session names" in card
 
 
+def test_latest_session_does_not_resurrect_older_strong_names(monkeypatch):
+    rows = [
+        _sig("OLDSTRONG", "A", 0.8, day="2026-06-12"),
+        _sig("TODAYWEAK", "C", 0.2, day="2026-06-15"),
+    ]
+    monkeypatch.setattr(gm, "get_recent_advisory_signals", lambda **_: rows)
+    monkeypatch.setattr(gm, "PINNED", set())
+    picks, session = gm._latest_session_strong_names()
+    assert session == "2026-06-15"
+    assert picks == []
+
+
 def test_pinned_symbol_always_included(monkeypatch):
     # SPCX graded C (not strong) but is pinned -> must still appear, tagged.
     rows = [_sig("NVDA", "A", 0.5, day="2026-06-12"),
