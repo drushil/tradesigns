@@ -1516,6 +1516,108 @@ def _market_context(market: str) -> dict:
     return context
 
 
+def _benchmark_context_at_signal(market: str, now_cet: datetime) -> dict:
+    """Log-only concurrent market context, computed only from bars up to signal time.
+
+    This deliberately does not gate or phrase alerts. It is an observability
+    payload for later replay: "what did the tape look like when this signal
+    fired?"  VWAP is running VWAP over available 1m bars up to now, never the
+    full-day VWAP.
+    """
+    symbols = {"US": ["SPY", "QQQ"], "EU": ["^STOXX50E", "^GDAXI"]}.get(market, [])
+    now_utc = now_cet.astimezone(timezone.utc)
+    context = {
+        "market": market,
+        "as_of": now_utc.isoformat(),
+        "benchmarks": {},
+    }
+    if not symbols:
+        context["status"] = "unsupported_market"
+        return context
+    if _get_bars is None:
+        context["status"] = "bar_fetch_unavailable"
+        return context
+
+    for symbol in symbols:
+        try:
+            bars = _get_bars(symbol, period="1d", interval="1m")
+            payload = _benchmark_bar_context(symbol, bars, now_utc)
+        except Exception as exc:
+            payload = {"status": "unavailable", "reason": str(exc)[:100]}
+        context["benchmarks"][symbol] = payload
+    return context
+
+
+def _benchmark_bar_context(symbol: str, bars, now_utc: datetime) -> dict:
+    if bars is None or getattr(bars, "empty", True):
+        return {"status": "unavailable", "reason": "no_bars"}
+    try:
+        df = bars.copy()
+        if not hasattr(df, "index") or len(df.index) == 0:
+            return {"status": "unavailable", "reason": "empty_index"}
+        idx = df.index
+        try:
+            if getattr(idx, "tz", None) is None:
+                df.index = idx.tz_localize(timezone.utc)
+            else:
+                df.index = idx.tz_convert(timezone.utc)
+        except Exception:
+            df.index = [(_parse_dt(v) or now_utc) for v in idx]
+        try:
+            df = df[df.index.date == now_utc.date()]
+        except Exception:
+            pass
+        df = df[df.index <= now_utc]
+        if getattr(df, "empty", True) or len(df) < 2:
+            return {"status": "insufficient_data", "bars": int(len(df) if df is not None else 0)}
+
+        close = df["Close"].dropna()
+        volume = df["Volume"].fillna(0) if "Volume" in df else None
+        if len(close) < 2:
+            return {"status": "insufficient_data", "bars": int(len(close))}
+        current = float(close.iloc[-1])
+        open_px = float(close.iloc[0])
+        if {"High", "Low", "Close"}.issubset(set(df.columns)):
+            typical = (df["High"].astype(float) + df["Low"].astype(float) + df["Close"].astype(float)) / 3.0
+        else:
+            typical = df["Close"].astype(float)
+
+        vwap = None
+        if volume is not None:
+            vol_sum = float(volume.sum())
+            if vol_sum > 0:
+                vwap = float((typical * volume).sum() / vol_sum)
+
+        def _ret_over(minutes: int) -> Optional[float]:
+            cutoff = now_utc - timedelta(minutes=minutes)
+            prior = close[close.index <= cutoff]
+            if len(prior) == 0:
+                return None
+            base = float(prior.iloc[-1])
+            return round((current - base) / base * 100, 3) if base else None
+
+        payload = {
+            "status": "ok",
+            "bars": int(len(df)),
+            "current": round(current, 4),
+            "session_open": round(open_px, 4),
+            "return_from_open_pct": round((current - open_px) / open_px * 100, 3) if open_px else None,
+            "momentum_5m_pct": _ret_over(5),
+            "momentum_15m_pct": _ret_over(15),
+        }
+        if vwap and vwap > 0:
+            payload.update({
+                "running_vwap": round(vwap, 4),
+                "vs_vwap_pct": round((current - vwap) / vwap * 100, 3),
+                "above_vwap": current >= vwap,
+            })
+        else:
+            payload.update({"running_vwap": None, "vs_vwap_pct": None, "above_vwap": None})
+        return payload
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc)[:100]}
+
+
 def _weights_for_market(market: str, listing_type: str = None) -> dict:
     if listing_type == "eu_us_mirror":
         return EU_MIRROR_WEIGHTS
@@ -1998,7 +2100,7 @@ def _eu_catalyst_score(item: dict, signals: dict) -> float:
 def _build_downside_candidate(
     symbol: str, item: dict, market: str, mode: str,
     composite: float, signal_result: dict, regime_state, window: str,
-    cfg: "AdvisoryConfig",
+    cfg: "AdvisoryConfig", market_context_at_signal: Optional[dict] = None,
 ) -> Optional[dict]:
     """Build an informational downside-risk candidate when composite is strongly negative."""
     signals = signal_result.get("signals") or {}
@@ -2039,7 +2141,14 @@ def _build_downside_candidate(
         "trade_target": item.get("trade_target", True),
         "priority": item.get("priority", "medium"),
         "breakout_quality": breakout,
-        "signal_json": _compact_signal_payload(signal_result),
+        "signal_json": {
+            **_compact_signal_payload(signal_result),
+            "market_context_at_signal": market_context_at_signal or {},
+        },
+        "market_context_json": {
+            **_market_context(market),
+            "at_signal": market_context_at_signal or {},
+        },
     }
 
 
@@ -2099,6 +2208,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
             pass
     composite = float(signal_result.get("composite_score") or 0)
     is_live_market = market in cfg.live_markets
+    market_context_at_signal = _benchmark_context_at_signal(market, now_cet)
 
     if composite <= 0:
         min_downside = _env_float("ADVISORY_MIN_DOWNSIDE_COMPOSITE", 0.35)
@@ -2107,6 +2217,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
                 symbol=symbol, item=item, market=market, mode=mode,
                 composite=composite, signal_result=signal_result,
                 regime_state=regime_state, window=window, cfg=cfg,
+                market_context_at_signal=market_context_at_signal,
             )
         return None
 
@@ -2249,7 +2360,10 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "time_exit_cet": time_exit.strftime("%H:%M Berlin"),
         "rationale": ", ".join(rationale_bits),
         "signal_json": _compact_signal_payload(signal_result),
-        "market_context_json": _market_context(market),
+        "market_context_json": {
+            **_market_context(market),
+            "at_signal": market_context_at_signal,
+        },
         "data_quality_json": quality,
         "late_chase_json": late_chase or {},
         "ignition_json": ignition or {},
@@ -2271,6 +2385,7 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
         "trend_1h": trend_1h,
         "premium_setup": premium_setup,
         "grade_cap": grade_cap or {},
+        "market_context_at_signal": market_context_at_signal,
         "display": display_levels,
     }
     if listing_type == "eu_us_mirror":

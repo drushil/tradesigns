@@ -2347,3 +2347,37 @@ def test_virtual_monitor_does_not_repeat_runner_weakening(monkeypatch):
     assert emitted == []
     assert sent == []
     assert updates == []
+
+
+def test_benchmark_context_uses_running_bars_without_lookahead():
+    idx = pd.to_datetime([
+        "2026-06-14T19:59:00Z",
+        "2026-06-15T13:30:00Z",
+        "2026-06-15T13:31:00Z",
+        "2026-06-15T13:32:00Z",
+        "2026-06-15T13:33:00Z",
+    ])
+    bars = pd.DataFrame(
+        {
+            "Open": [50.0, 100.0, 101.0, 102.0, 200.0],
+            "High": [51.0, 101.0, 102.0, 103.0, 201.0],
+            "Low": [49.0, 99.0, 100.0, 101.0, 199.0],
+            "Close": [50.0, 100.0, 101.0, 102.0, 200.0],
+            "Volume": [1000, 10, 10, 10, 10],
+        },
+        index=idx,
+    )
+
+    payload = advisory._benchmark_bar_context(
+        "SPY",
+        bars,
+        datetime(2026, 6, 15, 13, 32, 30, tzinfo=timezone.utc),
+    )
+
+    assert payload["status"] == "ok"
+    assert payload["bars"] == 3
+    assert payload["current"] == 102.0
+    assert payload["session_open"] == 100.0
+    assert payload["return_from_open_pct"] == pytest.approx(2.0)
+    assert payload["running_vwap"] == pytest.approx(101.0)
+    assert payload["vs_vwap_pct"] == pytest.approx(0.99, rel=1e-3)
