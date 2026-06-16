@@ -27,9 +27,10 @@ GERMAN_MORNING_ENABLED = (
 MAX_NAMES = int(os.getenv("GERMAN_MORNING_MAX_NAMES") or "8")
 STRONG_GRADES = {"A+", "A", "B"}
 _GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
-# Always-shown symbols (e.g. an IPO being tracked), even on days they don't
-# grade A/B. Comma-separated; default pins SPCX.
-PINNED = {s.strip().upper() for s in (os.getenv("GERMAN_MORNING_PINNED") or "SPCX").split(",") if s.strip()}
+# Optional always-shown symbols even on days they don't grade A/B. Off by
+# default — the watchlist is purely grade-driven, so names (incl. SPCX) appear
+# whenever they earn it. Set GERMAN_MORNING_PINNED="SPCX,..." to force-include.
+PINNED = {s.strip().upper() for s in (os.getenv("GERMAN_MORNING_PINNED") or "").split(",") if s.strip()}
 
 
 def _overnight_futures() -> dict:
