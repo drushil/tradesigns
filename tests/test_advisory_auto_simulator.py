@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 
 import backend.advisory_auto.simulator as sim
+
+# True when real pandas is installed; False under the bare-env conftest stub.
+_HAS_REAL_PANDAS = hasattr(pd, "DatetimeIndex")
 
 
 def test_create_momentum_continuation_sim_for_high_grade_watch(monkeypatch):
@@ -103,6 +107,10 @@ def test_create_momentum_continuation_skips_lower_grade_watch(monkeypatch):
     assert sim._create_momentum_continuation_sims(market="US") == 0
 
 
+@pytest.mark.skipif(
+    not _HAS_REAL_PANDAS,
+    reason="builds a real pandas DataFrame/DatetimeIndex (bare-env stub lacks it)",
+)
 def test_eod_close_falls_back_to_last_available_close(monkeypatch):
     fill_at = datetime(2026, 6, 10, 15, 0, tzinfo=timezone.utc)
     session_close = datetime(2026, 6, 10, 20, 0, tzinfo=timezone.utc)

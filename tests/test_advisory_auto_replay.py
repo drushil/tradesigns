@@ -1,8 +1,17 @@
 from datetime import datetime, timezone
 
 import pandas as pd
+import pytest
 
 from backend.advisory_auto import replay
+
+# These tests build real pandas DataFrames with a DatetimeIndex. In bare
+# environments conftest stubs pandas as a MagicMock (no DatetimeIndex), so the
+# whole module is skipped there; it runs in full CI where requirements install pandas.
+pytestmark = pytest.mark.skipif(
+    not hasattr(pd, "DatetimeIndex"),
+    reason="requires real pandas (bare-env conftest stub lacks DataFrame/DatetimeIndex)",
+)
 
 
 def _bars(rows):
