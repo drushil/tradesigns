@@ -39,6 +39,9 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN Minutes before 16:00 ET to start flattening (default: 10)
   ADVISORY_AUTO_ORPHAN_GUARD_ENABLED Flatten filled positions with no live protective order (default: true)
   ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN  Min position age before orphan-flattening, avoids fresh-fill races (default: 3)
+  ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED  Mirror the simulator's near-T1 profit-protection exit on paper (default: true)
+  ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC  Fraction of fill→T1 run-up that arms protection (default: 0.8)
+  ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R Risk-multiple give-back from peak that triggers the exit (default: 0.5)
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
@@ -97,6 +100,15 @@ EOD_FLAT_BUFFER_MIN  = float(os.getenv("ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN", "10"
 # avoid racing a freshly-submitted bracket whose legs have not registered yet.
 ORPHAN_GUARD_ENABLED = os.getenv("ADVISORY_AUTO_ORPHAN_GUARD_ENABLED", "true").strip().lower() != "false"
 ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN", "3"))
+
+# Paper near-T1 protection: mirror the simulator's profit-protection exit on the
+# live paper position. Once the run-up covers ARM_FRAC of the fill→T1 distance and
+# price then gives back RETRACE_R of risk from the peak, cancel the bracket and
+# flatten. Reuses the simulator's validated _scan_bars_for_exit so paper and sim
+# apply identical logic and stay directly comparable. Defaults match the simulator.
+PAPER_NEAR_T1_ENABLED   = os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED", "true").strip().lower() != "false"
+PAPER_NEAR_T1_ARM_FRAC  = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC", "0.8"))
+PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R", "0.5"))
 
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
@@ -442,6 +454,55 @@ def _flatten_and_record(signal: dict, qty: float, reason: str) -> dict:
     return trade
 
 
+def _parse_order_dt(value) -> Optional[datetime]:
+    """Parse an Alpaca order timestamp (datetime or ISO string) to aware UTC."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _near_t1_protection_qty(signal: dict, order) -> Optional[float]:
+    """Return the qty to flatten if near-T1 protection has fired for this filled
+    paper position, else None. Reuses the simulator's validated scan so the paper
+    exit decision is identical to the simulator's. Only the near-T1 verdict is
+    actioned — the live bracket remains authoritative for real stop/T1 fills."""
+    if not PAPER_NEAR_T1_ENABLED:
+        return None
+    fill_price = float(signal.get("auto_fill_price") or 0)
+    stop_price = float(signal.get("stop_price") or 0)
+    t1 = float(signal["target_1"]) if signal.get("target_1") is not None else None
+    t2 = float(signal["target_2"]) if signal.get("target_2") is not None else None
+    if fill_price <= 0 or stop_price <= 0 or not t1:
+        return None
+    fill_at = _parse_order_dt(getattr(order, "filled_at", None))
+    if fill_at is None:
+        return None
+    try:
+        from backend.advisory_auto.simulator import (
+            _fetch_1m_bars, _scan_bars_for_exit, _yfinance_symbol,
+        )
+        bars = _fetch_1m_bars(_yfinance_symbol(signal["data_symbol"]),
+                              fill_at, datetime.now(timezone.utc))
+        if bars is None or bars.empty:
+            return None
+        status = _scan_bars_for_exit(
+            bars, fill_price, stop_price, t1, t2,
+            arm_frac=PAPER_NEAR_T1_ARM_FRAC, retrace_r=PAPER_NEAR_T1_RETRACE_R,
+        )[0]
+        if status == "hit_near_t1_protection":
+            return abs(float(signal.get("auto_fill_qty") or 0))
+    except Exception as e:
+        log_event("WARN", "advisory_auto_near_t1_scan_failed",
+                  {"ticker": signal.get("data_symbol"), "error": str(e)[:160]})
+    return None
+
+
 def _reconcile_active_orders(positions: Optional[dict] = None,
                              open_orders: Optional[set] = None,
                              now_utc: Optional[datetime] = None) -> dict:
@@ -456,7 +517,8 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
         open_orders = _get_alpaca_open_orders()
     now_utc = now_utc or datetime.now(timezone.utc)
     result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0,
-              "flattened_eod": 0, "flattened_orphan": 0, "errors": 0}
+              "near_t1_protected": 0, "flattened_eod": 0, "flattened_orphan": 0,
+              "errors": 0}
     for signal in active:
         result["checked"] += 1
         signal_id = signal.get("id")
@@ -513,7 +575,11 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                     qty = abs(float(held.get("qty") or signal.get("auto_fill_qty") or 0))
                     if qty <= 0:
                         continue
-                    if EOD_FLAT_ENABLED and _is_eod_flat_window(now_utc):
+                    near_t1_qty = _near_t1_protection_qty(signal, order)
+                    if near_t1_qty and near_t1_qty > 0:
+                        _flatten_and_record(signal, near_t1_qty, "near_t1_protection")
+                        result["near_t1_protected"] += 1
+                    elif EOD_FLAT_ENABLED and _is_eod_flat_window(now_utc):
                         _flatten_and_record(signal, qty, "eod_flat")
                         result["flattened_eod"] += 1
                     elif (ORPHAN_GUARD_ENABLED and sym not in open_orders

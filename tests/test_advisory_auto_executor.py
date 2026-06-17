@@ -329,6 +329,7 @@ def test_orphan_guard_flattens_naked_filled_position(monkeypatch):
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
     monkeypatch.setattr(executor, "ORPHAN_GUARD_ENABLED", True)
     monkeypatch.setattr(executor, "ORPHAN_MIN_AGE_MIN", 3.0)
+    monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda *a, **k: None)
     monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
 
     now = datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)  # mid-session, not EOD
@@ -350,6 +351,7 @@ def test_eod_flat_closes_open_position_near_close(monkeypatch):
                         lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
     monkeypatch.setattr(executor, "EOD_FLAT_BUFFER_MIN", 10.0)
+    monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda *a, **k: None)
     monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
 
     now = datetime(2026, 6, 17, 19, 55, tzinfo=timezone.utc)  # 5 min to close
@@ -373,6 +375,7 @@ def test_orphan_guard_skips_fresh_fill(monkeypatch):
     monkeypatch.setattr(executor, "_flatten_and_record", lambda *a, **k: flattened.append(a) or {})
     monkeypatch.setattr(executor, "ORPHAN_MIN_AGE_MIN", 3.0)
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
+    monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda *a, **k: None)
     monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
 
     mid_session = datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)  # 14:00 ET
@@ -391,6 +394,7 @@ def test_orphan_guard_skips_position_with_open_order(monkeypatch):
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
     monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
     monkeypatch.setattr(executor, "_flatten_and_record", lambda *a, **k: flattened.append(a) or {})
+    monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda *a, **k: None)
     monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
 
     # MSFT has a live protective order → not orphaned.
@@ -398,6 +402,68 @@ def test_orphan_guard_skips_position_with_open_order(monkeypatch):
 
     assert res["flattened_orphan"] == 0
     assert flattened == []
+
+
+def test_near_t1_protection_flattens_before_eod_and_orphan(monkeypatch):
+    signal = _signal(id=400, data_symbol="ARM", auto_status="filled",
+                     auto_order_id="ord-arm", auto_fill_price=400.0, auto_fill_qty=5,
+                     created_at="2026-06-17T15:00:00+00:00")
+    flattened = []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
+    monkeypatch.setattr(executor, "_flatten_and_record",
+                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+    # Near-T1 fires → should win over EOD/orphan.
+    monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda sig, order: 5.0)
+    monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    # Even in the EOD window, near-T1 takes priority.
+    now = datetime(2026, 6, 17, 19, 55, tzinfo=timezone.utc)
+    res = executor._reconcile_active_orders({"ARM": {"qty": 5}}, set(), now_utc=now)
+
+    assert res["near_t1_protected"] == 1
+    assert res["flattened_eod"] == 0
+    assert flattened == [(400, 5.0, "near_t1_protection")]
+
+
+def test_near_t1_protection_qty_fires_on_scan_verdict(monkeypatch):
+    import backend.advisory_auto.simulator as sim
+    sig = _signal(id=401, data_symbol="ARM", auto_fill_price=400.0, auto_fill_qty=5,
+                  stop_price=396.0, target_1=410.0, target_2=415.0)
+    order = SimpleNamespace(filled_at="2026-06-17T15:00:00+00:00")
+
+    monkeypatch.setattr(executor, "PAPER_NEAR_T1_ENABLED", True)
+    monkeypatch.setattr(sim, "_fetch_1m_bars", lambda *a, **k: SimpleNamespace(empty=False))
+    monkeypatch.setattr(sim, "_yfinance_symbol", lambda s: s)
+    monkeypatch.setattr(sim, "_scan_bars_for_exit",
+                        lambda *a, **k: ("hit_near_t1_protection", 408.0, None, 2.0, -0.1, 408.0))
+
+    assert executor._near_t1_protection_qty(sig, order) == 5.0
+
+
+def test_near_t1_protection_qty_none_on_stop_verdict(monkeypatch):
+    import backend.advisory_auto.simulator as sim
+    sig = _signal(id=402, data_symbol="ARM", auto_fill_price=400.0, auto_fill_qty=5,
+                  stop_price=396.0, target_1=410.0, target_2=415.0)
+    order = SimpleNamespace(filled_at="2026-06-17T15:00:00+00:00")
+
+    monkeypatch.setattr(executor, "PAPER_NEAR_T1_ENABLED", True)
+    monkeypatch.setattr(sim, "_fetch_1m_bars", lambda *a, **k: SimpleNamespace(empty=False))
+    monkeypatch.setattr(sim, "_yfinance_symbol", lambda s: s)
+    # The live bracket owns real stop/T1 exits — paper near-T1 must not act on them.
+    monkeypatch.setattr(sim, "_scan_bars_for_exit",
+                        lambda *a, **k: ("hit_stop", 395.0, None, 0.5, -1.1, None))
+
+    assert executor._near_t1_protection_qty(sig, order) is None
+
+
+def test_near_t1_protection_qty_disabled_short_circuits(monkeypatch):
+    sig = _signal(id=403, auto_fill_price=400.0, auto_fill_qty=5,
+                  stop_price=396.0, target_1=410.0)
+    order = SimpleNamespace(filled_at="2026-06-17T15:00:00+00:00")
+    monkeypatch.setattr(executor, "PAPER_NEAR_T1_ENABLED", False)
+    assert executor._near_t1_protection_qty(sig, order) is None
 
 
 def test_flatten_and_record_submits_sell_and_writes_trade(monkeypatch):
