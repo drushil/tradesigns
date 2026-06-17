@@ -296,6 +296,142 @@ def test_submit_order_with_retry_does_not_retry_4xx(monkeypatch):
     assert calls["n"] == 1  # no retry on 4xx
 
 
+def _filled_no_exit_order():
+    """A bracket parent that filled but whose protective legs are gone."""
+    return SimpleNamespace(
+        status="filled", filled_avg_price=100.0, filled_qty=5,
+        filled_at="2026-06-16T19:53:00+00:00", legs=[],
+    )
+
+
+def test_eod_flat_window_logic(monkeypatch):
+    monkeypatch.setattr(executor, "EOD_FLAT_BUFFER_MIN", 10.0)
+    # 19:55 UTC = 15:55 ET → 5 min before the 16:00 ET close → in window
+    assert executor._is_eod_flat_window(datetime(2026, 6, 17, 19, 55, tzinfo=timezone.utc))
+    # 20:30 UTC = 16:30 ET → 30 min after close → still flatten overnight stragglers
+    assert executor._is_eod_flat_window(datetime(2026, 6, 17, 20, 30, tzinfo=timezone.utc))
+    # 14:00 UTC = 10:00 ET → ~6h before close → not in window
+    assert not executor._is_eod_flat_window(datetime(2026, 6, 17, 14, 0, tzinfo=timezone.utc))
+    # next morning 13:00 UTC = 09:00 ET → ~7h to close → not in window
+    assert not executor._is_eod_flat_window(datetime(2026, 6, 18, 13, 0, tzinfo=timezone.utc))
+
+
+def test_orphan_guard_flattens_naked_filled_position(monkeypatch):
+    # The NFLX case: filled days ago, no live protective order → naked.
+    signal = _signal(id=13111, data_symbol="NFLX", auto_status="filled",
+                     auto_order_id="ord-x", auto_fill_price=78.72, auto_fill_qty=5,
+                     created_at="2026-06-16T19:53:00+00:00")
+    flattened = []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
+    monkeypatch.setattr(executor, "_flatten_and_record",
+                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+    monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
+    monkeypatch.setattr(executor, "ORPHAN_GUARD_ENABLED", True)
+    monkeypatch.setattr(executor, "ORPHAN_MIN_AGE_MIN", 3.0)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    now = datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)  # mid-session, not EOD
+    res = executor._reconcile_active_orders(
+        {"NFLX": {"qty": 5, "side": "long"}}, set(), now_utc=now)
+
+    assert res["flattened_orphan"] == 1
+    assert flattened == [(13111, 5.0, "orphan_flatten")]
+
+
+def test_eod_flat_closes_open_position_near_close(monkeypatch):
+    signal = _signal(id=200, data_symbol="AMD", auto_status="filled",
+                     auto_order_id="ord-amd", auto_fill_price=500.0, auto_fill_qty=2,
+                     created_at="2026-06-17T17:00:00+00:00")
+    flattened = []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
+    monkeypatch.setattr(executor, "_flatten_and_record",
+                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+    monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
+    monkeypatch.setattr(executor, "EOD_FLAT_BUFFER_MIN", 10.0)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    now = datetime(2026, 6, 17, 19, 55, tzinfo=timezone.utc)  # 5 min to close
+    # EOD flattens even with a live protective order present.
+    res = executor._reconcile_active_orders({"AMD": {"qty": 2}}, {"AMD"}, now_utc=now)
+
+    assert res["flattened_eod"] == 1
+    assert flattened == [(200, 2.0, "eod_flat")]
+
+
+def test_orphan_guard_skips_fresh_fill(monkeypatch):
+    # _signal_age_minutes measures against wall-clock now, so the fill must be
+    # wall-clock-fresh to exercise the "too young" branch. The reconcile now_utc
+    # is held mid-session (14:00 ET) so the EOD path doesn't fire instead.
+    signal = _signal(id=201, data_symbol="TSLA", auto_status="filled",
+                     auto_order_id="ord-t", auto_fill_qty=3,
+                     created_at=datetime.now(timezone.utc).isoformat())  # age ~0
+    flattened = []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
+    monkeypatch.setattr(executor, "_flatten_and_record", lambda *a, **k: flattened.append(a) or {})
+    monkeypatch.setattr(executor, "ORPHAN_MIN_AGE_MIN", 3.0)
+    monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    mid_session = datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)  # 14:00 ET
+    res = executor._reconcile_active_orders({"TSLA": {"qty": 3}}, set(), now_utc=mid_session)
+
+    assert res["flattened_orphan"] == 0
+    assert flattened == []
+
+
+def test_orphan_guard_skips_position_with_open_order(monkeypatch):
+    now = datetime(2026, 6, 17, 18, 0, tzinfo=timezone.utc)
+    signal = _signal(id=202, data_symbol="MSFT", auto_status="filled",
+                     auto_order_id="ord-m", auto_fill_qty=4,
+                     created_at="2026-06-16T15:00:00+00:00")  # old enough
+    flattened = []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
+    monkeypatch.setattr(executor, "_flatten_and_record", lambda *a, **k: flattened.append(a) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    # MSFT has a live protective order → not orphaned.
+    res = executor._reconcile_active_orders({"MSFT": {"qty": 4}}, {"MSFT"}, now_utc=now)
+
+    assert res["flattened_orphan"] == 0
+    assert flattened == []
+
+
+def test_flatten_and_record_submits_sell_and_writes_trade(monkeypatch):
+    sig = _signal(id=300, data_symbol="NFLX", auto_fill_price=78.72, auto_fill_qty=5)
+    trades, updates = [], []
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: None)
+    monkeypatch.setattr(executor, "_submit_order_with_retry",
+                        lambda req: SimpleNamespace(id="sell-1", filled_avg_price=76.0))
+    monkeypatch.setattr(executor, "_get_current_price", lambda t: 76.0)
+    monkeypatch.setattr(executor, "insert_trade", lambda p: trades.append(p) or p)
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, f: updates.append((sid, f)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    trade = executor._flatten_and_record(sig, 5, "orphan_flatten")
+
+    assert trade["exit_reason"] == "orphan_flatten"
+    assert trade["exit_price"] == 76.0
+    assert trade["trade_source"] == "advisory_auto"
+    assert updates[0][0] == 300
+    assert updates[0][1]["auto_status"] == "closed"
+    assert updates[0][1]["auto_exit_reason"] == "orphan_flatten"
+
+
+def test_build_trade_payload_pnl():
+    sig = _signal(auto_fill_price=100.0)
+    p = executor._build_trade_payload(
+        sig, entry_price=100.0, qty=10, exit_price=95.0, exit_reason="eod_flat")
+    assert p["exit_reason"] == "eod_flat"
+    assert p["pnl_pct"] == -5.0
+    assert p["pnl_eur"] == round((95 - 100) * 10 / 1.08, 2)  # -46.3
+    assert p["trade_source"] == "advisory_auto"
+
+
 def test_paper_order_levels_use_entry_band_and_targets():
     levels = executor._paper_order_levels(_signal(), current_price=101.3, size_eur=1000)
 

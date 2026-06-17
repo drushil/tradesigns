@@ -35,6 +35,10 @@ Environment variables (all optional — safe defaults provided):
                                     Dry-run eligibility tracking is unaffected.
   ADVISORY_AUTO_SUBMIT_RETRIES      Retries on transient broker errors (5xx/timeout) (default: 2)
   ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S  Delay between submit retries in seconds (default: 2)
+  ADVISORY_AUTO_EOD_FLAT_ENABLED    Flatten open positions near the close (default: true)
+  ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN Minutes before 16:00 ET to start flattening (default: 10)
+  ADVISORY_AUTO_ORPHAN_GUARD_ENABLED Flatten filled positions with no live protective order (default: true)
+  ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN  Min position age before orphan-flattening, avoids fresh-fill races (default: 3)
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
@@ -80,6 +84,19 @@ MIN_PAPER_GRADE    = (os.getenv("ADVISORY_AUTO_MIN_PAPER_GRADE", "B") or "B").st
 # Transient broker-error retry on order submission (e.g. Alpaca paper 5xx).
 SUBMIT_MAX_RETRIES   = int(os.getenv("ADVISORY_AUTO_SUBMIT_RETRIES", "2"))
 SUBMIT_RETRY_DELAY_S = float(os.getenv("ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S", "2"))
+
+# End-of-day flat: advisory-auto is intraday (matches the simulator's EOD
+# mark-to-close). Flatten any still-open position within this many minutes of
+# the US close so nothing is carried overnight.
+EOD_FLAT_ENABLED     = os.getenv("ADVISORY_AUTO_EOD_FLAT_ENABLED", "true").strip().lower() != "false"
+EOD_FLAT_BUFFER_MIN  = float(os.getenv("ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN", "10"))
+
+# Orphan guard: a filled position with no live protective order at the broker
+# is naked (e.g. DAY bracket legs expired at a prior close). Flatten it on the
+# next cycle, any time of day. Skip positions younger than ORPHAN_MIN_AGE_MIN to
+# avoid racing a freshly-submitted bracket whose legs have not registered yet.
+ORPHAN_GUARD_ENABLED = os.getenv("ADVISORY_AUTO_ORPHAN_GUARD_ENABLED", "true").strip().lower() != "false"
+ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN", "3"))
 
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
@@ -302,15 +319,15 @@ def _filled_exit_leg(order) -> Optional[dict]:
     return None
 
 
-def _insert_closed_trade(signal: dict, exit_leg: dict, order) -> dict:
-    entry_price = float(signal.get("auto_fill_price") or _float_attr(order, "filled_avg_price", 0.0))
-    qty = float(signal.get("auto_fill_qty") or exit_leg.get("qty") or _float_attr(order, "filled_qty", 0.0))
-    exit_price = float(exit_leg["price"])
+def _build_trade_payload(signal: dict, *, entry_price: float, qty: float,
+                         exit_price: float, exit_reason: str,
+                         close_order_id: Optional[str] = None,
+                         entry_time=None) -> dict:
+    """Shared closed-trade payload for both bracket-exit and flatten paths."""
     pnl_usd = (exit_price - entry_price) * qty
     pnl_eur = pnl_usd / _eurusd_rate(signal)
-    entry_time = getattr(order, "filled_at", None) or getattr(order, "updated_at", None)
-    exit_time = datetime.utcnow().isoformat() + "Z"
-    return insert_trade({
+    pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None
+    return {
         "ticker": signal.get("data_symbol"),
         "side": "BUY",
         "entry_price": round(entry_price, 4),
@@ -319,28 +336,127 @@ def _insert_closed_trade(signal: dict, exit_leg: dict, order) -> dict:
         "stop_price": signal.get("stop_price"),
         "take_profit_price": signal.get("target_1"),
         "order_id": signal.get("auto_order_id"),
-        "close_order_id": exit_leg.get("order_id"),
+        "close_order_id": close_order_id,
         "size_eur": round((entry_price * qty) / _eurusd_rate(signal), 2),
         "size_usd": round(entry_price * qty, 2),
-        "pnl_pct": round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None,
-        "net_pnl_pct": round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None,
+        "pnl_pct": pnl_pct,
+        "net_pnl_pct": pnl_pct,
         "pnl_eur": round(pnl_eur, 2),
         "entry_time": str(entry_time) if entry_time else None,
-        "exit_time": exit_time,
-        "exit_reason": exit_leg["exit_reason"],
+        "exit_time": datetime.utcnow().isoformat() + "Z",
+        "exit_reason": exit_reason,
         "composite_score": signal.get("composite_score"),
         "signals_json": signal.get("signal_json") or {},
         "trade_source": "advisory_auto",
         "advisory_signal_id": signal.get("id"),
         "horizon": "intraday",
         "strategy_family": "advisory_auto",
+    }
+
+
+def _insert_closed_trade(signal: dict, exit_leg: dict, order) -> dict:
+    entry_price = float(signal.get("auto_fill_price") or _float_attr(order, "filled_avg_price", 0.0))
+    qty = float(signal.get("auto_fill_qty") or exit_leg.get("qty") or _float_attr(order, "filled_qty", 0.0))
+    entry_time = getattr(order, "filled_at", None) or getattr(order, "updated_at", None)
+    return insert_trade(_build_trade_payload(
+        signal, entry_price=entry_price, qty=qty,
+        exit_price=float(exit_leg["price"]), exit_reason=exit_leg["exit_reason"],
+        close_order_id=exit_leg.get("order_id"), entry_time=entry_time))
+
+
+def _minutes_to_us_close(now_utc: Optional[datetime] = None) -> float:
+    """Minutes until the 16:00 ET close today (negative if already past it).
+
+    Uses zoneinfo when available (DST-correct year-round). In minimal
+    environments without zoneinfo (e.g. Python 3.8 test runners) it falls back
+    to a fixed EDT offset — 16:00 ET = 20:00 UTC — which is correct for US
+    trading days mid-March through early November. Production runs 3.9+."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        close_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        close_utc = close_et.astimezone(timezone.utc)
+    except Exception:
+        close_utc = now_utc.replace(hour=20, minute=0, second=0, microsecond=0)
+    return (close_utc - now_utc).total_seconds() / 60.0
+
+
+def _is_eod_flat_window(now_utc: Optional[datetime] = None) -> bool:
+    """True within EOD_FLAT_BUFFER_MIN before the close, or any time after it
+    (up to 3h) — the latter sweeps up positions left open overnight."""
+    mins = _minutes_to_us_close(now_utc)
+    return -180.0 <= mins <= EOD_FLAT_BUFFER_MIN
+
+
+def _cancel_symbol_orders(ticker: str) -> None:
+    """Cancel any open orders for `ticker` on the advisory-auto account."""
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        client = _get_auto_client()
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker], limit=50)
+        for o in client.get_orders(filter=req):
+            try:
+                client.cancel_order_by_id(o.id)
+            except Exception:
+                pass
+    except Exception as e:
+        log_event("WARN", "advisory_auto_cancel_failed", {"ticker": ticker, "error": str(e)[:160]})
+
+
+def _flatten_and_record(signal: dict, qty: float, reason: str) -> dict:
+    """Cancel any stale orders for the symbol, market-sell the position, and
+    record a closed trade. Used by both the EOD-flat and orphan-guard paths."""
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+
+    ticker = str(signal.get("data_symbol") or "").upper()
+    _cancel_symbol_orders(ticker)
+    req = MarketOrderRequest(
+        symbol=ticker, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+    )
+    order = _submit_order_with_retry(req)
+
+    # Best-known exit price: the broker fill if reported synchronously, else the
+    # latest trade. The position is flat either way; the price is a measurement
+    # estimate for the recorded trade.
+    exit_price = _float_attr(order, "filled_avg_price", 0.0) or (_get_current_price(ticker) or 0.0)
+    entry_price = float(signal.get("auto_fill_price") or 0.0)
+    trade = insert_trade(_build_trade_payload(
+        signal, entry_price=entry_price, qty=float(qty),
+        exit_price=float(exit_price), exit_reason=reason,
+        close_order_id=str(getattr(order, "id", ""))))
+    update_advisory_auto_fields(signal["id"], {
+        "auto_status": "closed",
+        "auto_pnl_eur": trade.get("pnl_eur"),
+        "auto_exit_reason": reason,
     })
+    log_event("TRADE", "advisory_auto_flatten", {
+        "advisory_signal_id": signal.get("id"), "ticker": ticker,
+        "qty": float(qty), "reason": reason,
+        "exit_price": round(float(exit_price), 4), "pnl_eur": trade.get("pnl_eur"),
+    })
+    return trade
 
 
-def _reconcile_active_orders() -> dict:
-    """Sync submitted/filled advisory-auto paper orders from Alpaca into Supabase."""
+def _reconcile_active_orders(positions: Optional[dict] = None,
+                             open_orders: Optional[set] = None,
+                             now_utc: Optional[datetime] = None) -> dict:
+    """Sync submitted/filled advisory-auto paper orders from Alpaca into Supabase.
+
+    Also guards filled positions: flattens them at EOD (intraday discipline) and
+    flattens any that have gone naked (no live protective order — orphan guard)."""
     active = get_active_advisory_auto_signals(limit=100)
-    result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0, "errors": 0}
+    if positions is None:
+        positions = _get_alpaca_positions()
+    if open_orders is None:
+        open_orders = _get_alpaca_open_orders()
+    now_utc = now_utc or datetime.now(timezone.utc)
+    result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0,
+              "flattened_eod": 0, "flattened_orphan": 0, "errors": 0}
     for signal in active:
         result["checked"] += 1
         signal_id = signal.get("id")
@@ -386,6 +502,24 @@ def _reconcile_active_orders() -> dict:
                     "auto_exit_reason": exit_leg["exit_reason"],
                 })
                 result["closed"] += 1
+                continue
+
+            # Position still open (filled, no protective exit hit). Guard it:
+            #   EOD-flat near/after the close, or orphan-flat if it has gone naked.
+            if status == "filled" and not exit_leg:
+                sym = str(signal.get("data_symbol") or "").upper()
+                held = positions.get(sym)
+                if held:
+                    qty = abs(float(held.get("qty") or signal.get("auto_fill_qty") or 0))
+                    if qty <= 0:
+                        continue
+                    if EOD_FLAT_ENABLED and _is_eod_flat_window(now_utc):
+                        _flatten_and_record(signal, qty, "eod_flat")
+                        result["flattened_eod"] += 1
+                    elif (ORPHAN_GUARD_ENABLED and sym not in open_orders
+                          and _signal_age_minutes(signal) > ORPHAN_MIN_AGE_MIN):
+                        _flatten_and_record(signal, qty, "orphan_flatten")
+                        result["flattened_orphan"] += 1
         except Exception as exc:
             result["errors"] += 1
             log_event("WARN", "advisory_auto_reconcile_failed", {
@@ -479,11 +613,15 @@ def run_advisory_auto_cycle() -> dict:
 
     Phase 2: dry-run — gates applied, decisions logged, no orders placed.
     """
+    # ── Fetch live Alpaca state once, shared by reconcile + entry gates ───────
+    alpaca_positions   = _get_alpaca_positions()
+    alpaca_open_orders = _get_alpaca_open_orders()
+
     results: dict = {
         "cycle_at": datetime.utcnow().isoformat() + "Z",
         "dry_run": DRY_RUN,
         "paper_execution": PAPER_EXECUTION,
-        "reconcile": _reconcile_active_orders(),
+        "reconcile": _reconcile_active_orders(alpaca_positions, alpaca_open_orders),
         "eligible": [],
         "submitted": [],
         "skipped": [],
@@ -502,10 +640,6 @@ def run_advisory_auto_cycle() -> dict:
         log_event("INFO", "advisory_auto_position_cap",
                   {"open_count": open_count, "max": MAX_POSITIONS})
         return {**results, "halted": True, "halt_reason": _SKIP_POSITION_CAP}
-
-    # ── Fetch live Alpaca state once ──────────────────────────────────────────
-    alpaca_positions  = _get_alpaca_positions()
-    alpaca_open_orders = _get_alpaca_open_orders()
 
     # ── Fetch + sort signals: A+ first, then A, then B; composite desc within grade ──
     raw_signals = get_advisory_auto_eligible(

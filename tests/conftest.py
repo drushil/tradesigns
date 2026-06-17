@@ -84,6 +84,14 @@ for _mod_name in [
 ]:
     _ensure(_mod_name)
 
+# Expose commonly-imported request/enum classes so real code paths that do
+# `from alpaca.trading.requests import MarketOrderRequest` can import under the stub.
+for _req in ["MarketOrderRequest", "LimitOrderRequest", "TakeProfitRequest",
+             "StopLossRequest", "GetOrdersRequest", "GetOrderByIdRequest"]:
+    setattr(sys.modules["alpaca.trading.requests"], _req, MagicMock())
+for _enum in ["OrderClass", "OrderSide", "TimeInForce", "QueryOrderStatus"]:
+    setattr(sys.modules["alpaca.trading.enums"], _enum, MagicMock())
+
 # ── Groq ──────────────────────────────────────────────────────────────────────
 for _mod_name in ["groq", "groq.types", "groq.types.chat"]:
     _ensure(_mod_name)
