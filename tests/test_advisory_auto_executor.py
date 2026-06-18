@@ -213,15 +213,48 @@ def test_watch_allows_slightly_above_band(monkeypatch):
     assert result["submitted"][0]["order_id"] == "o"
 
 
-def test_pending_cap_blocks_when_book_full(monkeypatch):
-    decisions = []
+def test_pending_cap_withholds_submission_when_book_full(monkeypatch):
+    # Book full → signal stays eligible (dry-run tracking) but no order is submitted.
+    logs = []
     signal = _signal(signal_json={"alert_stage": "watch"})
-    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=decisions)
+    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=[])
     monkeypatch.setattr(executor, "MAX_PENDING_ORDERS", 8)
-    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 8)  # book full
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 8)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: logs.append(a))
     result = executor.run_advisory_auto_cycle()
-    assert result["eligible"] == []
-    assert result["skipped"][0]["reason"].startswith("skipped_pending_cap")
+    assert len(result["eligible"]) == 1
+    assert result["submitted"] == []
+    assert any(a[1] == "advisory_auto_pending_cap_withheld" for a in logs)
+
+
+def test_pending_cap_not_charged_in_dry_run(monkeypatch):
+    # P1 regression: dry-run signals create no resting order, so a full pending
+    # book must not gate them — they stay eligible for tracking.
+    signal = _signal(signal_json={"alert_stage": "watch"})
+    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=[])
+    monkeypatch.setattr(executor, "PAPER_EXECUTION", False)
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 99)
+    result = executor.run_advisory_auto_cycle()
+    assert len(result["eligible"]) == 1
+    assert result["skipped"] == []
+
+
+def test_pending_cap_not_charged_by_grade_withheld(monkeypatch):
+    # P1 regression: a grade-withheld signal submits no order, so it must not
+    # consume pending capacity. With pending_count at the cap-1 and a withheld
+    # B signal, a following eligible signal would still have room — here we just
+    # assert the withheld signal itself produces no submission and no skip.
+    logs = []
+    signal = _signal(grade="B", signal_json={"alert_stage": "watch"})
+    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=[])
+    monkeypatch.setattr(executor, "MIN_PAPER_GRADE", "A")   # B is withheld
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 0)
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: logs.append(a))
+    result = executor.run_advisory_auto_cycle()
+    assert len(result["eligible"]) == 1
+    assert result["submitted"] == []
+    assert any(a[1] == "advisory_auto_paper_grade_withheld" for a in logs)
+    assert not any(a[1] == "advisory_auto_pending_cap_withheld" for a in logs)
 
 
 def test_filled_cap_halts_cycle(monkeypatch):

@@ -117,11 +117,13 @@ PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R
 # pullback, so a snapshot price slightly above the band is fine — only reject when
 # price has run more than MAX_CHASE_PCT above entry_max (genuinely stale), or has
 # already broken below the band / stop (catching a falling knife).
-MAX_CHASE_PCT      = float(os.getenv("ADVISORY_AUTO_MAX_CHASE_PCT", "1.0"))
+# `or` fallback (not getenv default) so an unset repo variable passed through the
+# workflow as an empty string falls back cleanly instead of crashing int()/float().
+MAX_CHASE_PCT      = float(os.getenv("ADVISORY_AUTO_MAX_CHASE_PCT") or "1.0")
 # Filled positions count toward MAX_POSITIONS; resting (unfilled) limit orders are
 # bounded separately by MAX_PENDING_ORDERS so the watch book can rest several limits
 # without the position cap pre-consuming slots.
-MAX_PENDING_ORDERS = int(os.getenv("ADVISORY_AUTO_MAX_PENDING_ORDERS", "8"))
+MAX_PENDING_ORDERS = int(os.getenv("ADVISORY_AUTO_MAX_PENDING_ORDERS") or "8")
 
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
@@ -771,7 +773,7 @@ def run_advisory_auto_cycle() -> dict:
 
     # Track tickers already accepted this cycle to avoid double-entry
     accepted_tickers: set[str] = set()
-    accepted_this_cycle = 0  # eligible decisions made this cycle (toward pending cap)
+    submitted_this_cycle = 0  # resting orders actually submitted this cycle (pending cap)
 
     for sig in signals:
         signal_id = sig["id"]
@@ -842,11 +844,10 @@ def run_advisory_auto_cycle() -> dict:
             if not skip_reason and filled_count >= MAX_POSITIONS:
                 skip_reason = f"{_SKIP_POSITION_CAP}:{filled_count}/{MAX_POSITIONS} filled"
 
-            # Gate 10: pending-order cap — bounds resting (unfilled) limit orders.
-            if not skip_reason:
-                total_pending = pending_count + accepted_this_cycle
-                if total_pending >= MAX_PENDING_ORDERS:
-                    skip_reason = f"{_SKIP_PENDING_CAP}:{total_pending}/{MAX_PENDING_ORDERS}"
+            # Note: the pending-order cap is NOT applied here. It bounds *resting
+            # orders*, so it is charged only when an order is actually submitted
+            # (in the paper-execution branch below) — never by dry-run, grade-
+            # withheld, sizing-skip, or rejected signals, which create no order.
 
             # ── Record decision ───────────────────────────────────────────────
             if skip_reason:
@@ -859,7 +860,6 @@ def run_advisory_auto_cycle() -> dict:
                 mark_advisory_auto_decision(signal_id, "eligible")
                 size_eur = _compute_size_eur(sig)
                 accepted_tickers.add(ticker)
-                accepted_this_cycle += 1
                 eligible_record = {
                     "signal_id": signal_id, "ticker": ticker,
                     "grade": grade,
@@ -881,6 +881,14 @@ def run_advisory_auto_cycle() -> dict:
                     log_event("INFO", "advisory_auto_paper_grade_withheld", {
                         "signal_id": signal_id, "ticker": ticker,
                         "grade": grade, "min_paper_grade": MIN_PAPER_GRADE,
+                    })
+                elif PAPER_EXECUTION and (pending_count + submitted_this_cycle) >= MAX_PENDING_ORDERS:
+                    # Watch book is full of resting orders — withhold submission
+                    # (signal stays eligible for dry-run tracking, just not sent).
+                    log_event("INFO", "advisory_auto_pending_cap_withheld", {
+                        "signal_id": signal_id, "ticker": ticker,
+                        "pending": pending_count + submitted_this_cycle,
+                        "max_pending": MAX_PENDING_ORDERS,
                     })
                 elif PAPER_EXECUTION:
                     order = _submit_paper_bracket_order(sig, current or 0.0, size_eur)
@@ -912,6 +920,7 @@ def run_advisory_auto_cycle() -> dict:
                             "error": str(order["error"])[:160],
                         })
                     else:
+                        submitted_this_cycle += 1
                         mark_advisory_auto_decision(signal_id, "submitted", extra_fields={
                             "auto_order_id": order["order_id"],
                         })
