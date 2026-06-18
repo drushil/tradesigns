@@ -27,6 +27,8 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_ALLOC_A             % of suggested_size_eur for A  (default: 70)
   ADVISORY_AUTO_ALLOC_B             % of suggested_size_eur for B  (default: 50)
   ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN  Max signal age to consider (default: 5)
+  ADVISORY_AUTO_MAX_PENDING_ORDERS  Cap on resting (unfilled) limit orders (default: 8)
+  ADVISORY_AUTO_MAX_CHASE_PCT       Max % above entry_max a watch may rest at (default: 1.0)
   ADVISORY_AUTO_DRY_RUN             Keep dry-run decision logging (default: true)
   ADVISORY_AUTO_PAPER_EXECUTION     Submit paper bracket orders (default: false)
   ADVISORY_AUTO_ALLOWED_STAGES      Comma-separated alert_stage values to accept (default: trade,watch)
@@ -58,6 +60,7 @@ from database.client import (
     get_advisory_auto_eligible,
     get_advisory_auto_daily_pnl,
     get_advisory_auto_open_count,
+    get_advisory_auto_pending_count,
     insert_trade,
     mark_advisory_auto_decision,
     log_event,
@@ -110,6 +113,16 @@ PAPER_NEAR_T1_ENABLED   = os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED", "true
 PAPER_NEAR_T1_ARM_FRAC  = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC", "0.8"))
 PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R", "0.5"))
 
+# Watch-entry band logic. A watch limit rests at the entry band and fills on a
+# pullback, so a snapshot price slightly above the band is fine — only reject when
+# price has run more than MAX_CHASE_PCT above entry_max (genuinely stale), or has
+# already broken below the band / stop (catching a falling knife).
+MAX_CHASE_PCT      = float(os.getenv("ADVISORY_AUTO_MAX_CHASE_PCT", "1.0"))
+# Filled positions count toward MAX_POSITIONS; resting (unfilled) limit orders are
+# bounded separately by MAX_PENDING_ORDERS so the watch book can rest several limits
+# without the position cap pre-consuming slots.
+MAX_PENDING_ORDERS = int(os.getenv("ADVISORY_AUTO_MAX_PENDING_ORDERS", "8"))
+
 # Grade ordering for priority sort (lower = higher priority)
 _GRADE_PRIORITY = {"A+": 0, "A": 1, "B": 2}
 _GRADE_ALLOC    = {"A+": ALLOC_A_PLUS, "A": ALLOC_A, "B": ALLOC_B}
@@ -126,9 +139,13 @@ _SKIP_EXPIRED      = "skipped_expired"
 _SKIP_STAGE        = "skipped_stage_not_trade"
 _SKIP_OUTSIDE_BAND = "skipped_price_outside_band"
 _SKIP_CHASE        = "skipped_chase"
+_SKIP_BELOW_BAND   = "skipped_below_entry_band"
+_SKIP_BELOW_STOP   = "skipped_below_stop"
 _SKIP_ALPACA_LONG  = "skipped_existing_alpaca_exposure"
 _SKIP_PENDING      = "skipped_pending_order"
 _SKIP_POSITION_CAP = "skipped_position_cap"
+_SKIP_PENDING_CAP  = "skipped_pending_cap"
+_SKIP_MIN_SIZE     = "skipped_below_min_size"
 _SKIP_DAILY_LOSS   = "skipped_daily_loss"
 _SKIP_ORDER_FAILED = "paper_order_failed"
 
@@ -222,6 +239,15 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
         return {"error": "invalid_order_levels"}
     if current_price <= 0:
         current_price = entry_max
+    # Lower-bound guard: never rest a buy into a setup that has already broken down.
+    # A limit clamped to entry_min while price is below the band would be marketable
+    # into a falling knife (the AMZN/GOOGL pattern).
+    if float(current_price) <= stop_price:
+        return {"error": "price_below_stop", "current": round(float(current_price), 4),
+                "stop_price": stop_price}
+    if float(current_price) < entry_min:
+        return {"error": "price_below_entry_band", "current": round(float(current_price), 4),
+                "entry_min": entry_min}
     limit_price = min(max(float(current_price), entry_min), entry_max)
     if not (stop_price < limit_price < target_1):
         return {
@@ -231,14 +257,23 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
             "target_1": target_1,
         }
 
-    size_usd = float(size_eur) * _eurusd_rate(signal)
+    fx = _eurusd_rate(signal)
+    size_usd = float(size_eur) * fx
     qty = math.floor(size_usd / limit_price)
     if qty <= 0:
-        return {
-            "error": "quantity_below_one_share",
-            "limit_price": limit_price,
-            "size_usd": round(size_usd, 2),
-        }
+        # Bracket orders require whole shares. Take 1 share if it still fits under
+        # the per-position cap; otherwise this is a sizing skip, not an error.
+        cap_usd = CAPITAL_EUR * 0.15 * fx
+        if limit_price <= cap_usd:
+            qty = 1
+        else:
+            return {
+                "error": "below_min_size",
+                "limit_price": _round_price(limit_price),
+                "size_usd": round(size_usd, 2),
+                "one_share_usd": round(limit_price, 2),
+                "cap_usd": round(cap_usd, 2),
+            }
 
     return {
         "ticker": ticker,
@@ -518,7 +553,7 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
     now_utc = now_utc or datetime.now(timezone.utc)
     result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0,
               "near_t1_protected": 0, "flattened_eod": 0, "flattened_orphan": 0,
-              "errors": 0}
+              "pending_cancelled": 0, "errors": 0}
     for signal in active:
         result["checked"] += 1
         signal_id = signal.get("id")
@@ -534,6 +569,26 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                 })
                 result["terminal"] += 1
                 continue
+
+            # Pending (unfilled) resting limit: cancel if price has already broken
+            # below the stop, so a gap-down can't fill us straight into a loss.
+            if status != "filled" and str(signal.get("auto_status")) == "submitted":
+                sym = str(signal.get("data_symbol") or "").upper()
+                stop_n = float(signal.get("stop_price") or 0)
+                if stop_n > 0:
+                    cur = _get_current_price(sym)
+                    if cur is not None and cur <= stop_n:
+                        _cancel_symbol_orders(sym)
+                        update_advisory_auto_fields(signal_id, {
+                            "auto_status": "cancelled",
+                            "auto_exit_reason": "cancelled_below_stop",
+                        })
+                        result["pending_cancelled"] += 1
+                        log_event("INFO", "advisory_auto_pending_cancelled", {
+                            "advisory_signal_id": signal_id, "ticker": sym,
+                            "current": round(cur, 4), "stop_price": stop_n,
+                        })
+                        continue
 
             filled_price = _float_attr(order, "filled_avg_price", 0.0)
             filled_qty = _float_attr(order, "filled_qty", 0.0)
@@ -701,10 +756,11 @@ def run_advisory_auto_cycle() -> dict:
                   {"daily_pnl_eur": daily_pnl, "limit": DAILY_LOSS_LIMIT})
         return {**results, "halted": True, "halt_reason": _SKIP_DAILY_LOSS}
 
-    open_count = get_advisory_auto_open_count()
-    if open_count >= MAX_POSITIONS:
+    filled_count  = get_advisory_auto_open_count()      # filled positions only
+    pending_count = get_advisory_auto_pending_count()    # resting limit orders
+    if filled_count >= MAX_POSITIONS:
         log_event("INFO", "advisory_auto_position_cap",
-                  {"open_count": open_count, "max": MAX_POSITIONS})
+                  {"filled": filled_count, "max": MAX_POSITIONS})
         return {**results, "halted": True, "halt_reason": _SKIP_POSITION_CAP}
 
     # ── Fetch + sort signals: A+ first, then A, then B; composite desc within grade ──
@@ -715,7 +771,7 @@ def run_advisory_auto_cycle() -> dict:
 
     # Track tickers already accepted this cycle to avoid double-entry
     accepted_tickers: set[str] = set()
-    eligible_this_cycle = 0
+    accepted_this_cycle = 0  # eligible decisions made this cycle (toward pending cap)
 
     for sig in signals:
         signal_id = sig["id"]
@@ -742,22 +798,33 @@ def run_advisory_auto_cycle() -> dict:
                 skip_reason = _SKIP_INVALID
 
             # Gate 5: live price check — mode-sensitive
-            #   trade: price must be inside entry band (signal says it's in band now)
-            #   watch: only reject if price has blown past do_not_chase (limit order handles fill)
+            #   trade: price must be inside the entry band right now (marketable).
+            #   watch: a limit rests at the band and fills on a pullback, so a price
+            #          slightly above the band is fine. Reject only when (a) price has
+            #          run > MAX_CHASE_PCT above entry_max (stale/extended), (b) price
+            #          is already below entry_min (setup not holding), or (c) price is
+            #          at/below the stop (broken — never catch a falling knife).
             else:
                 stage       = _alert_stage(sig)
                 entry_min_n = float(sig.get("entry_min") or 0)
                 entry_max_n = float(sig.get("entry_max") or 0)
-                dnc_n       = float(sig.get("do_not_chase_price") or entry_max_n * 1.05)
+                stop_n      = float(sig.get("stop_price") or 0)
+                max_allowed = entry_max_n * (1.0 + MAX_CHASE_PCT / 100.0)
                 current     = _get_current_price(ticker)
                 if current is not None:
-                    if current > dnc_n:
-                        skip_reason = f"{_SKIP_CHASE}:{current:.2f}>{dnc_n:.2f}"
-                    elif stage == "trade" and not (entry_min_n <= current <= entry_max_n):
-                        skip_reason = (
-                            f"{_SKIP_OUTSIDE_BAND}:{current:.2f} "
-                            f"band=[{entry_min_n:.2f},{entry_max_n:.2f}]"
-                        )
+                    if stage == "trade":
+                        if not (entry_min_n <= current <= entry_max_n):
+                            skip_reason = (
+                                f"{_SKIP_OUTSIDE_BAND}:{current:.2f} "
+                                f"band=[{entry_min_n:.2f},{entry_max_n:.2f}]"
+                            )
+                    else:  # watch
+                        if stop_n > 0 and current <= stop_n:
+                            skip_reason = f"{_SKIP_BELOW_STOP}:{current:.2f}<=stop {stop_n:.2f}"
+                        elif current < entry_min_n:
+                            skip_reason = f"{_SKIP_BELOW_BAND}:{current:.2f}<min {entry_min_n:.2f}"
+                        elif current > max_allowed:
+                            skip_reason = f"{_SKIP_CHASE}:{current:.2f}>{max_allowed:.2f}"
 
             # Gate 6: no existing Alpaca position in this ticker
             if not skip_reason and ticker in alpaca_positions:
@@ -771,11 +838,15 @@ def run_advisory_auto_cycle() -> dict:
             if not skip_reason and ticker in accepted_tickers:
                 skip_reason = f"{_SKIP_ALPACA_LONG}:same_ticker_this_cycle:{ticker}"
 
-            # Gate 9: position cap — DB count + accepted this cycle
+            # Gate 9: filled-position cap — only filled positions count here.
+            if not skip_reason and filled_count >= MAX_POSITIONS:
+                skip_reason = f"{_SKIP_POSITION_CAP}:{filled_count}/{MAX_POSITIONS} filled"
+
+            # Gate 10: pending-order cap — bounds resting (unfilled) limit orders.
             if not skip_reason:
-                total_open = open_count + eligible_this_cycle
-                if total_open >= MAX_POSITIONS:
-                    skip_reason = f"{_SKIP_POSITION_CAP}:{total_open}/{MAX_POSITIONS}"
+                total_pending = pending_count + accepted_this_cycle
+                if total_pending >= MAX_PENDING_ORDERS:
+                    skip_reason = f"{_SKIP_PENDING_CAP}:{total_pending}/{MAX_PENDING_ORDERS}"
 
             # ── Record decision ───────────────────────────────────────────────
             if skip_reason:
@@ -788,7 +859,7 @@ def run_advisory_auto_cycle() -> dict:
                 mark_advisory_auto_decision(signal_id, "eligible")
                 size_eur = _compute_size_eur(sig)
                 accepted_tickers.add(ticker)
-                eligible_this_cycle += 1
+                accepted_this_cycle += 1
                 eligible_record = {
                     "signal_id": signal_id, "ticker": ticker,
                     "grade": grade,
@@ -813,7 +884,21 @@ def run_advisory_auto_cycle() -> dict:
                     })
                 elif PAPER_EXECUTION:
                     order = _submit_paper_bracket_order(sig, current or 0.0, size_eur)
-                    if "error" in order:
+                    if str(order.get("error", "")).startswith("below_min_size"):
+                        # Not an execution failure — 1 share exceeds the per-position
+                        # cap. Record as a clean sizing skip.
+                        reason = f"{_SKIP_MIN_SIZE}:1share=${order.get('one_share_usd')}>cap=${order.get('cap_usd')}"
+                        mark_advisory_auto_decision(signal_id, "skipped", reason)
+                        results["skipped"].append({
+                            "signal_id": signal_id, "ticker": ticker,
+                            "grade": grade, "reason": reason,
+                        })
+                        log_event("INFO", "advisory_auto_below_min_size", {
+                            "signal_id": signal_id, "ticker": ticker,
+                            "one_share_usd": order.get("one_share_usd"),
+                            "cap_usd": order.get("cap_usd"),
+                        })
+                    elif "error" in order:
                         reason = f"{_SKIP_ORDER_FAILED}:{order['error']}"
                         mark_advisory_auto_decision(signal_id, "rejected", reason)
                         results["errors"].append({

@@ -134,16 +134,20 @@ def test_watch_stage_can_be_eligible_with_limit_order(monkeypatch):
     assert decisions[0][0][:2] == (101, "eligible")
 
 
-def test_watch_stage_still_respects_do_not_chase(monkeypatch):
+def test_watch_stage_rejects_when_too_extended(monkeypatch):
+    # Watch rests a limit at the band; reject only when price has run more than
+    # MAX_CHASE_PCT above entry_max. entry_max=102, 1% → max_allowed=103.02.
     decisions = []
     signal = _signal(signal_json={"alert_stage": "watch"})
 
     monkeypatch.setattr(executor, "DRY_RUN", True)
     monkeypatch.setattr(executor, "PAPER_EXECUTION", True)
     monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
+    monkeypatch.setattr(executor, "MAX_CHASE_PCT", 1.0)
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
     monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
     monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 0)
     monkeypatch.setattr(executor, "_get_alpaca_positions", lambda: {})
     monkeypatch.setattr(executor, "_get_alpaca_open_orders", lambda: set())
     monkeypatch.setattr(executor, "get_advisory_auto_eligible", lambda **_: [signal])
@@ -156,7 +160,125 @@ def test_watch_stage_still_respects_do_not_chase(monkeypatch):
 
     assert result["eligible"] == []
     assert result["submitted"] == []
-    assert result["skipped"][0]["reason"] == "skipped_chase:103.50>103.00"
+    assert result["skipped"][0]["reason"] == "skipped_chase:103.50>103.02"
+
+
+def _watch_cycle_mocks(monkeypatch, signal, current, decisions):
+    monkeypatch.setattr(executor, "DRY_RUN", True)
+    monkeypatch.setattr(executor, "PAPER_EXECUTION", True)
+    monkeypatch.setattr(executor, "ALLOWED_STAGES", {"trade", "watch"})
+    monkeypatch.setattr(executor, "MAX_CHASE_PCT", 1.0)
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [])
+    monkeypatch.setattr(executor, "get_advisory_auto_daily_pnl", lambda: 0)
+    monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 0)
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 0)
+    monkeypatch.setattr(executor, "_get_alpaca_positions", lambda: {})
+    monkeypatch.setattr(executor, "_get_alpaca_open_orders", lambda: set())
+    monkeypatch.setattr(executor, "get_advisory_auto_eligible", lambda **_: [signal])
+    monkeypatch.setattr(executor, "_get_current_price", lambda ticker: current)
+    monkeypatch.setattr(executor, "_submit_paper_bracket_order", lambda *a, **k: {
+        "order_id": "o", "client_order_id": "c", "submitted_qty": 1,
+        "limit_price": 102.0, "take_profit_price": 106.0, "stop_price": 98.0, "status": "accepted",
+    })
+    monkeypatch.setattr(executor, "mark_advisory_auto_decision",
+                        lambda *a, **k: decisions.append((a, k)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+
+def test_watch_rejects_below_entry_band(monkeypatch):
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})  # band [100,102], stop 98
+    _watch_cycle_mocks(monkeypatch, signal, current=99.0, decisions=decisions)
+    result = executor.run_advisory_auto_cycle()
+    assert result["eligible"] == []
+    assert result["skipped"][0]["reason"].startswith("skipped_below_entry_band")
+
+
+def test_watch_rejects_below_stop(monkeypatch):
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})  # stop 98
+    _watch_cycle_mocks(monkeypatch, signal, current=97.5, decisions=decisions)
+    result = executor.run_advisory_auto_cycle()
+    assert result["eligible"] == []
+    assert result["skipped"][0]["reason"].startswith("skipped_below_stop")
+
+
+def test_watch_allows_slightly_above_band(monkeypatch):
+    # 102.5 is above entry_max (102) but under max_allowed (103.02) → rest a limit.
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})
+    _watch_cycle_mocks(monkeypatch, signal, current=102.5, decisions=decisions)
+    result = executor.run_advisory_auto_cycle()
+    assert len(result["eligible"]) == 1
+    assert result["submitted"][0]["order_id"] == "o"
+
+
+def test_pending_cap_blocks_when_book_full(monkeypatch):
+    decisions = []
+    signal = _signal(signal_json={"alert_stage": "watch"})
+    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=decisions)
+    monkeypatch.setattr(executor, "MAX_PENDING_ORDERS", 8)
+    monkeypatch.setattr(executor, "get_advisory_auto_pending_count", lambda: 8)  # book full
+    result = executor.run_advisory_auto_cycle()
+    assert result["eligible"] == []
+    assert result["skipped"][0]["reason"].startswith("skipped_pending_cap")
+
+
+def test_filled_cap_halts_cycle(monkeypatch):
+    signal = _signal(signal_json={"alert_stage": "watch"})
+    _watch_cycle_mocks(monkeypatch, signal, current=101.0, decisions=[])
+    monkeypatch.setattr(executor, "MAX_POSITIONS", 3)
+    monkeypatch.setattr(executor, "get_advisory_auto_open_count", lambda: 3)  # filled at cap
+    result = executor.run_advisory_auto_cycle()
+    assert result.get("halted") is True
+    assert result["halt_reason"] == executor._SKIP_POSITION_CAP
+
+
+def test_paper_levels_reject_below_stop():
+    levels = executor._paper_order_levels(_signal(), current_price=97.0, size_eur=1000)  # stop 98
+    assert levels["error"] == "price_below_stop"
+
+
+def test_paper_levels_reject_below_entry_band():
+    levels = executor._paper_order_levels(_signal(), current_price=99.5, size_eur=1000)  # min 100
+    assert levels["error"] == "price_below_entry_band"
+
+
+def test_paper_levels_min_one_share_when_affordable():
+    # Tiny allocation would floor to 0 shares, but 1 share ($101) fits under the
+    # per-position cap (15% of 30k ≈ €4,500), so take 1 share.
+    levels = executor._paper_order_levels(_signal(), current_price=101.0, size_eur=10)
+    assert "error" not in levels
+    assert levels["qty"] == 1
+
+
+def test_paper_levels_below_min_size_when_one_share_exceeds_cap(monkeypatch):
+    # 1 share priced above the per-position cap → clean sizing skip, not an error.
+    monkeypatch.setattr(executor, "CAPITAL_EUR", 1000.0)  # cap = €150 ≈ $162
+    sig = _signal(entry_min=200.0, entry_max=205.0, stop_price=190.0, target_1=230.0)
+    levels = executor._paper_order_levels(sig, current_price=202.0, size_eur=10)
+    assert levels["error"] == "below_min_size"
+
+
+def test_reconcile_cancels_pending_below_stop(monkeypatch):
+    signal = _signal(id=500, data_symbol="ARM", auto_status="submitted",
+                     auto_order_id="ord-p", stop_price=400.0)
+    updates, cancels = [], []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order",
+                        lambda oid: SimpleNamespace(status="accepted", legs=[]))
+    monkeypatch.setattr(executor, "_get_current_price", lambda t: 398.0)  # below stop 400
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: cancels.append(t))
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, f: updates.append((sid, f)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    res = executor._reconcile_active_orders({}, set(),
+                                            now_utc=datetime(2026, 6, 18, 18, 0, tzinfo=timezone.utc))
+
+    assert res["pending_cancelled"] == 1
+    assert cancels == ["ARM"]
+    assert updates[0][1]["auto_exit_reason"] == "cancelled_below_stop"
 
 
 def _base_cycle_mocks(monkeypatch, signal, decisions, current=101.0):

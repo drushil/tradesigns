@@ -213,6 +213,7 @@ if "database.client" not in sys.modules:
     _db.get_advisory_auto_eligible = MagicMock(return_value=[])
     _db.get_advisory_auto_daily_pnl = MagicMock(return_value=0)
     _db.get_advisory_auto_open_count = MagicMock(return_value=0)
+    _db.get_advisory_auto_pending_count = MagicMock(return_value=0)
     _db.mark_advisory_auto_decision = MagicMock(return_value={})
     _db.update_advisory_auto_fields = MagicMock(return_value={})
     _db.get_fx_rate_cache = MagicMock(return_value=None)

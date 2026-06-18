@@ -1328,16 +1328,32 @@ def get_advisory_auto_daily_pnl() -> float:
 
 
 def get_advisory_auto_open_count() -> int:
-    """Count of currently open advisory-auto positions (submitted or filled)."""
+    """Count of currently *filled* advisory-auto positions. Resting (submitted but
+    unfilled) limit orders are excluded — they are bounded by the separate pending
+    cap so they do not pre-consume position slots."""
     try:
         db = get_client()
         result = (db.table("advisory_signals")
                   .select("id", count="exact")
-                  .in_("auto_status", ["submitted", "filled"])
+                  .eq("auto_status", "filled")
                   .execute())
         return result.count or 0
     except Exception as e:
         print(f"[ADVISORY_AUTO_OPEN_COUNT_FAILED] {str(e)[:200]}")
+        return 0
+
+
+def get_advisory_auto_pending_count() -> int:
+    """Count of resting (submitted but not yet filled) advisory-auto orders."""
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("id", count="exact")
+                  .eq("auto_status", "submitted")
+                  .execute())
+        return result.count or 0
+    except Exception as e:
+        print(f"[ADVISORY_AUTO_PENDING_COUNT_FAILED] {str(e)[:200]}")
         return 0
 
 
