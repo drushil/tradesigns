@@ -2457,6 +2457,14 @@ def run_advisory_cycle() -> dict:
     discord_sent_this_cycle: set[tuple[str, str]] = set()
     first_live_discord_elapsed_s = None
     immediate_live_sent = 0
+    # Per-stage latency telemetry — surfaced in the advisory_cycle_timing log so
+    # we can see where a cycle spends time (scan compute vs DB vs Discord) and
+    # split GitHub-side overhead (queue/checkout/install, visible in the Actions
+    # run metadata) from in-cycle code cost.
+    scan_compute_s = 0.0          # cumulative time inside _scan_candidate
+    first_candidate_elapsed_s = None  # time from cycle start to first candidate
+    db_insert_s = 0.0             # cumulative insert_advisory_signal time
+    discord_send_s = 0.0          # cumulative _send_discord time (alert path)
     # Only run exit monitor when this cycle is actually scanning a live market.
     # Prevents duplicate Discord exit alerts when EU and US workflows run in
     # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
@@ -2498,6 +2506,7 @@ def run_advisory_cycle() -> dict:
         nonlocal live_sent_today, live_sent_this_window, open_live_count
         nonlocal live_watch_this_window, shadow_discord_sent_today
         nonlocal first_live_discord_elapsed_s, immediate_live_sent
+        nonlocal db_insert_s, discord_send_s
 
         symbol_key = (
             str(candidate.get("market", "")).upper(),
@@ -2525,7 +2534,9 @@ def run_advisory_cycle() -> dict:
                     "current": live_watch_this_window,
                 }
 
+        _insert_started = time.perf_counter()
         saved = insert_advisory_signal(candidate)
+        db_insert_s += time.perf_counter() - _insert_started
         if "error" not in saved and saved.get("id"):
             candidate["id"] = saved.get("id")
             candidate["message_text"] = _format_trade_card(candidate)
@@ -2553,7 +2564,9 @@ def run_advisory_cycle() -> dict:
             and symbol_key not in discord_sent_this_cycle
         )
         if can_send_discord:
+            _discord_started = time.perf_counter()
             _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+            discord_send_s += time.perf_counter() - _discord_started
             discord_sent_this_cycle.add(symbol_key)
             if mode == "live" and first_live_discord_elapsed_s is None:
                 first_live_discord_elapsed_s = round(time.perf_counter() - cycle_started, 3)
@@ -2725,7 +2738,11 @@ def run_advisory_cycle() -> dict:
                 recent_watch = _recent_watch_signal_in_session(
                     recent_live, item["data_symbol"], market, now_cet
                 )
+            _scan_started = time.perf_counter()
             candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
+            scan_compute_s += time.perf_counter() - _scan_started
+            if candidate is not None and first_candidate_elapsed_s is None:
+                first_candidate_elapsed_s = round(time.perf_counter() - cycle_started, 3)
 
             # --- build scan log base ---
             _scan_log_base = {
@@ -2936,7 +2953,11 @@ def run_advisory_cycle() -> dict:
     total_elapsed_s = round(time.perf_counter() - cycle_started, 3)
     log_event("INFO", "advisory_cycle_timing", {
         "total_elapsed_s": total_elapsed_s,
+        "first_candidate_elapsed_s": first_candidate_elapsed_s,
         "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
+        "scan_compute_s": round(scan_compute_s, 3),
+        "db_insert_s": round(db_insert_s, 3),
+        "discord_send_s": round(discord_send_s, 3),
         "immediate_live_sent": immediate_live_sent,
         "market_timings": market_timings,
         "markets": sorted(cfg.markets),
@@ -2963,11 +2984,13 @@ def run_advisory_cycle() -> dict:
         and "US" in cfg.markets
         and os.getenv("ADVISORY_AUTO_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
     ):
+        _auto_started = time.perf_counter()
         try:
             from backend.advisory_auto.executor import run_advisory_auto_cycle
             run_advisory_auto_cycle()
         except Exception as exc:
             log_event("WARN", "advisory_auto_cycle_failed", {"error": str(exc)[:160]})
+        advisory_auto_s = round(time.perf_counter() - _auto_started, 3)
 
         # Watch-limit simulator: measurement-only. Records what a limit order
         # at each BUY watch entry band would have done, then tracks MFE/MAE
@@ -2975,11 +2998,18 @@ def run_advisory_cycle() -> dict:
         # dry-run executor above — these two paths together give the two-track
         # scoreboard that lets us see whether watches or trade-stage signals
         # better measure advisory edge.
+        _sim_started = time.perf_counter()
         try:
             from backend.advisory_auto.simulator import run_advisory_auto_simulation_cycle
             run_advisory_auto_simulation_cycle(market="US")
         except Exception as exc:
             log_event("WARN", "advisory_auto_sim_cycle_failed", {"error": str(exc)[:160]})
+        simulator_s = round(time.perf_counter() - _sim_started, 3)
+
+        log_event("INFO", "advisory_auto_invocation_timing", {
+            "advisory_auto_s": advisory_auto_s,
+            "simulator_s": simulator_s,
+        })
 
     return {
         "emitted": len(emitted),
