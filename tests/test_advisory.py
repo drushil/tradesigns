@@ -1119,6 +1119,57 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert "NVDA" in sent[0]
 
 
+def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
+    # Scan snapshots + scan logs must be flushed in a single bulk round-trip
+    # each at cycle end, not one write per ticker.
+    berlin = timezone(timedelta(hours=2))
+    snap_calls = []
+    log_calls = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
+        "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
+        "composite_score": 0.62,
+        "signals": {
+            "vwap_deviation": {"score": 0.55},
+            "macd_crossover": {"score": 0.55},
+            "relative_strength": {"score": 0.50},
+            "orb": {"score": 0.65, "meta": {"active": True}},
+            "news_sentiment": {"score": 0.10},
+        },
+        "atr_data": {"atr_pct": 1.0},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *a, **k: {"net_ev_pct": 0.82, "confidence": 0.74})
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: {"id": 1})
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: update)
+    monkeypatch.setattr(advisory, "_send_discord", lambda *a, **k: True)
+    monkeypatch.setattr(advisory, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(advisory, "bulk_upsert_advisory_scan_snapshots",
+                        lambda rows: snap_calls.append(rows) or {"written": len(rows)})
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs",
+                        lambda rows: log_calls.append(rows) or {"written": len(rows)})
+
+    advisory.run_advisory_cycle()
+
+    # One bulk flush each, carrying a list — not per-ticker writes.
+    assert len(snap_calls) == 1
+    assert len(log_calls) == 1
+    assert isinstance(snap_calls[0], list) and len(snap_calls[0]) >= 1
+    assert isinstance(log_calls[0], list) and len(log_calls[0]) >= 1
+
+
 def test_trade_alert_creates_virtual_a_grade_entry(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []

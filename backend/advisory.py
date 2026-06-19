@@ -39,6 +39,21 @@ except (ImportError, AttributeError):
         return {"skipped": True, "reason": "scan_log_helper_unavailable"}
 try:
     from database.client import (
+        bulk_insert_advisory_scan_logs,
+        bulk_upsert_advisory_scan_snapshots,
+    )
+except (ImportError, AttributeError):
+    def bulk_insert_advisory_scan_logs(records: list) -> dict:
+        for _r in records or []:
+            insert_advisory_scan_log(_r)
+        return {"written": len(records or [])}
+
+    def bulk_upsert_advisory_scan_snapshots(snapshots: list) -> dict:
+        for _s in snapshots or []:
+            upsert_advisory_scan_snapshot(_s)
+        return {"written": len(snapshots or [])}
+try:
+    from database.client import (
         create_virtual_position,
         get_open_virtual_positions,
         update_virtual_position,
@@ -2406,8 +2421,19 @@ def run_advisory_cycle() -> dict:
     cfg = load_config()
     now_cet = _now_cet()
     cycle_id = now_cet.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    recent_live = get_recent_advisory_signals(days=1, mode="live")
-    recent_shadow = get_recent_advisory_signals(days=1, mode="shadow")
+    # Prologue reads are independent → fetch concurrently to collapse three
+    # sequential Supabase round-trips into ~one (a major share of cycle latency
+    # per the timing telemetry). Each fn catches its own errors and returns []
+    # so .result() never raises here. The 90d trades window is unchanged — it
+    # feeds EV, so narrowing it would alter signal behaviour, not just latency.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as _pool:
+        _f_live = _pool.submit(get_recent_advisory_signals, days=1, mode="live")
+        _f_shadow = _pool.submit(get_recent_advisory_signals, days=1, mode="shadow")
+        _f_trades = _pool.submit(get_recent_trades, days=90)
+        recent_live = _f_live.result()
+        recent_shadow = _f_shadow.result()
+        recent_trades = _f_trades.result()
     now_utc = now_cet.astimezone(timezone.utc)
     live_sent_today = len([
         s for s in recent_live
@@ -2433,7 +2459,7 @@ def run_advisory_cycle() -> dict:
         if str(s.get("market", "")).upper() in cfg.shadow_discord_markets
         and _meets_min_grade(s.get("grade"), cfg.min_discord_grade)
     ])
-    recent_trades = get_recent_trades(days=90)
+    # recent_trades was fetched concurrently in the prologue block above.
 
     # Build EU prior-composite cache from already-fetched recent_shadow (zero extra DB calls).
     # First occurrence per symbol is most-recent because get_recent_advisory_signals orders DESC.
@@ -2465,6 +2491,18 @@ def run_advisory_cycle() -> dict:
     first_candidate_elapsed_s = None  # time from cycle start to first candidate
     db_insert_s = 0.0             # cumulative insert_advisory_signal time
     discord_send_s = 0.0          # cumulative _send_discord time (alert path)
+
+    # Per-ticker diagnostic writes (scan snapshots + scan logs) are buffered and
+    # flushed in two bulk round-trips at cycle end instead of one INSERT/UPSERT per
+    # ticker — the dominant in-cycle latency cost per the timing telemetry.
+    _snapshot_buf: list = []
+    _scanlog_buf: list = []
+
+    def _buf_snapshot(snap: dict) -> None:
+        _snapshot_buf.append(snap)
+
+    def _buf_scanlog(rec: dict) -> None:
+        _scanlog_buf.append(rec)
     # Only run exit monitor when this cycle is actually scanning a live market.
     # Prevents duplicate Discord exit alerts when EU and US workflows run in
     # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
@@ -2633,7 +2671,7 @@ def run_advisory_cycle() -> dict:
         window = _window_name(market, now_cet)
         if not window:
             for item in ADVISORY_UNIVERSE.get(market, []):
-                _record_scan_snapshot(_scan_snapshot(
+                _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, "", "outside_advisory_window"
                 ))
             continue
@@ -2645,7 +2683,7 @@ def run_advisory_cycle() -> dict:
                     "required_minutes": cfg.us_min_minutes_after_open,
                 })
                 for item in ADVISORY_UNIVERSE.get(market, []):
-                    _record_scan_snapshot(_scan_snapshot(
+                    _buf_snapshot(_scan_snapshot(
                         cycle_id, now_cet, cfg, item, market, mode, window, "waiting_for_us_open_bars"
                     ))
                 continue
@@ -2690,7 +2728,7 @@ def run_advisory_cycle() -> dict:
 
             scanned_count += 1
             if not _is_broker_supported(item, cfg):
-                _record_scan_snapshot(_scan_snapshot(
+                _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "broker_not_supported"
                 ))
                 continue
@@ -2709,7 +2747,7 @@ def run_advisory_cycle() -> dict:
                     log_event("DEBUG", "advisory_eu_early_gate_skip", {
                         "symbol": _sym_key, "prior_composite": round(_prior_c, 4), "gate": _gate,
                     })
-                    _record_scan_snapshot(_scan_snapshot(
+                    _buf_snapshot(_scan_snapshot(
                         cycle_id, now_cet, cfg, item, market, mode, window, "eu_early_gate_skip"
                     ))
                     continue
@@ -2717,11 +2755,11 @@ def run_advisory_cycle() -> dict:
             if mode == "live" and _alerted_symbol_in_session(
                 recent_live, item["data_symbol"], market, now_cet
             ):
-                _record_scan_snapshot(_scan_snapshot(
+                _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "already_alerted_in_session"
                 ))
                 try:
-                    insert_advisory_scan_log({
+                    _buf_scanlog({
                         "data_symbol": item["data_symbol"],
                         "primary_symbol": item.get("primary_symbol"),
                         "market": market,
@@ -2779,15 +2817,15 @@ def run_advisory_cycle() -> dict:
                 })
 
             if not candidate:
-                _record_scan_snapshot(_scan_snapshot(
+                _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "no_candidate"
                 ))
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
-            _record_scan_snapshot(_scan_snapshot(
+            _buf_snapshot(_scan_snapshot(
                 cycle_id, now_cet, cfg, item, market, mode, window, "candidate", candidate
             ))
             if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
@@ -2796,7 +2834,7 @@ def run_advisory_cycle() -> dict:
                 emitted.append(candidate)
                 _scan_log_base["gate_reason"] = "benchmark_only"
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
@@ -2815,12 +2853,12 @@ def run_advisory_cycle() -> dict:
                     }
                     candidate["message_text"] = _format_trade_card(candidate)
             if mode == "live" and _watch_repeat_blocked(recent_watch, candidate):
-                _record_scan_snapshot(_scan_snapshot(
+                _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "watch_repeat_blocked", candidate
                 ))
                 _scan_log_base["gate_reason"] = "watch_repeat_blocked"
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
@@ -2836,7 +2874,7 @@ def run_advisory_cycle() -> dict:
                 blocked.append(candidate)
                 _scan_log_base["gate_reason"] = candidate.get("status")
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
@@ -2851,7 +2889,7 @@ def run_advisory_cycle() -> dict:
                 if _emit_detail:
                     _scan_log_base["gate_detail"] = _emit_detail
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
@@ -2870,7 +2908,7 @@ def run_advisory_cycle() -> dict:
                 if _emit_detail:
                     _scan_log_base["gate_detail"] = _emit_detail
                 try:
-                    insert_advisory_scan_log(_scan_log_base)
+                    _buf_scanlog(_scan_log_base)
                 except Exception:
                     pass
                 continue
@@ -2916,7 +2954,7 @@ def run_advisory_cycle() -> dict:
                 # cause from _persist_emit_candidate so a single scan_log row
                 # answers "why didn't this emit?".
                 _detail = candidate.get("block_detail") or _emit_detail or {}
-                insert_advisory_scan_log({
+                _buf_scanlog({
                     "data_symbol": candidate.get("data_symbol"),
                     "primary_symbol": candidate.get("primary_symbol"),
                     "market": market,
@@ -2950,6 +2988,22 @@ def run_advisory_cycle() -> dict:
             "elapsed_s": round(time.perf_counter() - market_started, 3),
         })
 
+    # Flush buffered diagnostic writes in two bulk round-trips (was one
+    # INSERT/UPSERT per ticker). Kept inside the timed window so total_elapsed_s
+    # reflects the new batched cost.
+    _flush_started = time.perf_counter()
+    if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True) and _snapshot_buf:
+        _snap_res = bulk_upsert_advisory_scan_snapshots(_snapshot_buf)
+        if _snap_res.get("error"):
+            log_event("WARN", "advisory_scan_snapshot_bulk_failed",
+                      {"error": str(_snap_res["error"])[:160], "n": len(_snapshot_buf)})
+    if _scanlog_buf:
+        _log_res = bulk_insert_advisory_scan_logs(_scanlog_buf)
+        if _log_res.get("error"):
+            log_event("WARN", "advisory_scan_log_bulk_failed",
+                      {"error": str(_log_res["error"])[:160], "n": len(_scanlog_buf)})
+    flush_db_s = round(time.perf_counter() - _flush_started, 3)
+
     total_elapsed_s = round(time.perf_counter() - cycle_started, 3)
     log_event("INFO", "advisory_cycle_timing", {
         "total_elapsed_s": total_elapsed_s,
@@ -2958,6 +3012,9 @@ def run_advisory_cycle() -> dict:
         "scan_compute_s": round(scan_compute_s, 3),
         "db_insert_s": round(db_insert_s, 3),
         "discord_send_s": round(discord_send_s, 3),
+        "flush_db_s": flush_db_s,
+        "snapshot_rows": len(_snapshot_buf),
+        "scanlog_rows": len(_scanlog_buf),
         "immediate_live_sent": immediate_live_sent,
         "market_timings": market_timings,
         "markets": sorted(cfg.markets),

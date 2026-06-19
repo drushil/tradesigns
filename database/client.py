@@ -871,6 +871,40 @@ def upsert_advisory_scan_snapshot(snapshot: dict) -> dict:
         return {"error": str(e)}
 
 
+_SCAN_SNAPSHOT_COLUMNS = (
+    "cycle_id", "cycle_started_at", "market", "mode", "session_window",
+    "broker_profile", "data_symbol", "primary_symbol", "broker_display_name",
+    "exchange", "currency", "listing_type", "side", "grade", "alert_stage",
+    "status", "gate_reason", "composite_score", "ev_net_pct", "breakout_quality",
+    "last_price", "move_pct", "volume",
+)
+_SCAN_SNAPSHOT_JSON_COLUMNS = ("signal_json", "data_quality_json", "meta_json")
+
+
+def bulk_upsert_advisory_scan_snapshots(snapshots: list) -> dict:
+    """Upsert many per-cycle scan snapshots in a single round-trip. Rows share a
+    fixed column set (each cycle's rows are fresh inserts keyed by
+    cycle_id,market,data_symbol). Returns {written: n} or {error: ...}."""
+    if not snapshots:
+        return {"written": 0}
+    try:
+        db = get_client(write=True)
+        records = []
+        for snap in snapshots:
+            record = {col: snap.get(col) for col in _SCAN_SNAPSHOT_COLUMNS}
+            for col in _SCAN_SNAPSHOT_JSON_COLUMNS:
+                record[col] = _json_safe(snap.get(col) or {})
+            records.append(record)
+        result = db.table("advisory_scan_snapshots").upsert(
+            records,
+            on_conflict="cycle_id,market,data_symbol",
+        ).execute()
+        return {"written": len(result.data or records)}
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_SNAPSHOT_BULK_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
 def get_latest_advisory_scan_snapshots(market: str = "US", limit: int = 100) -> list:
     """Fetch newest advisory scan snapshots for dashboard visibility."""
     try:
@@ -1658,6 +1692,21 @@ def insert_advisory_scan_log(record: dict) -> dict:
         return result.data[0] if result.data else {}
     except Exception as e:
         print(f"[ADVISORY_SCAN_LOG_FAILED] {str(e)[:200]}")
+        return {"error": str(e)}
+
+
+def bulk_insert_advisory_scan_logs(records: list) -> dict:
+    """Insert many per-cycle scan-log rows in a single round-trip (diagnostics
+    only). Returns {written: n} or {error: ...}."""
+    if not records:
+        return {"written": 0}
+    try:
+        db = get_client(write=True)
+        safe = [_json_safe(r) for r in records]
+        result = db.table("advisory_scan_log").insert(safe).execute()
+        return {"written": len(result.data or safe)}
+    except Exception as e:
+        print(f"[ADVISORY_SCAN_LOG_BULK_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
 
 
