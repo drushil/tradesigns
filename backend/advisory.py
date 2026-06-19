@@ -2524,14 +2524,16 @@ def run_advisory_cycle() -> dict:
             if _r.get("error"):
                 log_event("WARN", "advisory_scan_snapshot_bulk_failed",
                           {"error": str(_r["error"])[:160], "n": len(_rows)})
-            snapshot_rows_total += len(_rows)
+            else:
+                snapshot_rows_total += int(_r.get("written") or len(_rows))
         if _scanlog_buf:
             _rows = list(_scanlog_buf)
             _r = bulk_insert_advisory_scan_logs(_rows)
             if _r.get("error"):
                 log_event("WARN", "advisory_scan_log_bulk_failed",
                           {"error": str(_r["error"])[:160], "n": len(_rows)})
-            scanlog_rows_total += len(_rows)
+            else:
+                scanlog_rows_total += int(_r.get("written") or len(_rows))
         flush_db_s += time.perf_counter() - _t
         _snapshot_buf.clear()
         _scanlog_buf.clear()
@@ -2706,6 +2708,7 @@ def run_advisory_cycle() -> dict:
                 _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, "", "outside_advisory_window"
                 ))
+            _flush_diag_buffers()
             continue
         if mode == "live" and market == "US" and window == "us_open":
             minutes_since_open = _minutes_since_session_start(market, window, now_cet)
@@ -2718,6 +2721,7 @@ def run_advisory_cycle() -> dict:
                     _buf_snapshot(_scan_snapshot(
                         cycle_id, now_cet, cfg, item, market, mode, window, "waiting_for_us_open_bars"
                     ))
+                _flush_diag_buffers()
                 continue
         if mode == "live" and daily_live_pnl <= -abs(cfg.max_daily_loss_eur):
             log_event("INFO", "advisory_live_blocked_daily_loss_cap", {

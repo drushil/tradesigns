@@ -1170,6 +1170,87 @@ def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
     assert isinstance(log_calls[0], list) and len(log_calls[0]) >= 1
 
 
+def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    flush_events = []
+
+    cfg = _cfg(
+        markets={"US", "EU"},
+        live_markets={"US"},
+        shadow_markets={"EU"},
+        shadow_discord_markets={"EU"},
+    )
+    monkeypatch.setattr(advisory, "load_config", lambda: cfg)
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 14, 0, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "_ordered_markets", lambda cfg: ["US", "EU"])
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}],
+        "EU": [{"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "XETRA", "currency": "EUR"}],
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_is_broker_supported",
+                        lambda item, cfg: flush_events.append(("broker_check", item["data_symbol"])) or False)
+    monkeypatch.setattr(advisory, "log_event", lambda *a, **k: None)
+    monkeypatch.setattr(advisory, "bulk_upsert_advisory_scan_snapshots",
+                        lambda rows: flush_events.append(("flush", [r["market"] for r in rows])) or {"written": len(rows)})
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs",
+                        lambda rows: {"written": len(rows)})
+
+    advisory.run_advisory_cycle()
+
+    assert flush_events[0] == ("flush", ["US"])
+    assert flush_events[1] == ("broker_check", "SAP.DE")
+
+
+def test_run_advisory_cycle_failed_bulk_writes_do_not_count_as_written(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    logs = []
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
+        "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda symbol, weights, regime_state=None: {
+        "composite_score": 0.62,
+        "signals": {
+            "vwap_deviation": {"score": 0.55},
+            "macd_crossover": {"score": 0.55},
+            "relative_strength": {"score": 0.50},
+            "orb": {"score": 0.65, "meta": {"active": True}},
+            "news_sentiment": {"score": 0.10},
+        },
+        "atr_data": {"atr_pct": 1.0},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *a, **k: {"net_ev_pct": 0.82, "confidence": 0.74})
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: {"id": 1})
+    monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: update)
+    monkeypatch.setattr(advisory, "_send_discord", lambda *a, **k: True)
+    monkeypatch.setattr(advisory, "log_event", lambda level, event, detail=None: logs.append((event, detail or {})))
+    monkeypatch.setattr(advisory, "bulk_upsert_advisory_scan_snapshots",
+                        lambda rows: {"error": "snapshot boom"})
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs",
+                        lambda rows: {"error": "scanlog boom"})
+
+    advisory.run_advisory_cycle()
+
+    timing = next(detail for event, detail in logs if event == "advisory_cycle_timing")
+    assert timing["snapshot_rows"] == 0
+    assert timing["scanlog_rows"] == 0
+    assert any(event == "advisory_scan_snapshot_bulk_failed" for event, _ in logs)
+    assert any(event == "advisory_scan_log_bulk_failed" for event, _ in logs)
+
+
 def test_trade_alert_creates_virtual_a_grade_entry(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
