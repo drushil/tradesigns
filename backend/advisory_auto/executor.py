@@ -78,7 +78,9 @@ ALLOC_B            = float(os.getenv("ADVISORY_AUTO_ALLOC_B",      "50"))  / 100
 MAX_SIGNAL_AGE_MIN = float(os.getenv("ADVISORY_AUTO_MAX_SIGNAL_AGE_MIN", "5"))
 DRY_RUN            = os.getenv("ADVISORY_AUTO_DRY_RUN", "true").strip().lower() != "false"
 PAPER_EXECUTION    = os.getenv("ADVISORY_AUTO_PAPER_EXECUTION", "false").strip().lower() in {"1", "true", "yes", "on"}
-_ALLOWED_STAGES_RAW = os.getenv("ADVISORY_AUTO_ALLOWED_STAGES", "trade,watch")
+# `or` fallback throughout so an unset repo variable, passed by the workflow as an
+# empty string, falls back to the default instead of producing an empty set / crash.
+_ALLOWED_STAGES_RAW = os.getenv("ADVISORY_AUTO_ALLOWED_STAGES") or "trade,watch"
 ALLOWED_STAGES     = {s.strip().lower() for s in _ALLOWED_STAGES_RAW.split(",") if s.strip()}
 
 # Minimum grade eligible for paper-order submission. Dry-run eligibility tracking
@@ -88,21 +90,21 @@ ALLOWED_STAGES     = {s.strip().lower() for s in _ALLOWED_STAGES_RAW.split(",") 
 MIN_PAPER_GRADE    = (os.getenv("ADVISORY_AUTO_MIN_PAPER_GRADE", "B") or "B").strip().upper()
 
 # Transient broker-error retry on order submission (e.g. Alpaca paper 5xx).
-SUBMIT_MAX_RETRIES   = int(os.getenv("ADVISORY_AUTO_SUBMIT_RETRIES", "2"))
-SUBMIT_RETRY_DELAY_S = float(os.getenv("ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S", "2"))
+SUBMIT_MAX_RETRIES   = int(os.getenv("ADVISORY_AUTO_SUBMIT_RETRIES") or "2")
+SUBMIT_RETRY_DELAY_S = float(os.getenv("ADVISORY_AUTO_SUBMIT_RETRY_DELAY_S") or "2")
 
 # End-of-day flat: advisory-auto is intraday (matches the simulator's EOD
 # mark-to-close). Flatten any still-open position within this many minutes of
 # the US close so nothing is carried overnight.
 EOD_FLAT_ENABLED     = os.getenv("ADVISORY_AUTO_EOD_FLAT_ENABLED", "true").strip().lower() != "false"
-EOD_FLAT_BUFFER_MIN  = float(os.getenv("ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN", "10"))
+EOD_FLAT_BUFFER_MIN  = float(os.getenv("ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN") or "10")
 
 # Orphan guard: a filled position with no live protective order at the broker
 # is naked (e.g. DAY bracket legs expired at a prior close). Flatten it on the
 # next cycle, any time of day. Skip positions younger than ORPHAN_MIN_AGE_MIN to
 # avoid racing a freshly-submitted bracket whose legs have not registered yet.
 ORPHAN_GUARD_ENABLED = os.getenv("ADVISORY_AUTO_ORPHAN_GUARD_ENABLED", "true").strip().lower() != "false"
-ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN", "3"))
+ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN") or "3")
 
 # Paper near-T1 protection: mirror the simulator's profit-protection exit on the
 # live paper position. Once the run-up covers ARM_FRAC of the fill→T1 distance and
@@ -110,8 +112,8 @@ ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN", "3"))
 # flatten. Reuses the simulator's validated _scan_bars_for_exit so paper and sim
 # apply identical logic and stay directly comparable. Defaults match the simulator.
 PAPER_NEAR_T1_ENABLED   = os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED", "true").strip().lower() != "false"
-PAPER_NEAR_T1_ARM_FRAC  = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC", "0.8"))
-PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R", "0.5"))
+PAPER_NEAR_T1_ARM_FRAC  = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC") or "0.8")
+PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R") or "0.5")
 
 # Watch-entry band logic. A watch limit rests at the entry band and fills on a
 # pullback, so a snapshot price slightly above the band is fine — only reject when
