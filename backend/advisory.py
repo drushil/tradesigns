@@ -2493,16 +2493,48 @@ def run_advisory_cycle() -> dict:
     discord_send_s = 0.0          # cumulative _send_discord time (alert path)
 
     # Per-ticker diagnostic writes (scan snapshots + scan logs) are buffered and
-    # flushed in two bulk round-trips at cycle end instead of one INSERT/UPSERT per
-    # ticker — the dominant in-cycle latency cost per the timing telemetry.
+    # flushed in bulk round-trips instead of one INSERT/UPSERT per ticker — the
+    # dominant in-cycle latency cost per the timing telemetry. Flushed once per
+    # market (not once at cycle end) so a crash mid-cycle still preserves the
+    # already-scanned markets' observability.
     _snapshot_buf: list = []
     _scanlog_buf: list = []
+    flush_db_s = 0.0
+    snapshot_rows_total = 0
+    scanlog_rows_total = 0
 
     def _buf_snapshot(snap: dict) -> None:
         _snapshot_buf.append(snap)
 
     def _buf_scanlog(rec: dict) -> None:
         _scanlog_buf.append(rec)
+
+    def _flush_diag_buffers() -> None:
+        """Flush buffered scan snapshots + scan logs in (up to) two bulk
+        round-trips, accumulate timing/counts, and clear the buffers. A failed
+        bulk write is logged and swallowed — diagnostics must never break the
+        alert path (alerts persist inline during the scan, not here)."""
+        nonlocal flush_db_s, snapshot_rows_total, scanlog_rows_total
+        if not _snapshot_buf and not _scanlog_buf:
+            return
+        _t = time.perf_counter()
+        if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True) and _snapshot_buf:
+            _rows = list(_snapshot_buf)
+            _r = bulk_upsert_advisory_scan_snapshots(_rows)
+            if _r.get("error"):
+                log_event("WARN", "advisory_scan_snapshot_bulk_failed",
+                          {"error": str(_r["error"])[:160], "n": len(_rows)})
+            snapshot_rows_total += len(_rows)
+        if _scanlog_buf:
+            _rows = list(_scanlog_buf)
+            _r = bulk_insert_advisory_scan_logs(_rows)
+            if _r.get("error"):
+                log_event("WARN", "advisory_scan_log_bulk_failed",
+                          {"error": str(_r["error"])[:160], "n": len(_rows)})
+            scanlog_rows_total += len(_rows)
+        flush_db_s += time.perf_counter() - _t
+        _snapshot_buf.clear()
+        _scanlog_buf.clear()
     # Only run exit monitor when this cycle is actually scanning a live market.
     # Prevents duplicate Discord exit alerts when EU and US workflows run in
     # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
@@ -2988,21 +3020,14 @@ def run_advisory_cycle() -> dict:
             "elapsed_s": round(time.perf_counter() - market_started, 3),
         })
 
-    # Flush buffered diagnostic writes in two bulk round-trips (was one
-    # INSERT/UPSERT per ticker). Kept inside the timed window so total_elapsed_s
-    # reflects the new batched cost.
-    _flush_started = time.perf_counter()
-    if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True) and _snapshot_buf:
-        _snap_res = bulk_upsert_advisory_scan_snapshots(_snapshot_buf)
-        if _snap_res.get("error"):
-            log_event("WARN", "advisory_scan_snapshot_bulk_failed",
-                      {"error": str(_snap_res["error"])[:160], "n": len(_snapshot_buf)})
-    if _scanlog_buf:
-        _log_res = bulk_insert_advisory_scan_logs(_scanlog_buf)
-        if _log_res.get("error"):
-            log_event("WARN", "advisory_scan_log_bulk_failed",
-                      {"error": str(_log_res["error"])[:160], "n": len(_scanlog_buf)})
-    flush_db_s = round(time.perf_counter() - _flush_started, 3)
+        # Flush this market's buffered diagnostics now (per-market, not one giant
+        # end-of-cycle flush) so a crash mid-cycle keeps already-scanned markets'
+        # observability. Inside the timed window so total_elapsed_s reflects it.
+        _flush_diag_buffers()
+
+    # Catch-all flush for any market that bailed via `continue` before its
+    # bottom-of-loop flush (e.g. outside-window snapshots).
+    _flush_diag_buffers()
 
     total_elapsed_s = round(time.perf_counter() - cycle_started, 3)
     log_event("INFO", "advisory_cycle_timing", {
@@ -3012,9 +3037,9 @@ def run_advisory_cycle() -> dict:
         "scan_compute_s": round(scan_compute_s, 3),
         "db_insert_s": round(db_insert_s, 3),
         "discord_send_s": round(discord_send_s, 3),
-        "flush_db_s": flush_db_s,
-        "snapshot_rows": len(_snapshot_buf),
-        "scanlog_rows": len(_scanlog_buf),
+        "flush_db_s": round(flush_db_s, 3),
+        "snapshot_rows": snapshot_rows_total,
+        "scanlog_rows": scanlog_rows_total,
         "immediate_live_sent": immediate_live_sent,
         "market_timings": market_timings,
         "markets": sorted(cfg.markets),
