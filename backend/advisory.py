@@ -1987,7 +1987,7 @@ def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfi
 
 
 def _record_scan_snapshot(snapshot: dict) -> None:
-    if not _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True):
+    if not _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", False):
         return
     result = upsert_advisory_scan_snapshot(snapshot)
     if result.get("error"):
@@ -2518,7 +2518,7 @@ def run_advisory_cycle() -> dict:
         if not _snapshot_buf and not _scanlog_buf:
             return
         _t = time.perf_counter()
-        if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", True) and _snapshot_buf:
+        if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", False) and _snapshot_buf:
             _rows = list(_snapshot_buf)
             _r = bulk_upsert_advisory_scan_snapshots(_rows)
             if _r.get("error"):

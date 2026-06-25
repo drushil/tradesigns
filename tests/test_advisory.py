@@ -1126,6 +1126,7 @@ def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
     snap_calls = []
     log_calls = []
 
+    monkeypatch.setenv("ADVISORY_SCAN_SNAPSHOTS_ENABLED", "true")
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
     monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
@@ -1180,6 +1181,7 @@ def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(mon
         shadow_markets={"EU"},
         shadow_discord_markets={"EU"},
     )
+    monkeypatch.setenv("ADVISORY_SCAN_SNAPSHOTS_ENABLED", "true")
     monkeypatch.setattr(advisory, "load_config", lambda: cfg)
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 14, 0, tzinfo=berlin))
     monkeypatch.setattr(advisory, "_ordered_markets", lambda cfg: ["US", "EU"])
@@ -1207,6 +1209,7 @@ def test_run_advisory_cycle_failed_bulk_writes_do_not_count_as_written(monkeypat
     berlin = timezone(timedelta(hours=2))
     logs = []
 
+    monkeypatch.setenv("ADVISORY_SCAN_SNAPSHOTS_ENABLED", "true")
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
     monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
@@ -1495,6 +1498,7 @@ def test_run_advisory_cycle_skips_entries_not_supported_by_active_broker(monkeyp
     berlin = timezone(timedelta(hours=2))
     snapshots = []
 
+    monkeypatch.setenv("ADVISORY_SCAN_SNAPSHOTS_ENABLED", "true")
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg(broker_tag="trade_republic_de"))
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
     monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {

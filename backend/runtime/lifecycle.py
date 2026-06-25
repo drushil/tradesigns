@@ -97,6 +97,12 @@ def run_post_market_analytics():
             run_advisory_learner()
         except Exception as e:
             log_event("WARN", "advisory_learner_failed", {"error": str(e)[:160]})
+        try:
+            from database.client import prune_database_usage
+            prune_summary = prune_database_usage()
+            log_event("INFO", "database_usage_pruned", prune_summary)
+        except Exception as e:
+            log_event("WARN", "database_usage_prune_failed", {"error": str(e)[:160]})
         log_event("INFO", "post_market_analytics_complete", {})
     except Exception as e:
         log_event("ERROR", "post_market_analytics_failed", {"error": str(e)[:160]})

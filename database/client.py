@@ -6,6 +6,11 @@ Reads credentials from os.environ (which app.py populates from st.secrets).
 import os
 from datetime import date, datetime, timedelta
 from typing import Optional
+try:
+    from postgrest import ReturnMethod
+except Exception:  # pragma: no cover - test stubs may not expose postgrest internals
+    class ReturnMethod:
+        minimal = "minimal"
 from supabase import create_client
 
 
@@ -33,6 +38,20 @@ def _json_safe(value):
         except Exception:
             pass
     return value
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    raw = os.environ.get(key)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 def get_client(write: bool = False):
@@ -864,6 +883,7 @@ def upsert_advisory_scan_snapshot(snapshot: dict) -> dict:
         result = db.table("advisory_scan_snapshots").upsert(
             record,
             on_conflict="cycle_id,market,data_symbol",
+            returning=ReturnMethod.minimal,
         ).execute()
         return result.data[0] if result.data else {}
     except Exception as e:
@@ -898,8 +918,9 @@ def bulk_upsert_advisory_scan_snapshots(snapshots: list) -> dict:
         result = db.table("advisory_scan_snapshots").upsert(
             records,
             on_conflict="cycle_id,market,data_symbol",
+            returning=ReturnMethod.minimal,
         ).execute()
-        return {"written": len(result.data or records)}
+        return {"written": len(records)}
     except Exception as e:
         print(f"[ADVISORY_SCAN_SNAPSHOT_BULK_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
@@ -1688,7 +1709,7 @@ def insert_advisory_scan_log(record: dict) -> dict:
     try:
         db = get_client(write=True)
         safe = _json_safe(record)
-        result = db.table("advisory_scan_log").insert(safe).execute()
+        result = db.table("advisory_scan_log").insert(safe, returning=ReturnMethod.minimal).execute()
         return result.data[0] if result.data else {}
     except Exception as e:
         print(f"[ADVISORY_SCAN_LOG_FAILED] {str(e)[:200]}")
@@ -1703,8 +1724,8 @@ def bulk_insert_advisory_scan_logs(records: list) -> dict:
     try:
         db = get_client(write=True)
         safe = [_json_safe(r) for r in records]
-        result = db.table("advisory_scan_log").insert(safe).execute()
-        return {"written": len(result.data or safe)}
+        db.table("advisory_scan_log").insert(safe, returning=ReturnMethod.minimal).execute()
+        return {"written": len(safe)}
     except Exception as e:
         print(f"[ADVISORY_SCAN_LOG_BULK_FAILED] {str(e)[:200]}")
         return {"error": str(e)}
@@ -2190,15 +2211,44 @@ def get_portfolio_reviews(limit: int = 12) -> list:
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
+_DEFAULT_DB_LOG_LEVELS = {"WARN", "ERROR", "TRADE", "LEARNING"}
+_DEFAULT_DB_LOG_EVENT_ALLOWLIST = {
+    "daily_eod_review_complete",
+    "advisory_learner_complete",
+    "post_market_analytics_complete",
+    "database_usage_pruned",
+    "german_morning_watch",
+}
+
+
+def _csv_env_set(key: str, default: set[str]) -> set[str]:
+    raw = os.environ.get(key)
+    if raw is None:
+        return set(default)
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _should_persist_log(level: str, event: str) -> bool:
+    if _env_bool("DB_LOG_ALL", False):
+        return True
+    level = str(level or "").upper()
+    event = str(event or "")
+    levels = {value.upper() for value in _csv_env_set("DB_LOG_LEVELS", _DEFAULT_DB_LOG_LEVELS)}
+    events = _csv_env_set("DB_LOG_EVENT_ALLOWLIST", _DEFAULT_DB_LOG_EVENT_ALLOWLIST)
+    return level in levels or event in events
+
+
 def log_event(level: str, event: str, detail: dict = None):
     try:
         print(f"[{level}] {event}: {detail or {}}")
+        if not _should_persist_log(level, event):
+            return
         db = get_client(write=True)
         db.table("agent_logs").insert({
             "level":  level,
             "event":  event,
             "detail": detail or {},
-        }).execute()
+        }, returning=ReturnMethod.minimal).execute()
     except Exception as e:
         print(f"[LOG_WRITE_FAILED] {level} {event}: {str(e)[:200]}")
 
@@ -2210,6 +2260,65 @@ def get_logs(level: str = None, limit: int = 100) -> list:
         q = q.eq("level", level)
     result = q.limit(limit).execute()
     return result.data or []
+
+
+def _delete_older_than(db, table: str, column: str, cutoff_iso: str, filters: dict = None) -> int:
+    q = db.table(table).delete(count="exact", returning=ReturnMethod.minimal).lt(column, cutoff_iso)
+    for key, value in (filters or {}).items():
+        q = q.eq(key, value)
+    result = q.execute()
+    return int(getattr(result, "count", None) or 0)
+
+
+def _update_older_than(db, table: str, column: str, cutoff_iso: str, updates: dict, filters: dict = None) -> int:
+    q = db.table(table).update(_json_safe(updates), count="exact", returning=ReturnMethod.minimal).lt(column, cutoff_iso)
+    for key, value in (filters or {}).items():
+        q = q.eq(key, value)
+    result = q.execute()
+    return int(getattr(result, "count", None) or 0)
+
+
+def prune_database_usage() -> dict:
+    """Prune high-volume diagnostics and bulky replay payloads for free-tier DB usage."""
+    now = datetime.utcnow()
+    db = get_client(write=True)
+    summary = {}
+
+    rules = [
+        ("advisory_scan_snapshots", "cycle_started_at", _env_int("DB_RETENTION_SCAN_SNAPSHOT_DAYS", 1), None),
+        ("advisory_scan_log", "scanned_at", _env_int("DB_RETENTION_SCAN_LOG_DAYS", 2), None),
+        ("agent_logs", "logged_at", _env_int("DB_RETENTION_AGENT_LOG_DAYS", 7), None),
+        ("blocked_opportunities", "created_at", _env_int("DB_RETENTION_BLOCKED_OPPORTUNITY_DAYS", 14), None),
+        ("portfolio_snapshots", "snapshot_at", _env_int("DB_RETENTION_PORTFOLIO_SNAPSHOT_DAYS", 90), None),
+        ("advisory_auto_simulations", "simulated_at", _env_int("DB_RETENTION_ADVISORY_SIM_DAYS", 45), None),
+        ("advisory_signals", "created_at", _env_int("DB_RETENTION_BENCHMARK_SIGNAL_DAYS", 2), {"status": "benchmark_logged"}),
+        ("advisory_signals", "created_at", _env_int("DB_RETENTION_SKIPPED_SIGNAL_DAYS", 7), {"status": "skipped"}),
+        ("advisory_signals", "created_at", _env_int("DB_RETENTION_SHADOW_SIGNAL_DAYS", 14), {"mode": "shadow"}),
+    ]
+    for table, column, days, filters in rules:
+        if days < 0:
+            continue
+        cutoff = (now - timedelta(days=days)).isoformat() + "Z"
+        key = table if not filters else f"{table}:{','.join(f'{k}={v}' for k, v in filters.items())}"
+        try:
+            summary[key] = _delete_older_than(db, table, column, cutoff, filters)
+        except Exception as e:
+            summary[key] = {"error": str(e)[:160]}
+
+    bars_days = _env_int("DB_RETENTION_SIM_BARS_JSON_DAYS", 10)
+    if bars_days >= 0:
+        cutoff = (now - timedelta(days=bars_days)).isoformat() + "Z"
+        try:
+            summary["advisory_auto_simulations:bars_json_cleared"] = _update_older_than(
+                db,
+                "advisory_auto_simulations",
+                "simulated_at",
+                cutoff,
+                {"bars_json": None},
+            )
+        except Exception as e:
+            summary["advisory_auto_simulations:bars_json_cleared"] = {"error": str(e)[:160]}
+    return summary
 
 
 # ── Signal percentile baselines ───────────────────────────────────────────────
