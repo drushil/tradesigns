@@ -66,8 +66,8 @@ def run_nightly_sweep():
         log_event("INFO", "nightly_sweep", result)
 
         if result.get("mode") == "simulation" and result.get("should_sweep"):
-            from backend.agent import _send_discord_alert  # lazy — avoids circular at load
-            _send_discord_alert(
+            from backend.agent import _send_legacy_discord_alert  # lazy — avoids circular at load
+            _send_legacy_discord_alert(
                 f"💰 Sweep simulation: Would park "
                 f"€{plan['sweepable_eur']:.0f} in {plan['sweep_ticker']}. "
                 f"Est. daily yield: €{plan['est_daily_yield']:.2f}"

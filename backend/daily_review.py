@@ -779,6 +779,12 @@ def format_discord_review(review: dict, metrics: dict) -> str:
 
 
 def _send_discord(text: str) -> bool:
+    # The Discord channel is for advisory alerts now; the legacy EOD review post
+    # is off unless LEGACY_TRADER_DISCORD_ENABLED=true. The review itself still
+    # runs and is stored for the dashboard — only the Discord post is suppressed.
+    from backend.runtime.env import _env_bool
+    if not _env_bool("LEGACY_TRADER_DISCORD_ENABLED", False):
+        return False
     webhook = os.getenv("DISCORD_WEBHOOK_URL", "")
     if not webhook:
         return False

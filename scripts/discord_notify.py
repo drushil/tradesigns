@@ -199,7 +199,12 @@ def build_summary() -> str:
 
 
 if __name__ == "__main__":
-    if should_send_summary():
+    # The Discord channel is for advisory alerts now. This legacy main-trader
+    # cycle summary is off unless LEGACY_TRADER_DISCORD_ENABLED=true.
+    _legacy_enabled = os.getenv("LEGACY_TRADER_DISCORD_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if not _legacy_enabled:
+        print("Legacy trader Discord summary disabled (LEGACY_TRADER_DISCORD_ENABLED off) — skipping.")
+    elif should_send_summary():
         msg = build_summary()
         print(msg)
         if send_message(msg):

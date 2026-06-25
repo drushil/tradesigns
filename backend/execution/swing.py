@@ -241,8 +241,8 @@ def _try_promote_to_swing(ticker: str, trade: dict, current_price: float,
         "protective_stop_order_id": protective_order.get("order_id"),
         "state_persisted": not bool(save_result.get("error")),
     })
-    from backend.agent import _send_discord_alert
-    _send_discord_alert(
+    from backend.agent import _send_legacy_discord_alert
+    _send_legacy_discord_alert(
         f"Swing promoted: {ticker} "
         f"{hold_days}-day hold · "
         f"Conviction: {swing_check['conviction']:.0%} · "
@@ -389,8 +389,8 @@ def re_evaluate_swing_positions():
                     "composite": composite,
                 })
                 _close_trade(ticker, pos, current_price, exit_reasons[0])
-                from backend.agent import _send_discord_alert
-                _send_discord_alert(
+                from backend.agent import _send_legacy_discord_alert
+                _send_legacy_discord_alert(
                     f"Swing exit: {ticker} "
                     f"P&L: {pnl_pct:+.1f}% "
                     f"Reason: {exit_reasons[0]}"

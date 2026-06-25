@@ -104,6 +104,7 @@ jobs:
           SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"
           NEWSAPI_KEY:          "${{ secrets.NEWSAPI_KEY }}"
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          LEGACY_TRADER_DISCORD_ENABLED: "${{ vars.LEGACY_TRADER_DISCORD_ENABLED }}"
           RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
           INVESTMENT_HORIZON:   "${{ vars.INVESTMENT_HORIZON }}"
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
@@ -302,6 +303,7 @@ jobs:
         env:
           PYTHONPATH: "."
           DISCORD_WEBHOOK_URL:  "${{ secrets.DISCORD_WEBHOOK_URL }}"
+          LEGACY_TRADER_DISCORD_ENABLED: "${{ vars.LEGACY_TRADER_DISCORD_ENABLED }}"
           SUPABASE_URL:         "${{ secrets.SUPABASE_URL }}"
           SUPABASE_ANON_KEY:    "${{ secrets.SUPABASE_ANON_KEY }}"
           SUPABASE_SERVICE_KEY: "${{ secrets.SUPABASE_SERVICE_KEY }}"

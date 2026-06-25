@@ -287,6 +287,24 @@ def _send_discord_alert(text: str) -> bool:
         return False
 
 
+def _legacy_trader_discord_enabled() -> bool:
+    """The Discord channel is now for advisory alerts. Messages from the
+    quarantined main-trader cycle (macro shock, nightly sweep, swing trades,
+    cycle/EOD summaries) are off by default. Set LEGACY_TRADER_DISCORD_ENABLED=true
+    to restore them."""
+    return _env_bool("LEGACY_TRADER_DISCORD_ENABLED", False)
+
+
+def _send_legacy_discord_alert(text: str) -> bool:
+    """Gated sender for legacy main-trader messages. No-ops unless the legacy
+    flag is on, so old-cycle noise no longer reaches the advisory channel.
+    Advisory features (e.g. German-morning watch) call _send_discord_alert
+    directly and are unaffected."""
+    if not _legacy_trader_discord_enabled():
+        return False
+    return _send_discord_alert(text)
+
+
 def _refresh_macro_shock_if_needed() -> dict:
     global _last_shock_refresh, _last_shock_result
     now = datetime.utcnow()
@@ -300,7 +318,7 @@ def _refresh_macro_shock_if_needed() -> dict:
 
     if shock_result.get("shock_detected"):
         log_event("SIGNAL", "macro_shock_detected", shock_result)
-        _send_discord_alert(
+        _send_legacy_discord_alert(
             "Macro shock detected\n"
             f"Classification: {shock_result.get('classification')}\n"
             f"Direction: {shock_result.get('direction')}\n"
