@@ -643,6 +643,39 @@ def test_flatten_and_record_submits_sell_and_writes_trade(monkeypatch):
     assert updates[0][1]["auto_exit_reason"] == "orphan_flatten"
 
 
+def test_flatten_and_record_surfaces_journal_failure_after_broker_close(monkeypatch):
+    sig = _signal(id=301, data_symbol="CRWD", auto_fill_price=686.08,
+                  auto_fill_qty=1)
+    updates, logs = [], []
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: None)
+    monkeypatch.setattr(executor, "_submit_order_with_retry",
+                        lambda req: SimpleNamespace(id="sell-2", filled_avg_price=694.14))
+    monkeypatch.setattr(executor, "insert_trade",
+                        lambda payload: {"error": "exit_reason check violation"})
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, fields: updates.append((sid, fields)) or {})
+    monkeypatch.setattr(executor, "log_event",
+                        lambda *args, **kwargs: logs.append((args, kwargs)))
+
+    trade = executor._flatten_and_record(
+        sig, 1, "near_t1_protection")
+
+    assert "error" in trade
+    # Broker truth wins: the position was sold, so it must not remain active.
+    assert updates == [(301, {
+        "auto_status": "closed",
+        "auto_exit_reason": "near_t1_protection",
+    })]
+    failed = next(args for args, _ in logs
+                  if args[1] == "advisory_auto_trade_insert_failed")
+    assert failed[2]["entry_price"] == 686.08
+    assert failed[2]["exit_price"] == 694.14
+    assert failed[2]["qty"] == 1.0
+    flattened = next(args for args, _ in logs
+                     if args[1] == "advisory_auto_flatten")
+    assert flattened[2]["journaled"] is False
+
+
 def test_build_trade_payload_pnl():
     sig = _signal(auto_fill_price=100.0)
     p = executor._build_trade_payload(

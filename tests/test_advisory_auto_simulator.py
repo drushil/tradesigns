@@ -107,6 +107,69 @@ def test_create_momentum_continuation_skips_lower_grade_watch(monkeypatch):
     assert sim._create_momentum_continuation_sims(market="US") == 0
 
 
+def test_chase_tracker_quarantines_entry_at_or_above_target(monkeypatch):
+    signal = {
+        "id": 126,
+        "created_at": "2026-06-10T14:35:00Z",
+        "auto_checked_at": "2026-06-10T14:36:00Z",
+        "auto_skip_reason": "skipped_chase:105.00>101.00",
+        "data_symbol": "NVDA",
+        "market": "US",
+        "side": "BUY",
+        "grade": "A",
+        "entry_min": 99.0,
+        "entry_max": 100.0,
+        "stop_price": 97.0,
+        "target_1": 104.0,
+        "target_2": 108.0,
+        "signal_json": {"alert_stage": "watch"},
+    }
+    inserted = []
+    monkeypatch.setattr(sim, "get_advisory_auto_chase_skips",
+                        lambda **_: [signal])
+    monkeypatch.setattr(sim, "get_advisory_auto_sim_signal_ids", lambda: set())
+    monkeypatch.setattr(sim, "insert_advisory_auto_simulation",
+                        lambda payload: inserted.append(payload) or {})
+
+    assert sim._create_chase_tracker_sims("US") == 1
+    payload = inserted[0]
+    assert payload["status"] == "expired"
+    assert payload["closure_reason"] == "invalid_chase_geometry"
+    assert payload["notes"]["invalid_chase_geometry"] is True
+    assert payload["sim_version"] == 4
+
+
+def test_chase_tracker_keeps_valid_target_geometry(monkeypatch):
+    signal = {
+        "id": 127,
+        "created_at": "2026-06-10T14:35:00Z",
+        "auto_checked_at": "2026-06-10T14:36:00Z",
+        "auto_skip_reason": "skipped_chase:102.00>101.00",
+        "data_symbol": "NVDA",
+        "market": "US",
+        "side": "BUY",
+        "grade": "A",
+        "entry_min": 99.0,
+        "entry_max": 100.0,
+        "stop_price": 97.0,
+        "target_1": 104.0,
+        "target_2": 108.0,
+        "signal_json": {"alert_stage": "watch"},
+    }
+    inserted = []
+    monkeypatch.setattr(sim, "get_advisory_auto_chase_skips",
+                        lambda **_: [signal])
+    monkeypatch.setattr(sim, "get_advisory_auto_sim_signal_ids", lambda: set())
+    monkeypatch.setattr(sim, "insert_advisory_auto_simulation",
+                        lambda payload: inserted.append(payload) or {})
+
+    assert sim._create_chase_tracker_sims("US") == 1
+    payload = inserted[0]
+    assert payload["status"] == "filled"
+    assert payload["closure_reason"] is None
+    assert payload["notes"]["invalid_chase_geometry"] is False
+
+
 @pytest.mark.skipif(
     not _HAS_REAL_PANDAS,
     reason="builds a real pandas DataFrame/DatetimeIndex (bare-env stub lacks it)",

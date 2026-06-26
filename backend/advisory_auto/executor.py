@@ -476,19 +476,39 @@ def _flatten_and_record(signal: dict, qty: float, reason: str) -> dict:
     # estimate for the recorded trade.
     exit_price = _float_attr(order, "filled_avg_price", 0.0) or (_get_current_price(ticker) or 0.0)
     entry_price = float(signal.get("auto_fill_price") or 0.0)
-    trade = insert_trade(_build_trade_payload(
+    payload = _build_trade_payload(
         signal, entry_price=entry_price, qty=float(qty),
         exit_price=float(exit_price), exit_reason=reason,
-        close_order_id=str(getattr(order, "id", ""))))
-    update_advisory_auto_fields(signal["id"], {
+        close_order_id=str(getattr(order, "id", "")))
+    trade = insert_trade(payload)
+    journal_error = trade.get("error")
+    update_fields = {
         "auto_status": "closed",
-        "auto_pnl_eur": trade.get("pnl_eur"),
         "auto_exit_reason": reason,
-    })
+    }
+    if not journal_error:
+        update_fields["auto_pnl_eur"] = trade.get("pnl_eur")
+    update_advisory_auto_fields(signal["id"], update_fields)
+    if journal_error:
+        # The broker position is already flat, so the signal must still become
+        # terminal. Emit enough immutable execution data to repair the missing
+        # journal row without guessing from market bars later.
+        log_event("ERROR", "advisory_auto_trade_insert_failed", {
+            "advisory_signal_id": signal.get("id"),
+            "ticker": ticker,
+            "qty": float(qty),
+            "entry_price": round(entry_price, 4),
+            "exit_price": round(float(exit_price), 4),
+            "exit_reason": reason,
+            "close_order_id": str(getattr(order, "id", "")),
+            "error": str(journal_error)[:300],
+        })
     log_event("TRADE", "advisory_auto_flatten", {
         "advisory_signal_id": signal.get("id"), "ticker": ticker,
         "qty": float(qty), "reason": reason,
-        "exit_price": round(float(exit_price), 4), "pnl_eur": trade.get("pnl_eur"),
+        "exit_price": round(float(exit_price), 4),
+        "pnl_eur": trade.get("pnl_eur"),
+        "journaled": not bool(journal_error),
     })
     return trade
 
@@ -636,14 +656,21 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                         continue
                     near_t1_qty = _near_t1_protection_qty(signal, order)
                     if near_t1_qty and near_t1_qty > 0:
-                        _flatten_and_record(signal, near_t1_qty, "near_t1_protection")
+                        trade = _flatten_and_record(
+                            signal, near_t1_qty, "near_t1_protection")
+                        if "error" in trade:
+                            result["errors"] += 1
                         result["near_t1_protected"] += 1
                     elif EOD_FLAT_ENABLED and _is_eod_flat_window(now_utc):
-                        _flatten_and_record(signal, qty, "eod_flat")
+                        trade = _flatten_and_record(signal, qty, "eod_flat")
+                        if "error" in trade:
+                            result["errors"] += 1
                         result["flattened_eod"] += 1
                     elif (ORPHAN_GUARD_ENABLED and sym not in open_orders
                           and _signal_age_minutes(signal) > ORPHAN_MIN_AGE_MIN):
-                        _flatten_and_record(signal, qty, "orphan_flatten")
+                        trade = _flatten_and_record(signal, qty, "orphan_flatten")
+                        if "error" in trade:
+                            result["errors"] += 1
                         result["flattened_orphan"] += 1
         except Exception as exc:
             result["errors"] += 1
