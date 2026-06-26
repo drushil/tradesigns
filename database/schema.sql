@@ -39,7 +39,8 @@ create table if not exists trades (
     hold_minutes    smallint,
     exit_reason     text check (exit_reason in (
                         'stop_loss','take_profit','time_exit',
-                        'signal_reversal','manual','circuit_breaker')),
+                        'signal_reversal','manual','circuit_breaker',
+                        'near_t1_protection','eod_flat','orphan_flatten')),
     regime          text check (regime in (
                         'trending','ranging','high_vol','news_driven')),
     macro_regime    text check (macro_regime in (
@@ -662,7 +663,8 @@ alter table if exists trades
         'regime_turned_bear','momentum_reversed',
         'macro_shock','take_profit_8pct','swing_promoted',
         'momentum_peak_decay','eod_cleanup',
-        'thesis_invalidated','partial_runner_stop','a_plus_override'
+        'thesis_invalidated','partial_runner_stop','a_plus_override',
+        'near_t1_protection','eod_flat','orphan_flatten'
     ));
 
 -- ============================================================
@@ -761,7 +763,8 @@ alter table if exists trades
         'macro_shock','take_profit_8pct','swing_promoted',
         'momentum_peak_decay','eod_cleanup',
         'thesis_invalidated','partial_runner_stop','a_plus_override',
-        'stale_no_position','leveraged_etf_time_exit'
+        'stale_no_position','leveraged_etf_time_exit',
+        'near_t1_protection','eod_flat','orphan_flatten'
     ));
 
 -- ============================================================

@@ -92,7 +92,9 @@ def _grade_rank(grade) -> int:
 #        look-ahead reference-price fills); shared exit scanner. Sims < 3 carry
 #        the contaminated momentum fills and should be filtered out of honest
 #        old-vs-new comparisons.
-SIM_VERSION = 3
+#   v4 — chase_tracker rejects synthetic entries already at/through T1. Earlier
+#        versions could label those rows hit_target with a negative R-multiple.
+SIM_VERSION = 4
 
 _STATUS_TO_CLOSURE_REASON = {
     "hit_target_1":          "target_1",
@@ -372,6 +374,8 @@ def _create_chase_tracker_sims(market: str = "US") -> int:
         stop_price = float(sig.get("stop_price") or 0)
         entry_min = float(sig.get("entry_min") or 0)
         entry_max = float(sig.get("entry_max") or 0)
+        target_1 = float(sig.get("target_1")) if sig.get("target_1") is not None else None
+        target_2 = float(sig.get("target_2")) if sig.get("target_2") is not None else None
         if not (chase_price and stop_price and chase_price > stop_price):
             continue
         fill_at = sig.get("auto_checked_at") or sig.get("created_at")
@@ -393,18 +397,31 @@ def _create_chase_tracker_sims(market: str = "US") -> int:
             "entry_min": entry_min or chase_price,
             "entry_max": entry_max or chase_price,
             "stop_price": stop_price,
-            "target_1": float(sig.get("target_1")) if sig.get("target_1") is not None else None,
-            "target_2": float(sig.get("target_2")) if sig.get("target_2") is not None else None,
+            "target_1": target_1,
+            "target_2": target_2,
             "suggested_size_eur": sig.get("suggested_size_eur"),
             "simulated_at": fill_at,
             "valid_until": sig.get("valid_until"),
-            # Already filled at the chased price — no limit to rest, we paid up.
-            "status": "filled",
+            # A chased entry already at/through T1 has no valid first target.
+            # Keep a terminal row for audit/idempotency, but exclude it from
+            # execution performance instead of manufacturing a negative-R win.
+            "status": "expired" if target_1 is not None and chase_price >= target_1 else "filled",
             "fill_at": fill_at,
             "fill_price": round(chase_price, 4),
             "mfe_pct": 0.0,
             "mae_pct": 0.0,
-            "notes": {"synthetic_fill": "chase_price"},
+            "closed_at": fill_at if target_1 is not None and chase_price >= target_1 else None,
+            "closure_reason": (
+                "invalid_chase_geometry"
+                if target_1 is not None and chase_price >= target_1
+                else None
+            ),
+            "notes": {
+                "synthetic_fill": "chase_price",
+                "invalid_chase_geometry": bool(
+                    target_1 is not None and chase_price >= target_1
+                ),
+            },
             "entry_policy": "chase_tracker",
             "entry_policy_quality": _entry_policy_quality(
                 chase_price, entry_min or chase_price, entry_max or chase_price
