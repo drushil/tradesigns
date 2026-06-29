@@ -458,9 +458,11 @@ def _cancel_symbol_orders(ticker: str) -> None:
         log_event("WARN", "advisory_auto_cancel_failed", {"ticker": ticker, "error": str(e)[:160]})
 
 
-def _flatten_and_record(signal: dict, qty: float, reason: str) -> dict:
+def _flatten_and_record(signal: dict, qty: float, reason: str, entry_at=None) -> dict:
     """Cancel any stale orders for the symbol, market-sell the position, and
-    record a closed trade. Used by both the EOD-flat and orphan-guard paths."""
+    record a closed trade. Used by the near-T1, EOD-flat and orphan-guard paths.
+    `entry_at` is the entry fill time (from the entry bracket order) used to stamp
+    the trade's entry_time; falls back to the signal's created_at when absent."""
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
 
@@ -476,10 +478,14 @@ def _flatten_and_record(signal: dict, qty: float, reason: str) -> dict:
     # estimate for the recorded trade.
     exit_price = _float_attr(order, "filled_avg_price", 0.0) or (_get_current_price(ticker) or 0.0)
     entry_price = float(signal.get("auto_fill_price") or 0.0)
+    # Stamp an entry_time so protective-exit trades are not dropped by
+    # entry_time-filtered analysis. Prefer the entry bracket order's fill time
+    # (passed in); fall back to the signal's creation time.
+    entry_time = entry_at or signal.get("created_at")
     payload = _build_trade_payload(
         signal, entry_price=entry_price, qty=float(qty),
         exit_price=float(exit_price), exit_reason=reason,
-        close_order_id=str(getattr(order, "id", "")))
+        close_order_id=str(getattr(order, "id", "")), entry_time=entry_time)
     trade = insert_trade(payload)
     journal_error = trade.get("error")
     update_fields = {
@@ -654,21 +660,23 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                     qty = abs(float(held.get("qty") or signal.get("auto_fill_qty") or 0))
                     if qty <= 0:
                         continue
+                    # Entry fill time from the entry bracket order, for trade entry_time.
+                    entry_at = getattr(order, "filled_at", None) or getattr(order, "updated_at", None)
                     near_t1_qty = _near_t1_protection_qty(signal, order)
                     if near_t1_qty and near_t1_qty > 0:
                         trade = _flatten_and_record(
-                            signal, near_t1_qty, "near_t1_protection")
+                            signal, near_t1_qty, "near_t1_protection", entry_at=entry_at)
                         if "error" in trade:
                             result["errors"] += 1
                         result["near_t1_protected"] += 1
                     elif EOD_FLAT_ENABLED and _is_eod_flat_window(now_utc):
-                        trade = _flatten_and_record(signal, qty, "eod_flat")
+                        trade = _flatten_and_record(signal, qty, "eod_flat", entry_at=entry_at)
                         if "error" in trade:
                             result["errors"] += 1
                         result["flattened_eod"] += 1
                     elif (ORPHAN_GUARD_ENABLED and sym not in open_orders
                           and _signal_age_minutes(signal) > ORPHAN_MIN_AGE_MIN):
-                        trade = _flatten_and_record(signal, qty, "orphan_flatten")
+                        trade = _flatten_and_record(signal, qty, "orphan_flatten", entry_at=entry_at)
                         if "error" in trade:
                             result["errors"] += 1
                         result["flattened_orphan"] += 1

@@ -480,7 +480,7 @@ def test_orphan_guard_flattens_naked_filled_position(monkeypatch):
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
     monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
     monkeypatch.setattr(executor, "_flatten_and_record",
-                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+                        lambda sig, qty, reason, entry_at=None: flattened.append((sig["id"], qty, reason)) or {})
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
     monkeypatch.setattr(executor, "ORPHAN_GUARD_ENABLED", True)
     monkeypatch.setattr(executor, "ORPHAN_MIN_AGE_MIN", 3.0)
@@ -503,7 +503,7 @@ def test_eod_flat_closes_open_position_near_close(monkeypatch):
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
     monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
     monkeypatch.setattr(executor, "_flatten_and_record",
-                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+                        lambda sig, qty, reason, entry_at=None: flattened.append((sig["id"], qty, reason)) or {})
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
     monkeypatch.setattr(executor, "EOD_FLAT_BUFFER_MIN", 10.0)
     monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda *a, **k: None)
@@ -567,7 +567,7 @@ def test_near_t1_protection_flattens_before_eod_and_orphan(monkeypatch):
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
     monkeypatch.setattr(executor, "_get_auto_order", lambda oid: _filled_no_exit_order())
     monkeypatch.setattr(executor, "_flatten_and_record",
-                        lambda sig, qty, reason: flattened.append((sig["id"], qty, reason)) or {})
+                        lambda sig, qty, reason, entry_at=None: flattened.append((sig["id"], qty, reason)) or {})
     # Near-T1 fires → should win over EOD/orphan.
     monkeypatch.setattr(executor, "_near_t1_protection_qty", lambda sig, order: 5.0)
     monkeypatch.setattr(executor, "EOD_FLAT_ENABLED", True)
@@ -638,9 +638,29 @@ def test_flatten_and_record_submits_sell_and_writes_trade(monkeypatch):
     assert trade["exit_reason"] == "orphan_flatten"
     assert trade["exit_price"] == 76.0
     assert trade["trade_source"] == "advisory_auto"
+    # entry_time is stamped (falls back to the signal's created_at) so the trade
+    # is not dropped by entry_time-filtered analysis.
+    assert trade["entry_time"] == str(sig["created_at"])
     assert updates[0][0] == 300
     assert updates[0][1]["auto_status"] == "closed"
     assert updates[0][1]["auto_exit_reason"] == "orphan_flatten"
+
+
+def test_flatten_and_record_prefers_explicit_entry_at(monkeypatch):
+    sig = _signal(id=301, data_symbol="ARM", auto_fill_price=400.0, auto_fill_qty=2)
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: None)
+    monkeypatch.setattr(executor, "_submit_order_with_retry",
+                        lambda req: SimpleNamespace(id="sell-2", filled_avg_price=410.0))
+    monkeypatch.setattr(executor, "_get_current_price", lambda t: 410.0)
+    monkeypatch.setattr(executor, "insert_trade", lambda p: p)
+    monkeypatch.setattr(executor, "update_advisory_auto_fields", lambda sid, f: {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    trade = executor._flatten_and_record(
+        sig, 2, "near_t1_protection", entry_at="2026-06-29T14:02:00+00:00")
+
+    # Explicit entry fill time wins over the created_at fallback.
+    assert trade["entry_time"] == "2026-06-29T14:02:00+00:00"
 
 
 def test_flatten_and_record_surfaces_journal_failure_after_broker_close(monkeypatch):
