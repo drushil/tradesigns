@@ -233,7 +233,12 @@ def get_open_trade_records() -> list:
                   .select("*")
                   .eq("status", "open")
                   .execute())
-        return result.data or []
+        rows = result.data or []
+        return [
+            row for row in rows
+            if str((row.get("signal_json") or {}).get("alert_stage") or "trade").lower()
+            not in {"long_hold", "downside"}
+        ]
     except Exception as e:
         print(f"[OPEN_TRADE_READ_FAILED] {str(e)[:200]}")
         return []

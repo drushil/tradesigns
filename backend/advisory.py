@@ -285,7 +285,15 @@ OPEN_LIVE_STATUSES = {"sent", "entered"}
 WATCH_SIGNAL_STATUSES = {"skipped"}
 WATCH_ALERT_STAGES = {"watch", "ignition", "tr_morning_watch"}
 INFO_ALERT_STAGES = {"downside"}
-ALERT_STAGE_RANK = {"ignition": 0, "downside": 0, "watch": 1, "tr_morning_watch": 1, "trade": 2}
+LONG_HOLD_ALERT_STAGES = {"long_hold"}
+ALERT_STAGE_RANK = {
+    "ignition": 0,
+    "downside": 0,
+    "long_hold": 0,
+    "watch": 1,
+    "tr_morning_watch": 1,
+    "trade": 2,
+}
 
 
 @dataclass
@@ -315,6 +323,10 @@ class AdvisoryConfig:
     allow_short: bool
     discord_webhook_url: str
     fx_rate: float
+    long_hold_enabled: bool = True
+    long_hold_min_zone: str = "good"
+    long_hold_max_alerts_per_day: int = 3
+    long_hold_cooldown_days: int = 7
     fx_rate_source: str = "unknown"
     fx_rate_fetched_at: str = ""
     broker_profile: str = "trade_republic"
@@ -492,6 +504,10 @@ def load_config() -> AdvisoryConfig:
         allow_short=_env_bool("ADVISORY_ALLOW_SHORT", False),
         discord_webhook_url=_env_value("DISCORD_WEBHOOK_URL", ""),
         fx_rate=fx["rate"],
+        long_hold_enabled=_env_bool("ADVISORY_LONG_HOLD_ENABLED", True),
+        long_hold_min_zone=_env_value("ADVISORY_LONG_HOLD_MIN_ZONE", "good").lower(),
+        long_hold_max_alerts_per_day=_env_int("ADVISORY_LONG_HOLD_MAX_ALERTS_PER_DAY", 3),
+        long_hold_cooldown_days=_env_int("ADVISORY_LONG_HOLD_COOLDOWN_DAYS", 7),
         fx_rate_source=fx["source"],
         fx_rate_fetched_at=fx.get("fetched_at", ""),
         broker_profile=_env_value("BROKER_PROFILE", "trade_republic").lower(),
@@ -637,6 +653,46 @@ def _watch_signal_counts_in_session(recent_live: list, now_cet: datetime) -> tup
         counts[key] = counts.get(key, 0) + 1
         total += 1
     return counts, total
+
+
+def _long_hold_recent_count_today(recent_live: list, now_cet: datetime) -> int:
+    total = 0
+    today = now_cet.astimezone(timezone.utc).date()
+    for signal in recent_live or []:
+        signal_json = signal.get("signal_json") or {}
+        stage = str(signal_json.get("alert_stage") or signal.get("alert_stage") or "").lower()
+        if stage not in LONG_HOLD_ALERT_STAGES:
+            continue
+        created_at = _parse_dt(signal.get("created_at"))
+        if created_at and created_at.date() == today:
+            total += 1
+    return total
+
+
+def _long_hold_repeat_blocked(recent_live: list, candidate: dict, now_cet: datetime,
+                              cooldown_days: int) -> bool:
+    symbol = str(candidate.get("data_symbol") or "").upper()
+    market = str(candidate.get("market") or "").upper()
+    if not symbol or not market:
+        return False
+    candidate_zone = ((candidate.get("signal_json") or {}).get("long_hold_zone") or {}).get("zone")
+    cutoff = now_cet.astimezone(timezone.utc) - timedelta(days=max(1, int(cooldown_days or 1)))
+    for signal in recent_live or []:
+        if str(signal.get("market", "")).upper() != market:
+            continue
+        if str(signal.get("data_symbol", "")).upper() != symbol:
+            continue
+        signal_json = signal.get("signal_json") or {}
+        stage = str(signal_json.get("alert_stage") or signal.get("alert_stage") or "").lower()
+        if stage not in LONG_HOLD_ALERT_STAGES:
+            continue
+        created_at = _parse_dt(signal.get("created_at"))
+        if not created_at or created_at < cutoff:
+            continue
+        prior_zone = (signal_json.get("long_hold_zone") or {}).get("zone")
+        if _zone_rank(candidate_zone) <= _zone_rank(prior_zone):
+            return True
+    return False
 
 
 def _watch_had_late_chase(signal: Optional[dict]) -> bool:
@@ -1116,6 +1172,237 @@ def _bar_column(bars, name: str):
     return column.squeeze() if hasattr(column, "squeeze") else column
 
 
+def _zone_rank(zone: str) -> int:
+    return {"watch": 0, "good": 1, "better": 2, "strong": 3}.get(str(zone or "").lower(), -1)
+
+
+def _long_hold_min_zone_met(zone: str, min_zone: str) -> bool:
+    return _zone_rank(zone) >= _zone_rank(min_zone or "good")
+
+
+def _daily_history(symbol: str):
+    if _get_bars is None:
+        return None
+    try:
+        return _get_bars(symbol, period="1y", interval="1d")
+    except TypeError:
+        return _get_bars(symbol, "1y", "1d")
+    except Exception:
+        return None
+
+
+def _long_hold_dip_zone(symbol: str, bars) -> dict:
+    """Classify slower-horizon dip-buy zones from daily structure.
+
+    This is intentionally deterministic and replayable: no LLM valuation, just
+    pullback depth, moving-average support, volatility, and trend integrity.
+    """
+    if bars is None or getattr(bars, "empty", True):
+        return {"ok": False, "reason": "missing_daily_bars"}
+    try:
+        close = _bar_column(bars, "Close").dropna()
+        high = _bar_column(bars, "High").dropna() if "High" in bars else close
+        low = _bar_column(bars, "Low").dropna() if "Low" in bars else close
+        if len(close) < 80:
+            return {"ok": False, "reason": "insufficient_daily_history", "bars": int(len(close))}
+
+        current = float(close.iloc[-1])
+        if current <= 0:
+            return {"ok": False, "reason": "bad_current_price", "bars": int(len(close))}
+        sma20 = float(close.tail(20).mean())
+        sma50 = float(close.tail(50).mean())
+        sma200 = float(close.tail(min(200, len(close))).mean())
+        high_252 = float(high.tail(min(252, len(high))).max())
+        low_252 = float(low.tail(min(252, len(low))).min())
+        pullback_pct = ((high_252 - current) / high_252 * 100.0) if high_252 else 0.0
+        ret_20d_pct = ((current - float(close.iloc[-21])) / float(close.iloc[-21]) * 100.0) if len(close) > 21 and float(close.iloc[-21]) else 0.0
+        ret_63d_pct = ((current - float(close.iloc[-64])) / float(close.iloc[-64]) * 100.0) if len(close) > 64 and float(close.iloc[-64]) else 0.0
+
+        prev_close = close.shift(1)
+        true_range = (high.combine(low, max) - low.combine(high, min)).abs()
+        try:
+            tr_components = [
+                (high - low).abs(),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
+            ]
+            true_range = tr_components[0].combine(tr_components[1], max).combine(tr_components[2], max)
+        except Exception:
+            pass
+        atr = float(true_range.dropna().tail(14).mean() or 0)
+        atr_pct = (atr / current * 100.0) if current else 0.0
+
+        trend_intact = (
+            current >= sma200 * 0.88
+            and sma50 >= sma200 * 0.94
+            and ret_20d_pct > -18.0
+        )
+        above_long_term = current >= sma200 * 0.98
+        near_20 = current <= sma20 * 1.015
+        near_50 = current <= sma50 * 1.035
+        near_200 = current <= sma200 * 1.060
+
+        zone = "watch"
+        if trend_intact and pullback_pct >= 5.0 and near_20:
+            zone = "good"
+        if trend_intact and pullback_pct >= 9.0 and near_50 and current >= sma200 * 0.94:
+            zone = "better"
+        if trend_intact and pullback_pct >= 15.0 and near_200 and current >= sma200 * 0.88:
+            zone = "strong"
+        # If a long-term leader is still above the 200DMA, a sharp pullback to
+        # the 50DMA can be a strong zone even before touching the 200DMA.
+        if (
+            trend_intact
+            and above_long_term
+            and pullback_pct >= 13.0
+            and near_50
+            and ret_63d_pct >= -12.0
+        ):
+            zone = "strong"
+
+        zone_anchor = sma20 if zone == "good" else sma50 if zone == "better" else sma200
+        band_pct = min(max((atr_pct or 2.0) * 0.35, 1.0), 4.0)
+        entry_min = zone_anchor * (1 - band_pct / 100.0)
+        entry_max = zone_anchor * (1 + band_pct / 100.0)
+        if zone != "watch":
+            entry_min = min(entry_min, current * 0.995)
+            entry_max = max(entry_max, current * 1.005)
+        invalidation = min(entry_min * (1 - max(atr_pct, 2.0) / 100.0), sma200 * 0.88)
+        target_3m = max(high_252 * 0.98, current * 1.10)
+        target_6m = max(high_252 * 1.08, current * 1.18)
+        risk_pct = max((current - invalidation) / current * 100.0, 0.1)
+        reward_risk = ((target_3m - current) / max(current - invalidation, 0.0001)) if target_3m > current else 0.0
+
+        reasons = [
+            f"{pullback_pct:.1f}% below 52w high",
+            f"price vs 20/50/200DMA: {((current / sma20) - 1) * 100:+.1f}% / {((current / sma50) - 1) * 100:+.1f}% / {((current / sma200) - 1) * 100:+.1f}%",
+            f"20d return {ret_20d_pct:+.1f}%",
+        ]
+        if not trend_intact:
+            reasons.append("trend not intact enough for long-hold buy zone")
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "zone": zone,
+            "current_price": round(current, 4),
+            "entry_min": round(entry_min, 4),
+            "entry_max": round(entry_max, 4),
+            "invalidation": round(invalidation, 4),
+            "target_3m": round(target_3m, 4),
+            "target_6m": round(target_6m, 4),
+            "risk_pct": round(risk_pct, 4),
+            "reward_risk": round(reward_risk, 4),
+            "pullback_pct": round(pullback_pct, 4),
+            "sma20": round(sma20, 4),
+            "sma50": round(sma50, 4),
+            "sma200": round(sma200, 4),
+            "high_252": round(high_252, 4),
+            "low_252": round(low_252, 4),
+            "atr_pct": round(atr_pct, 4),
+            "ret_20d_pct": round(ret_20d_pct, 4),
+            "ret_63d_pct": round(ret_63d_pct, 4),
+            "trend_intact": bool(trend_intact),
+            "reasons": reasons,
+        }
+    except Exception as exc:
+        return {"ok": False, "reason": "long_hold_zone_error", "error": str(exc)[:120]}
+
+
+def _long_hold_grade(zone: str) -> str:
+    return {"good": "B", "better": "A", "strong": "A+"}.get(str(zone or "").lower(), "C")
+
+
+def _long_hold_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
+                         now_cet: datetime) -> Optional[dict]:
+    if not cfg.long_hold_enabled or item.get("benchmark_only") or not item.get("trade_target", True):
+        return None
+    if item.get("listing_type") == "eu_us_mirror":
+        return None
+    symbol = item["data_symbol"]
+    if item.get("currency") == "USD" and float(cfg.fx_rate or 0) <= 0:
+        return None
+    zone = _long_hold_dip_zone(symbol, _daily_history(symbol))
+    if not zone.get("ok") or not _long_hold_min_zone_met(zone.get("zone"), cfg.long_hold_min_zone):
+        return None
+
+    grade = _long_hold_grade(zone["zone"])
+    valid_until = now_cet.astimezone(timezone.utc) + timedelta(days=5)
+    time_exit = now_cet.astimezone(timezone.utc) + timedelta(days=180)
+    current = float(zone["current_price"])
+    size_eur = min(cfg.default_size_eur, cfg.capital_eur * 0.20)
+    risk_pct = float(zone["risk_pct"])
+    record = {
+        "market": market,
+        "mode": mode,
+        "status": "skipped" if mode == "live" else "shadow_logged",
+        "alert_stage": "long_hold",
+        "data_symbol": symbol,
+        "broker_display_name": item.get("broker_display_name"),
+        "exchange": item.get("exchange"),
+        "currency": item.get("currency", "EUR"),
+        "listing_type": item.get("listing_type"),
+        "primary_symbol": item.get("primary_symbol"),
+        "origin_market": item.get("origin_market"),
+        "side": "BUY",
+        "category": item.get("category"),
+        "priority": item.get("priority", "medium"),
+        "trade_target": item.get("trade_target", True),
+        "benchmark_only": item.get("benchmark_only", False),
+        "broker_tags": item.get("broker_tags", []),
+        "liquidity_note": item.get("liquidity_note"),
+        "grade": grade,
+        "composite_score": round(_zone_rank(zone["zone"]) / 3.0, 4),
+        "ev_net_pct": None,
+        "breakout_quality": round(1.0 - min(float(zone["pullback_pct"]) / 35.0, 1.0), 4),
+        "confidence": round(0.55 + (_zone_rank(zone["zone"]) * 0.10), 4),
+        "entry_min": zone["entry_min"],
+        "entry_max": zone["entry_max"],
+        "do_not_chase_price": zone["entry_max"],
+        "stop_price": zone["invalidation"],
+        "target_1": zone["target_3m"],
+        "target_2": zone["target_6m"],
+        "suggested_size_eur": round(size_eur, 2),
+        "risk_eur": round(size_eur * risk_pct / 100.0, 2),
+        "risk_pct": risk_pct,
+        "reward_risk": zone["reward_risk"],
+        "valid_until": valid_until.isoformat(),
+        "time_exit_at": time_exit.isoformat(),
+        "valid_until_cet": valid_until.astimezone(now_cet.tzinfo).strftime("%d %b %H:%M Berlin"),
+        "time_exit_cet": time_exit.astimezone(now_cet.tzinfo).strftime("%d %b %Y"),
+        "rationale": f"{zone['zone']} long-hold buy zone, " + "; ".join(zone.get("reasons", [])[:3]),
+        "signal_json": {
+            "alert_stage": "long_hold",
+            "horizon": "1-3-6 months",
+            "long_hold_zone": zone,
+            "display": {
+                "current_eur": round(_display_price(current, item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "entry_min_eur": round(_display_price(zone["entry_min"], item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "entry_max_eur": round(_display_price(zone["entry_max"], item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "invalidation_eur": round(_display_price(zone["invalidation"], item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "target_3m_eur": round(_display_price(zone["target_3m"], item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "target_6m_eur": round(_display_price(zone["target_6m"], item.get("currency", "EUR"), cfg.fx_rate), 4),
+                "native_currency": item.get("currency", "EUR"),
+                "fx_rate": cfg.fx_rate,
+            },
+        },
+        "market_context_json": {
+            **_market_context(market),
+            "long_hold_zone": zone,
+        },
+        "data_quality_json": {
+            "ok": True,
+            "last_price": current,
+            "source": "daily_long_hold",
+            "daily_bars": zone,
+        },
+        "fx_rate": cfg.fx_rate,
+        "fx_rate_source": cfg.fx_rate_source,
+        "fx_rate_fetched_at": cfg.fx_rate_fetched_at,
+    }
+    record["message_text"] = _format_trade_card(record)
+    return record
+
+
 def _ignition_check(symbol: str, side: str, composite: float, atr_data: dict) -> dict:
     debug = _env_bool("ADVISORY_IGNITION_DEBUG", False)
 
@@ -1353,10 +1640,35 @@ def _format_trade_card(signal: dict) -> str:
     is_watch = signal.get("alert_stage") in WATCH_ALERT_STAGES
     is_ignition = signal.get("alert_stage") == "ignition"
     is_downside = signal.get("alert_stage") == "downside"
+    is_long_hold = signal.get("alert_stage") in LONG_HOLD_ALERT_STAGES
     is_late_chase = bool(signal.get("late_chase_json"))
     is_runner = bool(signal.get("runner_context"))
     is_holding = bool(signal.get("holding_context"))
     signal_json = signal.get("signal_json") or {}
+    if is_long_hold:
+        zone = (signal_json.get("long_hold_zone") or {})
+        zone_name = str(zone.get("zone") or "buy").upper()
+        current_eur = _display_price(zone.get("current_price") or signal.get("entry_max"), signal.get("currency", "EUR"), signal.get("fx_rate") or 1.0)
+        entry_min_eur = _eur_price(signal, "entry_min")
+        entry_max_eur = _eur_price(signal, "entry_max")
+        invalidation_eur = _eur_price(signal, "stop_price")
+        target_3m_eur = _eur_price(signal, "target_1")
+        target_6m_eur = _eur_price(signal, "target_2")
+        reasons = zone.get("reasons") or []
+        notes = [
+            "Horizon: 1-3-6 months; staged entry, not an intraday trade.",
+            f"Why: {'; '.join(reasons[:3])}.",
+            "Action: consider tranche buying inside the zone; reassess if invalidation closes below.",
+        ]
+        if signal.get("liquidity_note"):
+            notes.append(f"Liquidity: {signal['liquidity_note']}")
+        return (
+            f"**LONG-HOLD {zone_name} BUY ZONE - BUY {sym} - {signal.get('grade', '?')} - {signal.get('market', '?')}**\n"
+            f"Current: €{current_eur:.2f} | Zone: €{entry_min_eur:.2f}-€{entry_max_eur:.2f}\n"
+            f"Invalidation: close below €{invalidation_eur:.2f} | 3m ref: €{target_3m_eur:.2f} | 6m ref: €{target_6m_eur:.2f}\n"
+            f"Reference size: €{signal.get('suggested_size_eur', 0):.0f} | Zone valid: {signal.get('valid_until_cet')}\n\n"
+            + "\n".join(notes)
+        )
     runner_context = signal.get("runner_context") or {}
     runner_type = runner_context.get("type")
     notional = f"€{signal['suggested_size_eur']:.0f}"
@@ -1660,6 +1972,11 @@ def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
         return False
     if candidate.get("alert_stage") in INFO_ALERT_STAGES:
         return candidate.get("mode") == "live"
+    if candidate.get("alert_stage") in LONG_HOLD_ALERT_STAGES:
+        if candidate.get("mode") == "live":
+            zone = ((candidate.get("signal_json") or {}).get("long_hold_zone") or {}).get("zone")
+            return _long_hold_min_zone_met(zone, cfg.long_hold_min_zone)
+        return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
     if candidate.get("alert_stage") in WATCH_ALERT_STAGES:
         return candidate.get("mode") == "live"
     if candidate.get("mode") == "live":
@@ -2437,13 +2754,20 @@ def run_advisory_cycle() -> dict:
     # so .result() never raises here. The 90d trades window is unchanged — it
     # feeds EV, so narrowing it would alter signal behaviour, not just latency.
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=3) as _pool:
+    with ThreadPoolExecutor(max_workers=4) as _pool:
         _f_live = _pool.submit(get_recent_advisory_signals, days=1, mode="live")
         _f_shadow = _pool.submit(get_recent_advisory_signals, days=1, mode="shadow")
         _f_trades = _pool.submit(get_recent_trades, days=90)
+        _f_long_hold = _pool.submit(
+            get_recent_advisory_signals,
+            days=max(1, int(cfg.long_hold_cooldown_days or 1)),
+            mode="live",
+            limit=500,
+        )
         recent_live = _f_live.result()
         recent_shadow = _f_shadow.result()
         recent_trades = _f_trades.result()
+        recent_long_hold = _f_long_hold.result()
     now_utc = now_cet.astimezone(timezone.utc)
     live_sent_today = len([
         s for s in recent_live
@@ -2462,6 +2786,7 @@ def run_advisory_cycle() -> dict:
         and _is_signal_in_current_session(s, now_cet)
     ])
     watch_counts_by_symbol, live_watch_this_window = _watch_signal_counts_in_session(recent_live, now_cet)
+    long_hold_sent_today = _long_hold_recent_count_today(recent_long_hold, now_cet)
     max_watch_per_symbol = _env_int("ADVISORY_MAX_WATCH_ALERTS_PER_SYMBOL_PER_SESSION", 4)
     max_watch_per_session = _env_int("ADVISORY_MAX_WATCH_ALERTS_PER_SESSION", 12)
     shadow_discord_sent_today = len([
@@ -2490,7 +2815,7 @@ def run_advisory_cycle() -> dict:
     blocked = []
     exit_alerts = []
     open_advisory_positions = []
-    discord_sent_this_cycle: set[tuple[str, str]] = set()
+    discord_sent_this_cycle: set[tuple[str, str, str]] = set()
     first_live_discord_elapsed_s = None
     immediate_live_sent = 0
     # Per-stage latency telemetry — surfaced in the advisory_cycle_timing log so
@@ -2587,24 +2912,27 @@ def run_advisory_cycle() -> dict:
         """
         nonlocal live_sent_today, live_sent_this_window, open_live_count
         nonlocal live_watch_this_window, shadow_discord_sent_today
+        nonlocal long_hold_sent_today
         nonlocal first_live_discord_elapsed_s, immediate_live_sent
         nonlocal db_insert_s, discord_send_s
 
         symbol_key = (
             str(candidate.get("market", "")).upper(),
             str(candidate.get("data_symbol", "")).upper(),
+            "long_hold" if candidate.get("alert_stage") in LONG_HOLD_ALERT_STAGES else "intraday",
         )
+        watch_key = (symbol_key[0], symbol_key[1])
         if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES:
-            if watch_counts_by_symbol.get(symbol_key, 0) >= max_watch_per_symbol:
+            if watch_counts_by_symbol.get(watch_key, 0) >= max_watch_per_symbol:
                 log_event("INFO", "advisory_watch_blocked_symbol_cap", {
-                    "symbol": symbol_key[1],
-                    "market": symbol_key[0],
+                    "symbol": watch_key[1],
+                    "market": watch_key[0],
                     "max_watch_per_symbol": max_watch_per_symbol,
                 })
                 return False, {
                     "reason": "watch_symbol_cap",
                     "max_watch_per_symbol": max_watch_per_symbol,
-                    "current": watch_counts_by_symbol.get(symbol_key, 0),
+                    "current": watch_counts_by_symbol.get(watch_key, 0),
                 }
             if live_watch_this_window >= max_watch_per_session:
                 log_event("INFO", "advisory_watch_blocked_session_cap", {
@@ -2662,8 +2990,10 @@ def run_advisory_cycle() -> dict:
             live_sent_this_window += 1
             open_live_count += 1
         if mode == "live" and candidate.get("alert_stage") in WATCH_ALERT_STAGES and "error" not in saved:
-            watch_counts_by_symbol[symbol_key] = watch_counts_by_symbol.get(symbol_key, 0) + 1
+            watch_counts_by_symbol[watch_key] = watch_counts_by_symbol.get(watch_key, 0) + 1
             live_watch_this_window += 1
+        if mode == "live" and candidate.get("alert_stage") in LONG_HOLD_ALERT_STAGES and "error" not in saved:
+            long_hold_sent_today += 1
 
         # Auto-create virtual position for live A/A+ trade-stage alerts
         if (
@@ -2733,18 +3063,19 @@ def run_advisory_cycle() -> dict:
                     ))
                 _flush_diag_buffers()
                 continue
+        intraday_market_block_reason = None
         if mode == "live" and daily_live_pnl <= -abs(cfg.max_daily_loss_eur):
             log_event("INFO", "advisory_live_blocked_daily_loss_cap", {
                 "daily_live_pnl": daily_live_pnl,
                 "max_daily_loss_eur": cfg.max_daily_loss_eur,
             })
-            continue
+            intraday_market_block_reason = "daily_loss_cap"
         if mode == "live" and open_live_count >= cfg.max_open_live_trades:
             log_event("INFO", "advisory_live_blocked_open_trade_cap", {
                 "open_live_count": open_live_count,
                 "max_open_live_trades": cfg.max_open_live_trades,
             })
-            continue
+            intraday_market_block_reason = "open_trade_cap"
         market_candidates = []
         _priority_rank = {"high": 0, "medium": 1, "low": 2}
         _sorted_items = sorted(
@@ -2776,6 +3107,78 @@ def run_advisory_cycle() -> dict:
             if not _is_broker_supported(item, cfg):
                 _buf_snapshot(_scan_snapshot(
                     cycle_id, now_cet, cfg, item, market, mode, window, "broker_not_supported"
+                ))
+                continue
+
+            if cfg.long_hold_enabled and mode == "live":
+                _long_hold = _long_hold_candidate(item, market, mode, cfg, now_cet)
+                if _long_hold:
+                    _long_hold_block = None
+                    if long_hold_sent_today >= cfg.long_hold_max_alerts_per_day:
+                        _long_hold_block = {
+                            "reason": "long_hold_daily_cap",
+                            "max": cfg.long_hold_max_alerts_per_day,
+                            "current": long_hold_sent_today,
+                        }
+                    elif _long_hold_repeat_blocked(
+                        recent_long_hold,
+                        _long_hold,
+                        now_cet,
+                        cfg.long_hold_cooldown_days,
+                    ):
+                        _long_hold_block = {
+                            "reason": "long_hold_cooldown",
+                            "cooldown_days": cfg.long_hold_cooldown_days,
+                        }
+                    if _long_hold_block:
+                        log_event("INFO", "advisory_long_hold_blocked", {
+                            "symbol": item["data_symbol"],
+                            "market": market,
+                            **_long_hold_block,
+                        })
+                        try:
+                            _buf_scanlog({
+                                "data_symbol": item["data_symbol"],
+                                "primary_symbol": item.get("primary_symbol"),
+                                "market": market,
+                                "session_window": window,
+                                "listing_type": item.get("listing_type"),
+                                "composite_score": _long_hold.get("composite_score"),
+                                "grade": _long_hold.get("grade"),
+                                "side": _long_hold.get("side"),
+                                "alert_stage": _long_hold.get("alert_stage"),
+                                "alerted": False,
+                                "gate_reason": _long_hold_block["reason"],
+                                "breakout_quality": _long_hold.get("breakout_quality"),
+                                "price_native": (_long_hold.get("data_quality_json") or {}).get("last_price"),
+                                "gate_detail": _long_hold_block,
+                            })
+                        except Exception:
+                            pass
+                    else:
+                        _lh_ok, _lh_detail = _persist_emit_candidate(_long_hold, mode)
+                        try:
+                            _buf_scanlog({
+                                "data_symbol": _long_hold.get("data_symbol"),
+                                "primary_symbol": _long_hold.get("primary_symbol"),
+                                "market": market,
+                                "session_window": window,
+                                "listing_type": _long_hold.get("listing_type"),
+                                "composite_score": _long_hold.get("composite_score"),
+                                "grade": _long_hold.get("grade"),
+                                "side": _long_hold.get("side"),
+                                "alert_stage": _long_hold.get("alert_stage"),
+                                "alerted": _lh_ok,
+                                "gate_reason": "alerted" if _lh_ok else "emit_failed",
+                                "breakout_quality": _long_hold.get("breakout_quality"),
+                                "price_native": (_long_hold.get("data_quality_json") or {}).get("last_price"),
+                                "gate_detail": _lh_detail,
+                            })
+                        except Exception:
+                            pass
+            if intraday_market_block_reason:
+                _buf_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, intraday_market_block_reason
                 ))
                 continue
             # EU shadow early gate: skip full signal compute for tickers whose prior composite
@@ -3068,6 +3471,7 @@ def run_advisory_cycle() -> dict:
         "total_elapsed_s": total_elapsed_s,
         "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
         "immediate_live_sent": immediate_live_sent,
+        "long_hold_sent_today": long_hold_sent_today,
     })
 
     # Trigger advisory-auto evaluation immediately so US live signals are scored
@@ -3112,4 +3516,5 @@ def run_advisory_cycle() -> dict:
         "blocked": len(blocked),
         "exit_alerts": len(exit_alerts),
         "live_sent_today": live_sent_today,
+        "long_hold_sent_today": long_hold_sent_today,
     }

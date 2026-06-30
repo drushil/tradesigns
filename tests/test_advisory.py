@@ -79,6 +79,111 @@ def test_entry_plan_caps_size_by_risk_and_capital():
     assert plan["do_not_chase_price"] > plan["entry_max"]
 
 
+def test_long_hold_dip_zone_classifies_pullback_to_support():
+    index = pd.date_range("2025-08-01", periods=220, freq="D", tz="UTC")
+    closes = [90 + i * 0.16 for i in range(180)] + [
+        119, 120, 118, 116, 115, 114, 113, 112, 111, 110,
+        109, 108, 108, 109, 110, 109, 108, 107, 108, 109,
+        110, 109, 108, 107, 108, 109, 110, 109, 108, 107,
+        108, 109, 110, 109, 108, 107, 108, 109, 108, 107,
+    ]
+    bars = pd.DataFrame(
+        {
+            "High": [c * 1.01 for c in closes],
+            "Low": [c * 0.99 for c in closes],
+            "Close": closes,
+        },
+        index=index,
+    )
+
+    zone = advisory._long_hold_dip_zone("NVDA", bars)
+
+    assert zone["ok"] is True
+    assert zone["zone"] in {"better", "strong"}
+    assert zone["entry_min"] < zone["current_price"] < zone["entry_max"]
+    assert zone["invalidation"] < zone["entry_min"]
+    assert zone["target_3m"] > zone["current_price"]
+
+
+def test_long_hold_candidate_is_alert_only_and_formats_zone(monkeypatch):
+    cfg = _cfg()
+    now = datetime(2026, 6, 30, 17, 0, tzinfo=timezone.utc)
+    zone = {
+        "ok": True,
+        "zone": "better",
+        "current_price": 100.0,
+        "entry_min": 98.0,
+        "entry_max": 102.0,
+        "invalidation": 90.0,
+        "target_3m": 115.0,
+        "target_6m": 130.0,
+        "risk_pct": 10.0,
+        "reward_risk": 1.5,
+        "pullback_pct": 12.0,
+        "sma20": 103.0,
+        "sma50": 101.0,
+        "sma200": 92.0,
+        "high_252": 114.0,
+        "low_252": 80.0,
+        "atr_pct": 2.0,
+        "ret_20d_pct": -6.0,
+        "ret_63d_pct": 4.0,
+        "trend_intact": True,
+        "reasons": ["12.0% below 52w high", "near 50DMA"],
+    }
+    monkeypatch.setattr(advisory, "_daily_history", lambda symbol: object())
+    monkeypatch.setattr(advisory, "_long_hold_dip_zone", lambda symbol, bars: zone)
+
+    candidate = advisory._long_hold_candidate(
+        {
+            "data_symbol": "NVDA",
+            "broker_display_name": "NVIDIA",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "category": "semis",
+            "priority": "high",
+            "trade_target": True,
+            "benchmark_only": False,
+        },
+        "US",
+        "live",
+        cfg,
+        now,
+    )
+
+    assert candidate["alert_stage"] == "long_hold"
+    assert candidate["status"] == "skipped"
+    assert candidate["grade"] == "A"
+    assert "LONG-HOLD BETTER BUY ZONE" in candidate["message_text"]
+    assert "Horizon: 1-3-6 months" in candidate["message_text"]
+
+
+def test_long_hold_repeat_blocks_same_zone_but_allows_upgrade():
+    now = datetime(2026, 6, 30, 17, 0, tzinfo=timezone.utc)
+    recent = [{
+        "created_at": (now - timedelta(days=2)).isoformat(),
+        "market": "US",
+        "data_symbol": "NVDA",
+        "signal_json": {
+            "alert_stage": "long_hold",
+            "long_hold_zone": {"zone": "good"},
+        },
+    }]
+    same_zone = {
+        "market": "US",
+        "data_symbol": "NVDA",
+        "alert_stage": "long_hold",
+        "signal_json": {"long_hold_zone": {"zone": "good"}},
+    }
+    upgrade = {
+        **same_zone,
+        "signal_json": {"long_hold_zone": {"zone": "better"}},
+    }
+
+    assert advisory._long_hold_repeat_blocked(recent, same_zone, now, cooldown_days=7) is True
+    assert advisory._long_hold_repeat_blocked(recent, upgrade, now, cooldown_days=7) is False
+
+
 def test_trend_1h_alignment_scores_direction(monkeypatch):
     import backend.signals.engine as signal_engine
 
