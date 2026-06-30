@@ -311,7 +311,7 @@ _FINVIZ_HEADERS = {
 # get zero news contribution which drags their composite scores below grade
 # thresholds (see ASML.AS analysis 2026-06-02: composite capped at 0.27).
 _EU_NEWS_SUFFIXES = (
-    ".AS", ".DE", ".PA", ".MI", ".MC", ".AT", ".OL",
+    ".AS", ".DE", ".PA", ".MI", ".MC", ".AT", ".OL", ".F",
     ".ST", ".HE", ".BR", ".LS", ".SW", ".VI", ".CO", ".L",
 )
 
