@@ -132,6 +132,12 @@ ADVISORY_UNIVERSE = {
          "category": "space", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"],
          "liquidity_note": "IPO June 2026 — minimal price history; signals partial until ~14 sessions of bars; IPO volatility, use limit orders"},
+        {"data_symbol": "VRT", "broker_display_name": "Vertiv", "exchange": "NYSE", "currency": "USD",
+         "category": "ai_infrastructure", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "APP", "broker_display_name": "AppLovin", "exchange": "NASDAQ", "currency": "USD",
+         "category": "adtech_ai", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"]},
         # --- Benchmark/context only: computed for regime signals, no trade alerts ---
         {"data_symbol": "QQQ", "broker_display_name": "Invesco QQQ", "exchange": "NASDAQ", "currency": "USD",
          "category": "etf_benchmark", "priority": "low", "trade_target": False, "benchmark_only": True,
@@ -180,6 +186,10 @@ ADVISORY_UNIVERSE = {
         {"data_symbol": "DBK.DE", "broker_display_name": "Deutsche Bank", "exchange": "Xetra", "currency": "EUR",
          "category": "financials", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
+        {"data_symbol": "HY9H.F", "broker_display_name": "SK Hynix", "exchange": "Frankfurt", "currency": "EUR",
+         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
+         "broker_tags": ["trade_republic_de", "scalable_de"],
+         "liquidity_note": "German listing of a Korea-primary stock (KRX is the liquid venue, Asian hours) — trades thin during EU hours on a market-maker price; use limit orders"},
         # --- EU mirrors: early-read on US momentum via TR morning watch (L&S) + eu_open (Xetra) ---
         {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
          "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA",

@@ -665,7 +665,7 @@ def test_eu_mirror_universe_is_metadata_tagged():
         if item.get("listing_type") == "eu_us_mirror"
     ]
 
-    assert len(advisory.ADVISORY_UNIVERSE["EU"]) == 24  # 12 native + 12 mirrors
+    assert len(advisory.ADVISORY_UNIVERSE["EU"]) == 25  # 13 native + 12 mirrors
     assert len(mirrors) == 12
     assert all(item.get("origin_market") == "US" for item in mirrors)
     assert all(item.get("primary_symbol") for item in mirrors)
