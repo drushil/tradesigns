@@ -506,7 +506,7 @@ def load_config() -> AdvisoryConfig:
         fx_rate=fx["rate"],
         long_hold_enabled=_env_bool("ADVISORY_LONG_HOLD_ENABLED", True),
         long_hold_min_zone=_env_value("ADVISORY_LONG_HOLD_MIN_ZONE", "good").lower(),
-        long_hold_max_alerts_per_day=_env_int("ADVISORY_LONG_HOLD_MAX_ALERTS_PER_DAY", 3),
+        long_hold_max_alerts_per_day=_env_int("ADVISORY_LONG_HOLD_MAX_ALERTS_PER_DAY", 5),
         long_hold_cooldown_days=_env_int("ADVISORY_LONG_HOLD_COOLDOWN_DAYS", 7),
         fx_rate_source=fx["source"],
         fx_rate_fetched_at=fx.get("fetched_at", ""),
