@@ -2082,6 +2082,45 @@ def test_eu_early_gate_skips_recent_flat_shadow(monkeypatch):
     assert any(event == "advisory_eu_early_gate_skip" for event, _ in logs)
 
 
+def test_eu_early_gate_never_skips_high_priority_downside_names(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    scans = []
+
+    monkeypatch.setenv("ADVISORY_EU_EARLY_GATE_COMPOSITE", "0.15")
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(
+        markets={"EU"}, live_markets={"US"}, shadow_markets={"EU"}
+    ))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 7, 1, 10, 0, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "EU": [{
+            "data_symbol": "ASML.AS",
+            "broker_display_name": "ASML",
+            "exchange": "Euronext Amsterdam",
+            "currency": "EUR",
+            "priority": "high",
+        }]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [
+        {
+            "data_symbol": "ASML.AS",
+            "mode": "shadow",
+            "composite_score": 0.02,
+            "created_at": "2026-07-01T07:55:00+00:00",
+        }
+    ] if kwargs.get("mode") == "shadow" else [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(
+        advisory,
+        "_scan_candidate",
+        lambda *args, **kwargs: scans.append(args[0]["data_symbol"]) or None,
+    )
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    advisory.run_advisory_cycle()
+
+    assert scans == ["ASML.AS"]
+
+
 def test_eu_mirror_is_skipped_outside_mirror_window(monkeypatch):
     berlin = timezone(timedelta(hours=2))
 

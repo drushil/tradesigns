@@ -3589,6 +3589,7 @@ def run_advisory_cycle() -> dict:
                 mode == "shadow"
                 and market == "EU"
                 and item.get("listing_type") != "eu_us_mirror"
+                and str(item.get("priority", "medium")).lower() != "high"
             ):
                 _sym_key = item["data_symbol"].upper()
                 _prior_c = eu_prior_composite.get(_sym_key)
