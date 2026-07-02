@@ -364,6 +364,76 @@ def test_downside_risk_card_is_not_short_recommendation():
     assert "protect longs" in card
 
 
+def test_downside_momentum_detects_large_drawdown_despite_positive_buy_composite():
+    result = advisory._downside_momentum_check(
+        {
+            "composite_score": 0.22,
+            "signals": {
+                "vwap_deviation": {"score": 0.80},
+                "macd_crossover": {"score": 0.30},
+                "relative_strength": {"score": -0.55},
+                "tape_aggression": {"score": 0.20},
+                "orb": {"score": 0.0},
+            },
+            "atr_data": {"atr_pct": 0.55},
+        },
+        {
+            "intraday_price_context": {
+                "drawdown_from_high_pct": 3.2,
+                "momentum_5m_pct": -0.15,
+                "momentum_15m_pct": -0.45,
+                "vs_vwap_pct": -1.1,
+                "current": 1650.0,
+                "session_high": 1704.5,
+            },
+        },
+    )
+
+    assert result["triggered"] is True
+    assert result["level"] == "accelerating"
+    assert result["original_composite"] == pytest.approx(0.22)
+    assert result["downside_score"] < 0
+
+
+def test_downside_repeat_blocks_duplicates_but_allows_escalation():
+    recent = {
+        "grade": "B",
+        "composite_score": -0.48,
+        "signal_json": {
+            "alert_stage": "downside",
+            "downside_context": {
+                "level": "initial",
+                "pressure_score": 0.48,
+                "drawdown_from_high_pct": 1.1,
+            },
+        },
+    }
+    duplicate = {
+        "alert_stage": "downside",
+        "composite_score": -0.52,
+        "signal_json": {
+            "downside_context": {
+                "level": "initial",
+                "pressure_score": 0.52,
+                "drawdown_from_high_pct": 1.4,
+            },
+        },
+    }
+    escalation = {
+        **duplicate,
+        "signal_json": {
+            "downside_context": {
+                "level": "confirmed",
+                "pressure_score": 0.60,
+                "drawdown_from_high_pct": 2.2,
+            },
+        },
+    }
+
+    assert advisory._downside_repeat_blocked(recent, duplicate) is True
+    assert advisory._downside_repeat_blocked(recent, escalation) is False
+
+
 def test_late_chase_watch_card_explains_pullback_needed():
     cfg = _cfg()
     plan = advisory._entry_plan(price=100.0, side="BUY", atr_pct=1.0, currency="USD", cfg=cfg, grade="A")
@@ -799,7 +869,9 @@ def _make_fake_bars(n_rows, volume):
     # bars.tail(20): "Volume" in tail → True; tail["Volume"].mean() → float
     recent = MagicMock()
     recent.__contains__.return_value = True
-    recent.__getitem__.return_value.mean.return_value = float(volume)
+    volume_series = recent.__getitem__.return_value
+    volume_series.squeeze.return_value = volume_series
+    volume_series.mean.return_value = float(volume)
     bars.tail.return_value = recent
     # bars["Close"].squeeze().iloc[-1] → 100.0
     bars.__getitem__.return_value.squeeze.return_value.iloc.__getitem__.return_value = 100.0
@@ -934,6 +1006,29 @@ def test_us_data_quality_relaxes_early_session_rows(monkeypatch):
     assert result["ok"] is True
     assert result["early_session_relaxed"] is True
     assert result["required_rows"] == 30
+
+
+def test_eu_data_quality_relaxes_first_ten_native_bars(monkeypatch):
+    index = pd.date_range(
+        datetime.now(timezone.utc) - timedelta(minutes=11),
+        periods=12,
+        freq="1min",
+    )
+    bars = pd.DataFrame({
+        "Open": [100.0] * 12,
+        "High": [100.2] * 12,
+        "Low": [99.8] * 12,
+        "Close": [100.0] * 12,
+        "Volume": [1000] * 12,
+    }, index=index)
+    monkeypatch.setattr(advisory, "_get_bars", lambda *a, **kw: bars)
+
+    result = advisory._data_quality("ASML.AS", "EU", window="eu_open")
+
+    assert result["ok"] is True
+    assert result["early_session_relaxed"] is True
+    assert result["required_rows"] == 45
+    assert result["intraday_price_context"]["bars"] == 12
 
 
 def test_daily_fx_rate_uses_same_day_cache_without_fetch(monkeypatch):
@@ -1222,6 +1317,68 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert advisory._parse_dt(saved[0]["valid_until"]) == datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
     assert len(sent) == 1
     assert "NVDA" in sent[0]
+
+
+def test_scan_log_distinguishes_persistence_from_failed_discord_delivery(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    scan_batches = []
+    candidate = {
+        "data_symbol": "MU",
+        "broker_display_name": "Micron",
+        "exchange": "NASDAQ",
+        "currency": "USD",
+        "market": "US",
+        "mode": "live",
+        "window": "us_midday",
+        "side": "SELL",
+        "composite_score": -0.62,
+        "grade": "A",
+        "alert_stage": "downside",
+        "status": "skipped",
+        "downside_risk": True,
+        "trade_target": True,
+        "priority": "medium",
+        "breakout_quality": 0.62,
+        "signal_json": {
+            "alert_stage": "downside",
+            "scores": {"macd_crossover": -0.8},
+            "downside_context": {
+                "level": "confirmed",
+                "pressure_score": 0.62,
+                "drawdown_from_high_pct": 2.4,
+            },
+        },
+        "message_text": "downside",
+    }
+
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(long_hold_enabled=False))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 7, 1, 18, 0, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{"data_symbol": "MU", "broker_display_name": "Micron", "exchange": "NASDAQ", "currency": "USD"}]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "_monitor_open_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_monitor_virtual_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_scan_candidate", lambda *args, **kwargs: dict(candidate))
+    monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: {"id": 101})
+    monkeypatch.setattr(advisory, "_send_discord", lambda *args: False)
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs",
+                        lambda rows: scan_batches.append(rows) or {"written": len(rows)})
+    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+
+    advisory.run_advisory_cycle()
+
+    row = next(
+        row for batch in scan_batches for row in batch
+        if row.get("data_symbol") == "MU" and row.get("alert_stage") == "downside"
+    )
+    assert row["alerted"] is False
+    assert row["gate_reason"] == "discord_post_failed"
+    assert row["gate_detail"]["persisted"] is True
+    assert row["gate_detail"]["discord_attempted"] is True
+    assert row["gate_detail"]["discord_sent"] is False
 
 
 def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
@@ -2163,6 +2320,69 @@ def test_live_scan_emits_downside_risk_without_short_permission(monkeypatch):
     assert candidate["alert_stage"] == "downside"
     assert candidate["status"] == "skipped"
     assert "DOWNSIDE RISK" in candidate["message_text"]
+
+
+def test_shadow_eu_scan_emits_downside_from_price_deterioration(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    cfg = _cfg(
+        markets={"EU"},
+        live_markets=set(),
+        shadow_markets={"EU"},
+        shadow_discord_markets={"EU"},
+        shadow_min_discord_grade="B",
+    )
+
+    monkeypatch.setattr(advisory, "_data_quality", lambda *args, **kwargs: {
+        "ok": True,
+        "last_price": 1650.0,
+        "rows": 180,
+        "age_minutes": 1.0,
+        "avg_recent_volume": 10000,
+        "intraday_price_context": {
+            "drawdown_from_high_pct": 3.2,
+            "momentum_5m_pct": -0.15,
+            "momentum_15m_pct": -0.45,
+            "vs_vwap_pct": -1.10,
+            "current": 1650.0,
+            "session_high": 1704.5,
+        },
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="ranging", intraday_regime="ranging",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: {
+        "composite_score": 0.22,
+        "signals": {
+            "vwap_deviation": {"score": 0.80},
+            "macd_crossover": {"score": 0.30},
+            "relative_strength": {"score": -0.55},
+            "tape_aggression": {"score": 0.20},
+            "orb": {"score": 0.0, "meta": {"active": False}},
+        },
+        "atr_data": {"atr_pct": 0.55, "current_price": 1650.0},
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "_benchmark_context_at_signal", lambda *args: {})
+
+    candidate = advisory._scan_candidate(
+        {
+            "data_symbol": "ASML.AS",
+            "broker_display_name": "ASML",
+            "exchange": "Euronext Amsterdam",
+            "currency": "EUR",
+        },
+        "EU",
+        "shadow",
+        cfg,
+        [],
+        datetime(2026, 7, 1, 15, 0, tzinfo=berlin),
+    )
+
+    assert candidate is not None
+    assert candidate["alert_stage"] == "downside"
+    assert candidate["grade"] == "A+"
+    assert candidate["signal_json"]["downside_context"]["original_composite"] == pytest.approx(0.22)
+    assert advisory._should_send_discord(candidate, cfg) is True
 
 
 def test_live_scan_emits_momentum_ignition_below_watch_threshold(monkeypatch):

@@ -909,6 +909,73 @@ def _watch_repeat_blocked(recent_watch: dict, candidate: dict) -> bool:
     return True
 
 
+def _downside_level_rank(level: str) -> int:
+    return {"initial": 0, "confirmed": 1, "accelerating": 2}.get(
+        str(level or "").lower(), -1
+    )
+
+
+def _recent_downside_signal(recent_signals: list, symbol: str, market: str,
+                            now_cet: datetime) -> dict:
+    cutoff = now_cet.astimezone(timezone.utc) - timedelta(
+        minutes=max(5, _env_int("ADVISORY_DOWNSIDE_REPEAT_LOOKBACK_MINUTES", 90))
+    )
+    symbol = str(symbol or "").upper()
+    market = str(market or "").upper()
+    for signal in recent_signals or []:
+        if str(signal.get("data_symbol") or "").upper() != symbol:
+            continue
+        if str(signal.get("market") or "").upper() != market:
+            continue
+        created_at = _parse_dt(signal.get("created_at"))
+        if not created_at or created_at < cutoff:
+            continue
+        signal_json = signal.get("signal_json") or {}
+        if (
+            signal_json.get("alert_stage") == "downside"
+            or signal.get("downside_risk")
+            or str(signal.get("message_text") or "").startswith("**DOWNSIDE RISK")
+        ):
+            return signal
+    return {}
+
+
+def _downside_repeat_blocked(recent_downside: dict, candidate: dict) -> bool:
+    if not recent_downside or candidate.get("alert_stage") != "downside":
+        return False
+    old_json = recent_downside.get("signal_json") or {}
+    old_context = old_json.get("downside_context") or {}
+    new_context = (candidate.get("signal_json") or {}).get("downside_context") or {}
+
+    old_level = old_context.get("level")
+    if old_level is None:
+        old_grade = str(recent_downside.get("grade") or "").upper()
+        old_level = "accelerating" if old_grade == "A+" else ("confirmed" if old_grade == "A" else "initial")
+    if _downside_level_rank(new_context.get("level")) > _downside_level_rank(old_level):
+        return False
+
+    old_drawdown = float(old_context.get("drawdown_from_high_pct") or 0)
+    new_drawdown = float(new_context.get("drawdown_from_high_pct") or 0)
+    if new_drawdown - old_drawdown >= _env_float(
+        "ADVISORY_DOWNSIDE_REPEAT_MIN_DRAWDOWN_DELTA", 1.0
+    ):
+        return False
+
+    old_pressure = float(
+        old_context.get("pressure_score")
+        or abs(float(recent_downside.get("composite_score") or 0))
+    )
+    new_pressure = float(
+        new_context.get("pressure_score")
+        or abs(float(candidate.get("composite_score") or 0))
+    )
+    if new_pressure - old_pressure >= _env_float(
+        "ADVISORY_DOWNSIDE_REPEAT_MIN_PRESSURE_DELTA", 0.15
+    ):
+        return False
+    return True
+
+
 def _alerted_symbol_in_session(recent_live: list, symbol: str, market: str,
                                now_cet: datetime) -> bool:
     window = _window_name(market, now_cet)
@@ -1092,6 +1159,82 @@ def _meets_min_grade(grade: str, min_grade: str) -> bool:
     return _grade_rank(grade) >= _grade_rank(min_grade)
 
 
+def _intraday_price_context(bars) -> dict:
+    """Extract directional price context from bars already fetched for quality checks."""
+    try:
+        import pandas as pd
+
+        frame = bars.copy()
+        if getattr(frame, "empty", True):
+            return {}
+        index = pd.to_datetime(frame.index, utc=True, errors="coerce")
+        valid = ~index.isna()
+        frame = frame.loc[valid].copy()
+        index = index[valid]
+        if frame.empty:
+            return {}
+        frame.index = index
+        latest_date = frame.index[-1].date()
+        frame = frame[frame.index.date == latest_date]
+        if frame.empty:
+            return {}
+
+        close = _bar_column(frame, "Close").dropna().astype(float)
+        high = _bar_column(frame, "High").dropna().astype(float) if "High" in frame else close
+        low = _bar_column(frame, "Low").dropna().astype(float) if "Low" in frame else close
+        if len(close) < 2:
+            return {}
+        current = float(close.iloc[-1])
+        session_high = float(high.max())
+        session_low = float(low.min())
+        session_open = float(close.iloc[0])
+
+        def _momentum(rows_back: int) -> Optional[float]:
+            if len(close) <= rows_back:
+                return None
+            base = float(close.iloc[-(rows_back + 1)])
+            return ((current - base) / base * 100.0) if base else None
+
+        running_vwap = None
+        if "Volume" in frame:
+            volume = _bar_column(frame, "Volume").fillna(0).astype(float)
+            volume = volume.reindex(close.index).fillna(0)
+            if float(volume.sum()) > 0:
+                typical = (
+                    _bar_column(frame, "High").astype(float)
+                    + _bar_column(frame, "Low").astype(float)
+                    + _bar_column(frame, "Close").astype(float)
+                ) / 3.0
+                typical = typical.reindex(close.index)
+                running_vwap = float((typical * volume).sum() / volume.sum())
+
+        return {
+            "bars": int(len(close)),
+            "current": round(current, 4),
+            "session_open": round(session_open, 4),
+            "session_high": round(session_high, 4),
+            "session_low": round(session_low, 4),
+            "drawdown_from_high_pct": round(
+                max(0.0, (session_high - current) / session_high * 100.0), 4
+            ) if session_high else None,
+            "return_from_open_pct": round(
+                (current - session_open) / session_open * 100.0, 4
+            ) if session_open else None,
+            "momentum_5m_pct": (
+                round(_momentum(5), 4) if _momentum(5) is not None else None
+            ),
+            "momentum_15m_pct": (
+                round(_momentum(15), 4) if _momentum(15) is not None else None
+            ),
+            "running_vwap": round(running_vwap, 4) if running_vwap else None,
+            "vs_vwap_pct": round(
+                (current - running_vwap) / running_vwap * 100.0, 4
+            ) if running_vwap else None,
+        }
+    except Exception:
+        return {}
+
+
 def _data_quality(symbol: str, market: str, listing_type: str = None, window: str = None) -> dict:
     try:
         if _get_bars is not None:
@@ -1111,7 +1254,11 @@ def _data_quality(symbol: str, market: str, listing_type: str = None, window: st
         except Exception:
             age_min = 0
         recent = bars.tail(20)
-        avg_volume = float(recent["Volume"].mean()) if "Volume" in recent else 0.0
+        avg_volume = (
+            float(recent["Volume"].squeeze().mean())
+            if "Volume" in recent else 0.0
+        )
+        price_context = _intraday_price_context(bars)
         if listing_type == "eu_us_mirror":
             min_rows = 20
         elif market == "EU":
@@ -1119,6 +1266,7 @@ def _data_quality(symbol: str, market: str, listing_type: str = None, window: st
         else:
             min_rows = 30
         early_us_min_rows = _env_int("ADVISORY_US_EARLY_MIN_ROWS", 10)
+        early_eu_min_rows = _env_int("ADVISORY_EU_EARLY_MIN_ROWS", 10)
         if rows < min_rows:
             # TR morning watch: accept thin pre-Xetra bars from L&S Exchange
             if listing_type == "eu_us_mirror" and window == "tr_morning_watch" and rows >= 3 and age_min <= 30:
@@ -1131,6 +1279,26 @@ def _data_quality(symbol: str, market: str, listing_type: str = None, window: st
                     "last_price": round(close, 4),
                     "tr_early_relaxed": True,
                     "required_rows": min_rows,
+                    "intraday_price_context": price_context,
+                }
+            if (
+                market == "EU"
+                and listing_type != "eu_us_mirror"
+                and window in {"tr_morning_watch", "eu_open"}
+                and rows >= early_eu_min_rows
+                and age_min <= 5
+                and avg_volume > 0
+            ):
+                close = float(bars["Close"].squeeze().iloc[-1])
+                return {
+                    "ok": True,
+                    "rows": rows,
+                    "age_minutes": round(age_min, 1),
+                    "avg_recent_volume": round(avg_volume, 2),
+                    "last_price": round(close, 4),
+                    "early_session_relaxed": True,
+                    "required_rows": min_rows,
+                    "intraday_price_context": price_context,
                 }
             if market == "US" and rows >= early_us_min_rows and age_min <= 5:
                 close = float(bars["Close"].squeeze().iloc[-1])
@@ -1142,6 +1310,7 @@ def _data_quality(symbol: str, market: str, listing_type: str = None, window: st
                     "last_price": round(close, 4),
                     "early_session_relaxed": True,
                     "required_rows": min_rows,
+                    "intraday_price_context": price_context,
                 }
             return {"ok": False, "reason": "too_few_bars", "rows": rows}
         if age_min > 20:
@@ -1162,6 +1331,7 @@ def _data_quality(symbol: str, market: str, listing_type: str = None, window: st
             "age_minutes": round(age_min, 1),
             "avg_recent_volume": round(avg_volume, 2),
             "last_price": round(close, 4),
+            "intraday_price_context": price_context,
         }
     except Exception as e:
         return {"ok": False, "reason": "data_quality_error", "error": str(e)[:120]}
@@ -1560,8 +1730,153 @@ def _compact_signal_payload(signal_result: dict) -> dict:
             for name, payload in signals.items()
             if isinstance(payload, dict)
         },
+        "orb_active": bool((signals.get("orb") or {}).get("meta", {}).get("active")),
         "atr_data": signal_result.get("atr_data") or {},
         "block_reasons": signal_result.get("block_reasons") or [],
+    }
+
+
+def _payload_score(signal_json: dict, name: str) -> Optional[float]:
+    scores = signal_json.get("scores") or {}
+    if name in scores:
+        try:
+            return float(scores.get(name))
+        except (TypeError, ValueError):
+            return None
+    signals = signal_json.get("signals") or {}
+    try:
+        return float((signals.get(name) or {}).get("score"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _downside_momentum_check(signal_result: dict, quality: dict) -> dict:
+    """Detect deterioration independently from the mean-reversion BUY composite."""
+    price = quality.get("intraday_price_context") or {}
+    if not price:
+        return {"triggered": False, "reason": "missing_intraday_price_context"}
+
+    def _number(value, default=0.0) -> float:
+        try:
+            return float(value if value is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    signals = signal_result.get("signals") or {}
+    atr_pct = max(0.15, _number((signal_result.get("atr_data") or {}).get("atr_pct"), 0.5))
+    drawdown = max(0.0, _number(price.get("drawdown_from_high_pct")))
+    momentum_5m = _number(price.get("momentum_5m_pct"))
+    momentum_15m = _number(price.get("momentum_15m_pct"))
+    vs_vwap = _number(price.get("vs_vwap_pct"))
+    original_composite = _number(signal_result.get("composite_score"))
+
+    bearish_components = {
+        name: max(0.0, -_signal_score(signals, name))
+        for name in ("macd_crossover", "relative_strength", "tape_aggression", "orb")
+    }
+    component_confirmations = [
+        name for name, strength in bearish_components.items() if strength >= 0.25
+    ]
+    fast_5m = momentum_5m <= -max(0.20, atr_pct * 0.40)
+    fast_15m = momentum_15m <= -max(0.35, atr_pct * 0.70)
+    below_vwap = vs_vwap <= -max(0.15, atr_pct * 0.25)
+    min_drawdown = max(
+        _env_float("ADVISORY_DOWNSIDE_MIN_DRAWDOWN_PCT", 0.80),
+        atr_pct * _env_float("ADVISORY_DOWNSIDE_MIN_DRAWDOWN_ATR", 1.10),
+    )
+    moderate_drawdown = drawdown >= max(
+        _env_float("ADVISORY_DOWNSIDE_MODERATE_DRAWDOWN_PCT", 1.5),
+        atr_pct * _env_float("ADVISORY_DOWNSIDE_MODERATE_DRAWDOWN_ATR", 2.0),
+    )
+    large_drawdown = drawdown >= max(
+        _env_float("ADVISORY_DOWNSIDE_LARGE_DRAWDOWN_PCT", 2.0),
+        atr_pct * _env_float("ADVISORY_DOWNSIDE_LARGE_DRAWDOWN_ATR", 2.5),
+    )
+    confirmations = len(component_confirmations) + int(fast_5m) + int(fast_15m) + int(below_vwap)
+    triggered = drawdown >= min_drawdown and (
+        large_drawdown
+        or (moderate_drawdown and below_vwap and len(component_confirmations) >= 1)
+        or (below_vwap and len(component_confirmations) >= 2)
+        or ((fast_5m or fast_15m) and confirmations >= 3)
+    )
+
+    drawdown_score = min(1.0, drawdown / max(min_drawdown * 2.0, 0.01))
+    vwap_score = min(1.0, max(0.0, -vs_vwap) / max(atr_pct, 0.15))
+    momentum_score = min(
+        1.0,
+        max(max(0.0, -momentum_5m), max(0.0, -momentum_15m)) / max(atr_pct, 0.15),
+    )
+    component_score = (
+        sum(bearish_components.values()) / len(bearish_components)
+        if bearish_components else 0.0
+    )
+    pressure_score = min(
+        1.0,
+        0.40 * drawdown_score
+        + 0.20 * vwap_score
+        + 0.20 * momentum_score
+        + 0.20 * component_score,
+    )
+
+    accelerating = triggered and (
+        drawdown >= max(3.0, atr_pct * 4.0)
+        or (fast_5m and fast_15m and confirmations >= 4)
+    )
+    confirmed = triggered and (
+        accelerating
+        or large_drawdown
+        or moderate_drawdown
+        or (below_vwap and confirmations >= 4)
+    )
+    level = "accelerating" if accelerating else ("confirmed" if confirmed else "initial")
+    return {
+        "triggered": bool(triggered),
+        "source": "intraday_downside_momentum",
+        "level": level if triggered else None,
+        "pressure_score": round(pressure_score, 4),
+        "downside_score": round(-pressure_score, 4),
+        "original_composite": round(original_composite, 4),
+        "drawdown_from_high_pct": round(drawdown, 4),
+        "momentum_5m_pct": round(momentum_5m, 4),
+        "momentum_15m_pct": round(momentum_15m, 4),
+        "vs_vwap_pct": round(vs_vwap, 4),
+        "atr_pct": round(atr_pct, 4),
+        "confirmations": confirmations,
+        "component_confirmations": component_confirmations,
+        "bearish_components": {
+            name: round(value, 4) for name, value in bearish_components.items()
+        },
+        "thresholds": {
+            "min_drawdown_pct": round(min_drawdown, 4),
+            "moderate_drawdown_pct": round(
+                max(
+                    _env_float("ADVISORY_DOWNSIDE_MODERATE_DRAWDOWN_PCT", 1.5),
+                    atr_pct * _env_float("ADVISORY_DOWNSIDE_MODERATE_DRAWDOWN_ATR", 2.0),
+                ),
+                4,
+            ),
+            "large_drawdown_pct": round(
+                max(
+                    _env_float("ADVISORY_DOWNSIDE_LARGE_DRAWDOWN_PCT", 2.0),
+                    atr_pct * _env_float("ADVISORY_DOWNSIDE_LARGE_DRAWDOWN_ATR", 2.5),
+                ),
+                4,
+            ),
+        },
+        "price_context": price,
+    }
+
+
+def _fallback_downside_context(composite: float) -> dict:
+    strength = abs(float(composite or 0.0))
+    level = "accelerating" if strength >= 0.60 else ("confirmed" if strength >= 0.45 else "initial")
+    return {
+        "triggered": True,
+        "source": "negative_opportunity_composite",
+        "level": level,
+        "pressure_score": round(min(1.0, strength), 4),
+        "downside_score": round(-min(1.0, strength), 4),
+        "original_composite": round(float(composite or 0.0), 4),
     }
 
 
@@ -1624,14 +1939,30 @@ def _format_trade_card(signal: dict) -> str:
         sym = signal["data_symbol"]
         composite = float(signal.get("composite_score") or 0)
         sig_json = signal.get("signal_json") or {}
-        sigs = sig_json.get("signals") or {}
-        vwap = (sigs.get("vwap_deviation") or {}).get("score", 0)
-        macd = (sigs.get("macd_crossover") or {}).get("score", 0)
-        rsi = (sigs.get("rsi_divergence") or {}).get("score", 0)
+        scores = sig_json.get("scores") or {}
+        context = sig_json.get("downside_context") or {}
+        level = str(context.get("level") or "initial").upper()
+        drawdown = context.get("drawdown_from_high_pct")
+        momentum_15m = context.get("momentum_15m_pct")
+        vs_vwap = context.get("vs_vwap_pct")
+        metric_bits = []
+        if drawdown is not None:
+            metric_bits.append(f"{float(drawdown):.2f}% below session high")
+        if momentum_15m is not None:
+            metric_bits.append(f"15m {float(momentum_15m):+.2f}%")
+        if vs_vwap is not None:
+            metric_bits.append(f"VWAP {float(vs_vwap):+.2f}%")
+        if not metric_bits:
+            metric_bits = [
+                f"MACD {float(scores.get('macd_crossover') or 0):+.2f}",
+                f"RS {float(scores.get('relative_strength') or 0):+.2f}",
+                f"Tape {float(scores.get('tape_aggression') or 0):+.2f}",
+            ]
         return (
-            f"**DOWNSIDE RISK - {sym} - {signal.get('grade', '?')} - {signal.get('market', '?')}**\n"
-            f"Composite: {composite:+.3f} | VWAP: {vwap:+.2f} | MACD: {macd:+.2f} | RSI: {rsi:+.2f}\n"
-            f"No position recommended — monitor for stop-zone or exit if holding."
+            f"**DOWNSIDE RISK {level} - {sym} - {signal.get('grade', '?')} - {signal.get('market', '?')}**\n"
+            f"{' | '.join(metric_bits)} | Risk score {composite:+.3f}\n"
+            "Action: protect long exposure, tighten stops, and avoid fresh buys until structure improves.\n"
+            "Informational risk alert — not a short-trade recommendation."
         )
 
     sym = signal["data_symbol"]
@@ -1964,14 +2295,24 @@ def _weights_for_market(market: str, listing_type: str = None) -> dict:
 
 
 def _should_send_discord(candidate: dict, cfg: AdvisoryConfig) -> bool:
-    # Downside-risk alerts always send if live — bypass grade gate
+    # Downside alerts are informational. Live markets always send; configured
+    # shadow markets send at the shadow grade floor.
     if candidate.get("downside_risk"):
-        return candidate.get("mode") == "live"
+        if candidate.get("mode") == "live":
+            return True
+        return (
+            str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
+            and _meets_min_grade(
+                candidate.get("grade"), cfg.shadow_min_discord_grade
+            )
+        )
     # benchmark_only tickers (SPY, QQQ) are logged for context but never get a Discord card
     if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
         return False
     if candidate.get("alert_stage") in INFO_ALERT_STAGES:
-        return candidate.get("mode") == "live"
+        if candidate.get("mode") == "live":
+            return True
+        return str(candidate.get("market", "")).upper() in cfg.shadow_discord_markets
     if candidate.get("alert_stage") in LONG_HOLD_ALERT_STAGES:
         if candidate.get("mode") == "live":
             zone = ((candidate.get("signal_json") or {}).get("long_hold_zone") or {}).get("zone")
@@ -2443,13 +2784,21 @@ def _build_downside_candidate(
     symbol: str, item: dict, market: str, mode: str,
     composite: float, signal_result: dict, regime_state, window: str,
     cfg: "AdvisoryConfig", market_context_at_signal: Optional[dict] = None,
+    downside_context: Optional[dict] = None,
 ) -> Optional[dict]:
-    """Build an informational downside-risk candidate when composite is strongly negative."""
+    """Build an informational risk alert, separate from short-trade advice."""
     signals = signal_result.get("signals") or {}
     side = "SELL"
-    breakout = _breakout_quality(side, abs(composite), signals, getattr(regime_state, "market_regime", ""))
-    orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
-    grade = _grade(abs(composite), breakout, orb_active)
+    downside_context = downside_context or _fallback_downside_context(composite)
+    risk_score = -abs(float(
+        downside_context.get("pressure_score")
+        or downside_context.get("downside_score")
+        or composite
+        or 0
+    ))
+    level = str(downside_context.get("level") or "initial").lower()
+    grade = {"initial": "B", "confirmed": "A", "accelerating": "A+"}.get(level, "B")
+    breakout = abs(risk_score)
     listing_type = item.get("listing_type")
     primary_symbol = item.get("primary_symbol")
     return {
@@ -2461,17 +2810,18 @@ def _build_downside_candidate(
         "mode": mode,
         "window": window,
         "side": side,
-        "composite_score": round(composite, 4),
+        "composite_score": round(risk_score, 4),
         "grade": grade,
         "alert_stage": "downside",
         "status": "skipped",
         "downside_risk": True,
         "message_text": (
             f"**DOWNSIDE RISK - {symbol}**\n"
-            f"Bearish pressure detected; composite {composite:.3f}. No short entry is recommended."
+            f"{level.title()} deterioration detected; risk score {risk_score:.3f}. "
+            "No short entry is recommended."
         ),
         "rationale": (
-            f"Bearish pressure: composite={composite:.3f} | "
+            f"Bearish pressure: risk={risk_score:.3f} | opportunity composite={composite:.3f} | "
             f"VWAP {signals.get('vwap_deviation', {}).get('score', 0):+.2f} | "
             f"MACD {signals.get('macd_crossover', {}).get('score', 0):+.2f} | "
             f"RSI {signals.get('rsi_divergence', {}).get('score', 0):+.2f}"
@@ -2485,6 +2835,8 @@ def _build_downside_candidate(
         "breakout_quality": breakout,
         "signal_json": {
             **_compact_signal_payload(signal_result),
+            "alert_stage": "downside",
+            "downside_context": downside_context,
             "market_context_at_signal": market_context_at_signal or {},
         },
         "market_context_json": {
@@ -2552,16 +2904,23 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     composite = float(signal_result.get("composite_score") or 0)
     is_live_market = market in cfg.live_markets
     market_context_at_signal = _benchmark_context_at_signal(market, now_cet)
+    downside_context = _downside_momentum_check(signal_result, quality)
+    min_downside = _env_float("ADVISORY_MIN_DOWNSIDE_COMPOSITE", 0.35)
+    composite_downside = composite <= -abs(min_downside)
 
+    if composite_downside or downside_context.get("triggered"):
+        return _build_downside_candidate(
+            symbol=symbol, item=item, market=market, mode=mode,
+            composite=composite, signal_result=signal_result,
+            regime_state=regime_state, window=window, cfg=cfg,
+            market_context_at_signal=market_context_at_signal,
+            downside_context=(
+                downside_context
+                if downside_context.get("triggered")
+                else _fallback_downside_context(composite)
+            ),
+        )
     if composite <= 0:
-        min_downside = _env_float("ADVISORY_MIN_DOWNSIDE_COMPOSITE", 0.35)
-        if abs(composite) >= min_downside and is_live_market:
-            return _build_downside_candidate(
-                symbol=symbol, item=item, market=market, mode=mode,
-                composite=composite, signal_result=signal_result,
-                regime_state=regime_state, window=window, cfg=cfg,
-                market_context_at_signal=market_context_at_signal,
-            )
         return None
 
     side = "BUY" if composite > 0 else "SELL"
@@ -2792,7 +3151,7 @@ def run_advisory_cycle() -> dict:
     shadow_discord_sent_today = len([
         s for s in recent_shadow
         if str(s.get("market", "")).upper() in cfg.shadow_discord_markets
-        and _meets_min_grade(s.get("grade"), cfg.min_discord_grade)
+        and _meets_min_grade(s.get("grade"), cfg.shadow_min_discord_grade)
     ])
     # recent_trades was fetched concurrently in the prologue block above.
 
@@ -2967,23 +3326,53 @@ def run_advisory_cycle() -> dict:
             mode != "shadow"
             or shadow_discord_sent_today < cfg.max_shadow_discord_alerts_per_day
         )
+        discord_allowed = _should_send_discord(candidate, cfg)
+        duplicate_in_cycle = symbol_key in discord_sent_this_cycle
         can_send_discord = (
             can_send_shadow
-            and _should_send_discord(candidate, cfg)
+            and discord_allowed
             and "error" not in saved
-            and symbol_key not in discord_sent_this_cycle
+            and not duplicate_in_cycle
         )
+        delivery_detail = {
+            "persisted": "error" not in saved,
+            "discord_eligible": bool(discord_allowed),
+            "discord_attempted": False,
+            "discord_sent": False,
+        }
         if can_send_discord:
             _discord_started = time.perf_counter()
-            _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+            delivery_detail["discord_attempted"] = True
+            delivery_detail["discord_sent"] = bool(
+                _send_discord(candidate["message_text"], cfg.discord_webhook_url)
+            )
             discord_send_s += time.perf_counter() - _discord_started
-            discord_sent_this_cycle.add(symbol_key)
-            if mode == "live" and first_live_discord_elapsed_s is None:
-                first_live_discord_elapsed_s = round(time.perf_counter() - cycle_started, 3)
-            if mode == "shadow":
-                shadow_discord_sent_today += 1
-            if immediate:
-                immediate_live_sent += 1
+            if delivery_detail["discord_sent"]:
+                discord_sent_this_cycle.add(symbol_key)
+                if mode == "live" and first_live_discord_elapsed_s is None:
+                    first_live_discord_elapsed_s = round(time.perf_counter() - cycle_started, 3)
+                if mode == "shadow":
+                    shadow_discord_sent_today += 1
+                if immediate:
+                    immediate_live_sent += 1
+            else:
+                delivery_detail["discord_reason"] = "discord_post_failed"
+                log_event("WARN", "advisory_discord_delivery_failed", {
+                    "symbol": candidate.get("data_symbol"),
+                    "market": candidate.get("market"),
+                    "mode": mode,
+                    "alert_stage": candidate.get("alert_stage"),
+                })
+        elif "error" in saved:
+            delivery_detail["discord_reason"] = "persist_failed"
+        elif not can_send_shadow:
+            delivery_detail["discord_reason"] = "shadow_discord_daily_cap"
+        elif not discord_allowed:
+            delivery_detail["discord_reason"] = "discord_policy_blocked"
+        elif duplicate_in_cycle:
+            delivery_detail["discord_reason"] = "discord_cycle_duplicate"
+        else:
+            delivery_detail["discord_reason"] = "discord_not_attempted"
 
         if mode == "live" and candidate.get("status") in LIVE_SIGNAL_STATUSES and "error" not in saved:
             live_sent_today += 1
@@ -3030,8 +3419,19 @@ def run_advisory_cycle() -> dict:
 
         emitted.append(candidate)
         if "error" in saved:
-            return False, {"reason": "insert_error", "error": str(saved.get("error"))[:160]}
-        return True, {}
+            return False, {
+                **delivery_detail,
+                "reason": "insert_error",
+                "error": str(saved.get("error"))[:160],
+            }
+        return True, delivery_detail
+
+    def _scan_delivery_state(persisted: bool, detail: dict) -> tuple[bool, str]:
+        if detail.get("discord_sent"):
+            return True, "alerted"
+        if not persisted:
+            return False, "persist_failed"
+        return False, str(detail.get("discord_reason") or "persisted_no_discord")
 
     market_timings = []
 
@@ -3157,6 +3557,7 @@ def run_advisory_cycle() -> dict:
                             pass
                     else:
                         _lh_ok, _lh_detail = _persist_emit_candidate(_long_hold, mode)
+                        _lh_alerted, _lh_gate = _scan_delivery_state(_lh_ok, _lh_detail)
                         try:
                             _buf_scanlog({
                                 "data_symbol": _long_hold.get("data_symbol"),
@@ -3168,8 +3569,8 @@ def run_advisory_cycle() -> dict:
                                 "grade": _long_hold.get("grade"),
                                 "side": _long_hold.get("side"),
                                 "alert_stage": _long_hold.get("alert_stage"),
-                                "alerted": _lh_ok,
-                                "gate_reason": "alerted" if _lh_ok else "emit_failed",
+                                "alerted": _lh_alerted,
+                                "gate_reason": _lh_gate,
                                 "breakout_quality": _long_hold.get("breakout_quality"),
                                 "price_native": (_long_hold.get("data_quality_json") or {}).get("last_price"),
                                 "gate_detail": _lh_detail,
@@ -3255,14 +3656,14 @@ def run_advisory_cycle() -> dict:
                     "downside_risk": candidate.get("downside_risk", False),
                     "gate_detail": candidate.get("block_detail") or {},
                 })
-                _sig_scores = (candidate.get("signal_json") or {}).get("signals") or {}
+                _signal_payload = candidate.get("signal_json") or {}
                 _scan_log_base.update({
-                    "vwap_score": (_sig_scores.get("vwap_deviation") or {}).get("score"),
-                    "macd_score": (_sig_scores.get("macd_crossover") or {}).get("score"),
-                    "rel_strength_score": (_sig_scores.get("relative_strength") or {}).get("score"),
-                    "tape_score": (_sig_scores.get("tape_aggression") or {}).get("score"),
-                    "rsi_score": (_sig_scores.get("rsi_divergence") or {}).get("score"),
-                    "orb_active": bool((_sig_scores.get("orb") or {}).get("meta", {}).get("active")),
+                    "vwap_score": _payload_score(_signal_payload, "vwap_deviation"),
+                    "macd_score": _payload_score(_signal_payload, "macd_crossover"),
+                    "rel_strength_score": _payload_score(_signal_payload, "relative_strength"),
+                    "tape_score": _payload_score(_signal_payload, "tape_aggression"),
+                    "rsi_score": _payload_score(_signal_payload, "rsi_divergence"),
+                    "orb_active": bool(_signal_payload.get("orb_active")),
                 })
 
             if not candidate:
@@ -3311,6 +3712,27 @@ def run_advisory_cycle() -> dict:
                 except Exception:
                     pass
                 continue
+            if candidate.get("alert_stage") == "downside":
+                recent_for_mode = recent_live if mode == "live" else recent_shadow
+                recent_downside = _recent_downside_signal(
+                    recent_for_mode, item["data_symbol"], market, now_cet
+                )
+                if _downside_repeat_blocked(recent_downside, candidate):
+                    _scan_log_base["gate_reason"] = "downside_repeat_blocked"
+                    _scan_log_base["gate_detail"] = {
+                        "reason": "downside_repeat_blocked",
+                        "prior_signal_id": recent_downside.get("id"),
+                        "level": (
+                            (candidate.get("signal_json") or {})
+                            .get("downside_context", {})
+                            .get("level")
+                        ),
+                    }
+                    try:
+                        _buf_scanlog(_scan_log_base)
+                    except Exception:
+                        pass
+                    continue
             if mode == "live" and candidate.get("alert_stage") == "trade" and _watch_had_late_chase(recent_watch):
                 candidate["pullback_confirmed"] = True
                 candidate["signal_json"] = {
@@ -3328,13 +3750,13 @@ def run_advisory_cycle() -> dict:
                     pass
                 continue
             if (
-                mode == "live"
-                and candidate.get("alert_stage") in INFO_ALERT_STAGES
+                candidate.get("alert_stage") in INFO_ALERT_STAGES
                 and _should_send_discord(candidate, cfg)
             ):
                 _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode)
-                _scan_log_base["alerted"] = _emitted_ok
-                _scan_log_base["gate_reason"] = "alerted" if _emitted_ok else "emit_failed"
+                _alerted, _gate = _scan_delivery_state(_emitted_ok, _emit_detail)
+                _scan_log_base["alerted"] = _alerted
+                _scan_log_base["gate_reason"] = _gate
                 if _emit_detail:
                     _scan_log_base["gate_detail"] = _emit_detail
                 try:
@@ -3352,8 +3774,9 @@ def run_advisory_cycle() -> dict:
                 ) > 0
             ):
                 _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode, immediate=True)
-                _scan_log_base["alerted"] = _emitted_ok
-                _scan_log_base["gate_reason"] = "alerted" if _emitted_ok else "emit_failed"
+                _alerted, _gate = _scan_delivery_state(_emitted_ok, _emit_detail)
+                _scan_log_base["alerted"] = _alerted
+                _scan_log_base["gate_reason"] = _gate
                 if _emit_detail:
                     _scan_log_base["gate_detail"] = _emit_detail
                 try:
@@ -3394,10 +3817,14 @@ def run_advisory_cycle() -> dict:
             will_emit = idx < max(0, limit)
             if will_emit:
                 _emitted_ok, _emit_detail = _persist_emit_candidate(candidate, mode)
+                _alerted, _delivery_gate = _scan_delivery_state(
+                    _emitted_ok, _emit_detail
+                )
             else:
                 _emitted_ok, _emit_detail = False, {"reason": "capped_by_limit", "limit": limit, "rank": idx}
+                _alerted, _delivery_gate = False, "capped_by_limit"
             try:
-                _sig_scores_q = (candidate.get("signal_json") or {}).get("signals") or {}
+                _signal_payload_q = candidate.get("signal_json") or {}
                 # gate_detail: prefer the upstream block_detail when present
                 # (data-quality blocks etc.), else surface the emit-failure
                 # cause from _persist_emit_candidate so a single scan_log row
@@ -3413,19 +3840,19 @@ def run_advisory_cycle() -> dict:
                     "grade": candidate.get("grade"),
                     "side": candidate.get("side"),
                     "alert_stage": candidate.get("alert_stage"),
-                    "alerted": _emitted_ok,
-                    "gate_reason": "alerted" if _emitted_ok else ("capped_by_limit" if not will_emit else "emit_failed"),
+                    "alerted": _alerted,
+                    "gate_reason": _delivery_gate,
                     "ev_net_pct": candidate.get("ev_net_pct"),
                     "breakout_quality": candidate.get("breakout_quality"),
                     "price_native": candidate.get("reference_price") or (candidate.get("signal_json") or {}).get("atr_data", {}).get("current_price"),
                     "downside_risk": candidate.get("downside_risk", False),
                     "gate_detail": _detail,
-                    "vwap_score": (_sig_scores_q.get("vwap_deviation") or {}).get("score"),
-                    "macd_score": (_sig_scores_q.get("macd_crossover") or {}).get("score"),
-                    "rel_strength_score": (_sig_scores_q.get("relative_strength") or {}).get("score"),
-                    "tape_score": (_sig_scores_q.get("tape_aggression") or {}).get("score"),
-                    "rsi_score": (_sig_scores_q.get("rsi_divergence") or {}).get("score"),
-                    "orb_active": bool((_sig_scores_q.get("orb") or {}).get("meta", {}).get("active")),
+                    "vwap_score": _payload_score(_signal_payload_q, "vwap_deviation"),
+                    "macd_score": _payload_score(_signal_payload_q, "macd_crossover"),
+                    "rel_strength_score": _payload_score(_signal_payload_q, "relative_strength"),
+                    "tape_score": _payload_score(_signal_payload_q, "tape_aggression"),
+                    "rsi_score": _payload_score(_signal_payload_q, "rsi_divergence"),
+                    "orb_active": bool(_signal_payload_q.get("orb_active")),
                 })
             except Exception:
                 pass
