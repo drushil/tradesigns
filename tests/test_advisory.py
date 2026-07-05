@@ -51,7 +51,9 @@ def test_window_name_enforces_trade_republic_friendly_sessions():
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 14, tzinfo=berlin)) == "tr_morning_watch"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 9, 15, tzinfo=berlin)) == "eu_open"
     assert advisory._window_name("EU", datetime(2026, 5, 15, 14, 30, tzinfo=berlin)) == "eu_catalyst_only"
-    assert advisory._window_name("US", datetime(2026, 5, 15, 14, 59, tzinfo=berlin)) is None
+    assert advisory._window_name("US", datetime(2026, 5, 15, 9, 59, tzinfo=berlin)) is None
+    assert advisory._window_name("US", datetime(2026, 5, 15, 10, 0, tzinfo=berlin)) == "us_eu_morning"
+    assert advisory._window_name("US", datetime(2026, 5, 15, 14, 59, tzinfo=berlin)) == "us_eu_morning"
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 15, tzinfo=berlin)) == "us_premarket"
     assert advisory._window_name("US", datetime(2026, 5, 15, 15, 30, tzinfo=berlin)) == "us_open"
     assert advisory._window_name("US", datetime(2026, 5, 15, 17, 30, tzinfo=berlin)) == "us_midday"
@@ -834,19 +836,16 @@ def test_ordered_markets_prioritizes_live_alerts_before_shadow_learning():
     assert advisory._ordered_markets(cfg) == ["US", "EU"]
 
 
-def test_eu_mirror_universe_is_metadata_tagged():
-    mirrors = [
-        item for item in advisory.ADVISORY_UNIVERSE["EU"]
-        if item.get("listing_type") == "eu_us_mirror"
-    ]
-
-    assert len(advisory.ADVISORY_UNIVERSE["EU"]) == 25  # 13 native + 12 mirrors
-    assert len(mirrors) == 12
-    assert all(item.get("origin_market") == "US" for item in mirrors)
-    assert all(item.get("primary_symbol") for item in mirrors)
-    assert all(item.get("mirror_only_windows") == ["tr_morning_watch", "eu_open"] for item in mirrors)
-    assert {"AVGO", "MU"}.issubset({item.get("primary_symbol") for item in mirrors})
-    assert abs(sum(advisory.EU_MIRROR_WEIGHTS.values()) - 1.0) < 0.001
+def test_active_advisory_universe_covers_us_and_native_eu_watchlist():
+    assert advisory.ADVISORY_UNIVERSE["US"]
+    assert all(
+        item.get("currency") == "USD"
+        for item in advisory.ADVISORY_UNIVERSE["US"]
+        if item.get("trade_target", True)
+    )
+    eu_symbols = {item["data_symbol"] for item in advisory.ADVISORY_UNIVERSE["EU"]}
+    assert eu_symbols == {"ASML.AS", "HY9H.F"}
+    assert all(item.get("currency") == "EUR" for item in advisory.ADVISORY_UNIVERSE["EU"])
 
 
 def test_us_avgo_is_high_priority_for_immediate_send():
@@ -1445,7 +1444,7 @@ def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(mon
     )
     monkeypatch.setenv("ADVISORY_SCAN_SNAPSHOTS_ENABLED", "true")
     monkeypatch.setattr(advisory, "load_config", lambda: cfg)
-    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 14, 0, tzinfo=berlin))
+    monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 9, 0, tzinfo=berlin))
     monkeypatch.setattr(advisory, "_ordered_markets", lambda cfg: ["US", "EU"])
     monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}],
@@ -2359,6 +2358,61 @@ def test_live_scan_emits_downside_risk_without_short_permission(monkeypatch):
     assert candidate["alert_stage"] == "downside"
     assert candidate["status"] == "skipped"
     assert "DOWNSIDE RISK" in candidate["message_text"]
+
+
+def test_us_primary_morning_scan_is_watch_only_with_broker_caveat(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    monkeypatch.setattr(advisory, "_data_quality", lambda *args, **kwargs: {
+        "ok": True,
+        "last_price": 100.0,
+        "rows": 30,
+        "age_minutes": 1.0,
+        "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: {
+        "composite_score": 0.52,
+        "signals": {
+            "vwap_deviation": {"score": 0.35},
+            "macd_crossover": {"score": 0.85},
+            "relative_strength": {"score": 0.75},
+            "tape_aggression": {"score": 0.55},
+            "orb": {"score": 0.0, "meta": {"active": False}},
+        },
+        "atr_data": {"atr_pct": 0.8, "current_price": 100.0},
+    })
+    monkeypatch.setattr(advisory, "_trend_1h_alignment", lambda *args: {
+        "status": "ok", "direction": "bullish", "aligned": True,
+    })
+    monkeypatch.setattr(advisory, "_ignition_check", lambda *args: {})
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": 0.8, "confidence": 0.75,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(advisory, "_benchmark_context_at_signal", lambda *args: {})
+
+    candidate = advisory._scan_candidate(
+        {
+            "data_symbol": "MU",
+            "broker_display_name": "Micron Technology",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "priority": "high",
+        },
+        "US",
+        "live",
+        _cfg(),
+        [],
+        datetime(2026, 7, 2, 10, 30, tzinfo=berlin),
+    )
+
+    assert candidate is not None
+    assert candidate["data_symbol"] == "MU"
+    assert candidate["alert_stage"] == "us_eu_morning"
+    assert "GERMAN BROKER MORNING WATCH" in candidate["message_text"]
+    assert "Trade Republic/Scalable quote and spread" in candidate["message_text"]
 
 
 def test_shadow_eu_scan_emits_downside_from_price_deterioration(monkeypatch):

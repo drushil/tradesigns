@@ -2,7 +2,8 @@ name: Trading Agent - Advisory US
 
 # US-only advisory cycle. Scans ADVISORY_UNIVERSE["US"] only (19 tickers).
 # Triggered every 2 min by cron-job.org during NYSE/NASDAQ session hours.
-# Runs independently from advisory-eu.yml so EU and US cycles never compete.
+# Runs independently from advisory-us-morning.yml so regular and morning US
+# cycles never compete.
 #
 # Trigger setup (cron-job.org):
 #   Schedule: every 2 min, 13:00-20:00 UTC, Mon-Fri
@@ -106,6 +107,7 @@ jobs:
           ADVISORY_US_MIN_MINUTES_AFTER_OPEN: "${{ vars.ADVISORY_US_MIN_MINUTES_AFTER_OPEN }}"
           ADVISORY_US_EARLY_MIN_ROWS: "${{ vars.ADVISORY_US_EARLY_MIN_ROWS }}"
           ADVISORY_TR_MORNING_START_MINUTES: "${{ vars.ADVISORY_TR_MORNING_START_MINUTES }}"
+          ADVISORY_US_MORNING_START_MINUTES: "${{ vars.ADVISORY_US_MORNING_START_MINUTES }}"
           ADVISORY_LATE_CHASE_ATR_MULT: "${{ vars.ADVISORY_LATE_CHASE_ATR_MULT }}"
           ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
           ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"

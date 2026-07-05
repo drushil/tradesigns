@@ -29,6 +29,7 @@ from frontend.ui_theme import (
 STAGE_TONE = {
     "trade": "positive",
     "watch": "warning",
+    "us_eu_morning": "warning",
     "ignition": "info",
     "downside": "negative",
 }
@@ -36,6 +37,7 @@ STAGE_TONE = {
 STAGE_LABEL = {
     "trade": "TRADE",
     "watch": "WATCH",
+    "us_eu_morning": "MORNING WATCH",
     "ignition": "IGNITION",
     "downside": "DOWNSIDE",
 }
@@ -315,7 +317,7 @@ def render():
     from backend import advisory
 
     cfg = advisory.load_config()
-    rows = get_recent_advisory_signals(days=1, limit=400) or []
+    rows = get_recent_advisory_signals(days=1, mode="live", limit=400) or []
 
     today_local = datetime.now(_local_tz()).date()
     today_rows = [
@@ -331,8 +333,8 @@ def render():
 
     page_header(
         "Advisory Desk",
-        "Trade Republic-friendly cards with EUR levels, ignition pings, "
-        "tier escalation and on-demand ticker checks.",
+        "Trade Republic/Scalable-friendly cards with EUR levels, ignition "
+        "pings and tier escalation, covering US primaries plus a native EU watchlist.",
         eyebrow="Discord Alerts",
         pills=[
             status_pill(f"{len(today_rows)} alerts today", "info"),
@@ -402,7 +404,7 @@ def render():
             index=_select_index(
                 symbol_options,
                 st.session_state.get("advisory_check_symbol", "AMZN"),
-                "AMZN" if market == "US" else "SAP.DE",
+                "AMZN" if market == "US" else "ASML.AS",
             ),
             format_func=lambda s: symbol_labels.get(s, s),
             key=f"advisory_check_symbol_select_{market}",
@@ -438,10 +440,8 @@ def render():
         st.info("No advisory signals stored yet. Once the cron runs, alerts will appear here.")
         return
 
-    stage_options = ["all", "trade", "watch", "ignition"]
-    mode_options  = ["all", "live", "shadow"]
-
-    c_stage, c_grade, c_mode, c_symbol = st.columns([2, 2, 2, 3])
+    stage_options = ["all", "trade", "watch", "us_eu_morning", "ignition"]
+    c_stage, c_grade, c_symbol = st.columns([2, 2, 3])
     with c_stage:
         stage_filter = st.radio("Stage", stage_options, index=0, horizontal=True,
                                 key="advisory_stage_filter")
@@ -449,9 +449,6 @@ def render():
         grade_filter = st.multiselect("Grade", ["A+", "A", "B", "C"],
                                       default=[], placeholder="All grades",
                                       key="advisory_grade_filter")
-    with c_mode:
-        mode_filter = st.radio("Mode", mode_options, index=0, horizontal=True,
-                               key="advisory_mode_filter")
     with c_symbol:
         feed_symbols, feed_labels = _symbol_catalog(advisory, rows=rows)
         symbol_filter = st.selectbox(
@@ -467,8 +464,6 @@ def render():
         if stage_filter != "all" and _stage_of(r) != stage_filter:
             continue
         if grade_filter and str(r.get("grade") or "").upper() not in grade_filter:
-            continue
-        if mode_filter != "all" and str(r.get("mode")) != mode_filter:
             continue
         if symbol_filter != "__all__" and symbol_filter != str(r.get("data_symbol", "")).upper():
             continue
@@ -906,10 +901,8 @@ def _render_live_scan_table(fetch_fn):
             st.rerun()
     st.caption("Current per-ticker advisory state from the latest scan data, including non-alert gate reasons.")
 
-    c_market, c_limit, _ = st.columns([2, 2, 6])
-    with c_market:
-        market = st.radio("Scan market", ["US", "EU", "all"], index=0, horizontal=True,
-                          key="advisory_scan_market")
+    market = "US"
+    c_limit, _ = st.columns([2, 8])
     with c_limit:
         limit = st.selectbox("Rows", [25, 50, 100], index=1, key="advisory_scan_limit")
 
@@ -992,28 +985,17 @@ def _render_scoreboard(fetch_fn):
         "Green = profitable on average at that horizon."
     )
 
-    c_days, c_mode, c_market, _ = st.columns([2, 2, 2, 4])
+    c_days, _ = st.columns([2, 8])
     with c_days:
         days_back = st.radio(
             "Window", [7, 14, 30, 90], index=1,
             horizontal=True, key="sb_days_back",
             format_func=lambda x: f"{x}d",
         )
-    with c_mode:
-        sb_mode = st.radio(
-            "Mode", ["all", "live", "shadow"], index=0,
-            horizontal=True, key="sb_mode",
-        )
-    with c_market:
-        sb_market = st.radio(
-            "Market", ["all", "US", "EU"], index=0,
-            horizontal=True, key="sb_market",
-        )
-
     sb_rows = fetch_fn(
         days_back=days_back,
-        mode=None if sb_mode == "all" else sb_mode,
-        market=None if sb_market == "all" else sb_market,
+        mode="live",
+        market="US",
     )
 
     if not sb_rows:
