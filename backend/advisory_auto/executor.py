@@ -65,6 +65,7 @@ from database.client import (
     get_advisory_auto_daily_pnl,
     get_advisory_auto_open_count,
     get_advisory_auto_pending_count,
+    get_latest_advisory_signals_for_symbols,
     insert_trade,
     mark_advisory_auto_decision,
     log_event,
@@ -581,7 +582,7 @@ def _near_t1_protection_qty(signal: dict, order) -> Optional[float]:
     return None
 
 
-def _paper_signal_weakened(signal: dict) -> Optional[str]:
+def _paper_signal_weakened(signal: dict, latest_signal: Optional[dict]) -> Optional[str]:
     """True if the latest live signal for this symbol has weakened since the
     resting paper limit was placed (flipped bearish / grade collapsed). Reuses
     the simulator's validated _signal_weakened so paper cancels a pending
@@ -589,17 +590,45 @@ def _paper_signal_weakened(signal: dict) -> Optional[str]:
     if not PAPER_WEAK_CANCEL_ENABLED:
         return None
     try:
-        from backend.advisory_auto.simulator import _signal_weakened
-        return _signal_weakened({
+        from backend.advisory_auto.simulator import _signal_weakened_from_latest
+        return _signal_weakened_from_latest({
             "data_symbol": signal.get("data_symbol"),
             "market": signal.get("market") or "US",
             "advisory_signal_id": signal.get("id"),
             "grade": signal.get("grade"),
-        })
+        }, latest_signal)
     except Exception as e:
         log_event("WARN", "advisory_auto_weak_check_failed",
                   {"ticker": signal.get("data_symbol"), "error": str(e)[:160]})
         return None
+
+
+def _flatten_partial_fill(signal: dict, order, positions: dict,
+                          filled_price: float, reason: str) -> Optional[dict]:
+    """Flatten only broker-confirmed partial exposure; never risk opening a short."""
+    sym = str(signal.get("data_symbol") or "").upper()
+    held = positions.get(sym) or {}
+    qty = abs(float(held.get("qty") or 0))
+    if qty <= 0:
+        log_event("WARN", "advisory_auto_partial_fill_waiting_for_position", {
+            "advisory_signal_id": signal.get("id"),
+            "ticker": sym,
+            "order_status": _status_text(getattr(order, "status", "")),
+            "order_filled_qty": _float_attr(order, "filled_qty", 0.0),
+            "reason": reason,
+        })
+        return None
+    partial_signal = {
+        **signal,
+        "auto_fill_price": filled_price,
+        "auto_fill_qty": qty,
+    }
+    return _flatten_and_record(
+        partial_signal,
+        qty,
+        reason,
+        entry_at=getattr(order, "filled_at", None) or getattr(order, "updated_at", None),
+    )
 
 
 def _reconcile_active_orders(positions: Optional[dict] = None,
@@ -610,6 +639,10 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
     Also guards filled positions: flattens them at EOD (intraday discipline) and
     flattens any that have gone naked (no live protective order — orphan guard)."""
     active = get_active_advisory_auto_signals(limit=100)
+    latest_signals = get_latest_advisory_signals_for_symbols(
+        [signal.get("data_symbol") for signal in active
+         if str(signal.get("auto_status")) == "submitted"]
+    )
     if positions is None:
         positions = _get_alpaca_positions()
     if open_orders is None:
@@ -617,7 +650,8 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
     now_utc = now_utc or datetime.now(timezone.utc)
     result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0,
               "near_t1_protected": 0, "flattened_eod": 0, "flattened_orphan": 0,
-              "pending_cancelled": 0, "pending_cancelled_weak": 0, "errors": 0}
+              "pending_cancelled": 0, "pending_cancelled_weak": 0,
+              "partial_fill_deferred": 0, "errors": 0}
     for signal in active:
         result["checked"] += 1
         signal_id = signal.get("id")
@@ -625,6 +659,25 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
         try:
             order = _get_auto_order(order_id)
             status = _status_text(getattr(order, "status", ""))
+            filled_price = _float_attr(order, "filled_avg_price", 0.0)
+            filled_qty = _float_attr(order, "filled_qty", 0.0)
+            has_partial_fill = status != "filled" and filled_qty > 0
+            sym = str(signal.get("data_symbol") or "").upper()
+
+            if has_partial_fill and status in _TERMINAL_CANCEL_STATUSES:
+                trade = _flatten_partial_fill(
+                    signal,
+                    order,
+                    positions,
+                    filled_price,
+                    f"partial_fill_{status}",
+                )
+                if trade is None:
+                    result["partial_fill_deferred"] += 1
+                else:
+                    result["closed"] += 1
+                continue
+
             if status in _TERMINAL_CANCEL_STATUSES:
                 mapped = "cancelled" if status in {"canceled", "cancelled", "expired"} else "rejected"
                 update_advisory_auto_fields(signal_id, {
@@ -639,10 +692,25 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
             # or if price has already broken below the stop, so a gap-down can't
             # fill us straight into a loss.
             if status != "filled" and str(signal.get("auto_status")) == "submitted":
-                sym = str(signal.get("data_symbol") or "").upper()
-
-                weak_reason = _paper_signal_weakened(signal)
+                latest = latest_signals.get((
+                    str(signal.get("market") or "US").upper(),
+                    str(signal.get("data_symbol") or "").upper(),
+                ))
+                weak_reason = _paper_signal_weakened(signal, latest)
                 if weak_reason:
+                    if has_partial_fill:
+                        trade = _flatten_partial_fill(
+                            signal,
+                            order,
+                            positions,
+                            filled_price,
+                            f"partial_fill_signal_weak:{weak_reason}",
+                        )
+                        if trade is None:
+                            result["partial_fill_deferred"] += 1
+                        else:
+                            result["closed"] += 1
+                        continue
                     _cancel_symbol_orders(sym)
                     update_advisory_auto_fields(signal_id, {
                         "auto_status": "cancelled",
@@ -659,6 +727,19 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                 if stop_n > 0:
                     cur = _get_current_price(sym)
                     if cur is not None and cur <= stop_n:
+                        if has_partial_fill:
+                            trade = _flatten_partial_fill(
+                                signal,
+                                order,
+                                positions,
+                                filled_price,
+                                "partial_fill_below_stop",
+                            )
+                            if trade is None:
+                                result["partial_fill_deferred"] += 1
+                            else:
+                                result["closed"] += 1
+                            continue
                         _cancel_symbol_orders(sym)
                         update_advisory_auto_fields(signal_id, {
                             "auto_status": "cancelled",
@@ -671,8 +752,6 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                         })
                         continue
 
-            filled_price = _float_attr(order, "filled_avg_price", 0.0)
-            filled_qty = _float_attr(order, "filled_qty", 0.0)
             if status == "filled" and str(signal.get("auto_status")) == "submitted":
                 update_advisory_auto_fields(signal_id, {
                     "auto_status": "filled",

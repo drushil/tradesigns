@@ -79,6 +79,9 @@ SIM_MOMENTUM_FILL_LATENCY_MIN = int(os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_FILL_L
 SIM_MOMENTUM_FILL_WINDOW_MIN = int(os.getenv("ADVISORY_AUTO_SIM_MOMENTUM_FILL_WINDOW_MIN", "20"))
 
 _GRADE_RANK = {"A+": 4, "A": 3, "B": 2, "C": 1}
+_WEAKENING_SIGNAL_STAGES = {
+    "ignition", "watch", "trade", "tr_morning_watch", "us_eu_morning", "downside",
+}
 
 
 def _grade_rank(grade) -> int:
@@ -549,7 +552,16 @@ def _signal_weakened(sim: dict) -> Optional[str]:
     latest = get_latest_advisory_signal_for_symbol(
         str(sim.get("data_symbol") or ""), market=str(sim.get("market") or "US")
     )
+    return _signal_weakened_from_latest(sim, latest)
+
+
+def _signal_weakened_from_latest(sim: dict, latest: Optional[dict]) -> Optional[str]:
+    """Compare one pending setup with a pre-fetched relevant intraday signal."""
     if not latest:
+        return None
+    signal_json = latest.get("signal_json") or {}
+    stage = str(signal_json.get("alert_stage") or "").strip().lower()
+    if stage not in _WEAKENING_SIGNAL_STAGES:
         return None
     # Don't react to the very signal that spawned this sim.
     if int(latest.get("id") or 0) == int(sim.get("advisory_signal_id") or 0):

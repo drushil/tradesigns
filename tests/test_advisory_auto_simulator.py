@@ -9,6 +9,32 @@ import backend.advisory_auto.simulator as sim
 _HAS_REAL_PANDAS = hasattr(pd, "DatetimeIndex")
 
 
+def test_weakening_ignores_long_hold_signal():
+    pending = {"advisory_signal_id": 100, "grade": "A"}
+    latest = {
+        "id": 101,
+        "side": "BUY",
+        "grade": "C",
+        "composite_score": 0.1,
+        "signal_json": {"alert_stage": "long_hold"},
+    }
+
+    assert sim._signal_weakened_from_latest(pending, latest) is None
+
+
+def test_weakening_accepts_intraday_downside_signal():
+    pending = {"advisory_signal_id": 100, "grade": "A"}
+    latest = {
+        "id": 101,
+        "side": "SELL",
+        "grade": "B",
+        "composite_score": -0.2,
+        "signal_json": {"alert_stage": "downside"},
+    }
+
+    assert sim._signal_weakened_from_latest(pending, latest) == "latest_signal_sell"
+
+
 def test_create_momentum_continuation_sim_for_high_grade_watch(monkeypatch):
     signal = {
         "id": 123,

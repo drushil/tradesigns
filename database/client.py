@@ -1577,22 +1577,61 @@ def get_advisory_auto_chase_skips(market: str = "US",
         return []
 
 
-def get_latest_advisory_signal_for_symbol(data_symbol: str,
-                                          market: str = "US",
-                                          mode: str = "live") -> dict:
-    """Most recent advisory_signal for a symbol — used to detect whether a
-    still-pending watch-limit sim's conviction has since weakened."""
+_INTRADAY_WEAKENING_STAGES = {
+    "ignition",
+    "watch",
+    "trade",
+    "tr_morning_watch",
+    "us_eu_morning",
+    "downside",
+}
+
+
+def get_latest_advisory_signals_for_symbols(data_symbols: list[str],
+                                             mode: str = "live") -> dict:
+    """Return the latest relevant intraday signal keyed by ``(market, symbol)``.
+
+    A single narrow query supports all pending advisory-auto orders in a cycle.
+    Long-hold and other informational rows are intentionally excluded because
+    their grades are not comparable with intraday entry conviction.
+    """
+    symbols = sorted({str(symbol or "").strip() for symbol in data_symbols if str(symbol or "").strip()})
+    if not symbols:
+        return {}
     try:
         db = get_client()
         result = (db.table("advisory_signals")
-                  .select("id,created_at,side,grade,composite_score,signal_json")
-                  .eq("data_symbol", data_symbol)
-                  .eq("market", market.upper())
+                  .select("id,created_at,market,data_symbol,side,grade,composite_score,signal_json")
+                  .in_("data_symbol", symbols)
                   .eq("mode", mode)
                   .order("created_at", desc=True)
-                  .limit(1)
+                  .limit(min(500, max(100, len(symbols) * 25)))
                   .execute())
-        return (result.data or [{}])[0]
+        latest: dict = {}
+        for row in result.data or []:
+            signal_json = row.get("signal_json") or {}
+            stage = str(signal_json.get("alert_stage") or "").strip().lower()
+            if stage not in _INTRADAY_WEAKENING_STAGES:
+                continue
+            key = (
+                str(row.get("market") or "").upper(),
+                str(row.get("data_symbol") or "").upper(),
+            )
+            if key not in latest:
+                latest[key] = row
+        return latest
+    except Exception as e:
+        print(f"[ADVISORY_LATEST_SIGNALS_FAILED] {str(e)[:200]}")
+        return {}
+
+
+def get_latest_advisory_signal_for_symbol(data_symbol: str,
+                                          market: str = "US",
+                                          mode: str = "live") -> dict:
+    """Latest relevant intraday signal for one symbol."""
+    try:
+        latest = get_latest_advisory_signals_for_symbols([data_symbol], mode=mode)
+        return latest.get((market.upper(), str(data_symbol or "").upper()), {})
     except Exception as e:
         print(f"[ADVISORY_LATEST_SIGNAL_FAILED] {str(e)[:200]}")
         return {}
