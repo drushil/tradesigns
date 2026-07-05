@@ -146,113 +146,18 @@ ADVISORY_UNIVERSE = {
          "category": "etf_benchmark", "priority": "low", "trade_target": False, "benchmark_only": True,
          "broker_tags": []},
     ],
+    # Trimmed to native EU names actually tradeable on Trade Republic/Scalable
+    # that the user wants live coverage on. The wider Xetra-duplicate/mirror
+    # list was retired — those were redundant reads on US primaries already
+    # scanned directly in the US universe above.
     "EU": [
-        # --- Native EU names (shadow mode; promoted to live when EU advisory goes live) ---
         {"data_symbol": "ASML.AS", "broker_display_name": "ASML", "exchange": "Euronext Amsterdam", "currency": "EUR",
          "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "ASM.AS", "broker_display_name": "ASM International", "exchange": "Euronext Amsterdam", "currency": "EUR",
-         "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"],
-         "liquidity_note": "use limit orders — spread widens at open and close"},
-        {"data_symbol": "BESI.AS", "broker_display_name": "BE Semiconductor", "exchange": "Euronext Amsterdam", "currency": "EUR",
-         "category": "semis_equipment", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"],
-         "liquidity_note": "high beta — spread can be wide; use limit orders"},
-        {"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR",
-         "category": "enterprise_software", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "SIE.DE", "broker_display_name": "Siemens", "exchange": "Xetra", "currency": "EUR",
-         "category": "industrial_tech", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "RHM.DE", "broker_display_name": "Rheinmetall", "exchange": "Xetra", "currency": "EUR",
-         "category": "defence", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "ENR.DE", "broker_display_name": "Siemens Energy", "exchange": "Xetra", "currency": "EUR",
-         "category": "energy_transition", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "AIR.PA", "broker_display_name": "Airbus", "exchange": "Euronext Paris", "currency": "EUR",
-         "category": "aerospace_defence", "priority": "high", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "MC.PA", "broker_display_name": "LVMH", "exchange": "Euronext Paris", "currency": "EUR",
-         "category": "luxury", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "ALV.DE", "broker_display_name": "Allianz", "exchange": "Xetra", "currency": "EUR",
-         "category": "insurance", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "IFX.DE", "broker_display_name": "Infineon", "exchange": "Xetra", "currency": "EUR",
-         "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "DBK.DE", "broker_display_name": "Deutsche Bank", "exchange": "Xetra", "currency": "EUR",
-         "category": "financials", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"]},
         {"data_symbol": "HY9H.F", "broker_display_name": "SK Hynix", "exchange": "Frankfurt", "currency": "EUR",
          "category": "semis", "priority": "medium", "trade_target": True, "benchmark_only": False,
          "broker_tags": ["trade_republic_de", "scalable_de"],
          "liquidity_note": "German listing of a Korea-primary stock (KRX is the liquid venue, Asian hours) — trades thin during EU hours on a market-maker price; use limit orders"},
-        # --- EU mirrors: early-read on US momentum via TR morning watch (L&S) + eu_open (Xetra) ---
-        {"data_symbol": "NVD.DE", "broker_display_name": "NVIDIA (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NVDA",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "AMD.DE", "broker_display_name": "AMD (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMD",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "APC.DE", "broker_display_name": "Apple (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AAPL",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "MSF.DE", "broker_display_name": "Microsoft (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MSFT",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "AMZ.DE", "broker_display_name": "Amazon (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AMZN",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "TL0.DE", "broker_display_name": "Tesla (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "TSLA",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "FB2A.DE", "broker_display_name": "Meta (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "META",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "ABEA.DE", "broker_display_name": "Alphabet A (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "GOOGL",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "PTX.DE", "broker_display_name": "Palantir (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "PLTR",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "NFC.DE", "broker_display_name": "Netflix (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "NFLX",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"]},
-        {"data_symbol": "1YD.DE", "broker_display_name": "Broadcom (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "AVGO",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"],
-         "liquidity_note": "morning mirror can be thin — use limit orders only"},
-        {"data_symbol": "MTE.DE", "broker_display_name": "Micron Technology (Xetra)", "exchange": "Xetra", "currency": "EUR",
-         "origin_market": "US", "listing_type": "eu_us_mirror", "primary_symbol": "MU",
-         "mirror_only_windows": ["tr_morning_watch", "eu_open"],
-         "category": "eu_mirror", "priority": "medium", "trade_target": True, "benchmark_only": False,
-         "broker_tags": ["trade_republic_de", "scalable_de"],
-         "liquidity_note": "morning mirror can be thin — use limit orders only"},
     ],
 }
 
@@ -283,7 +188,7 @@ EU_MIRROR_WEIGHTS = {
 LIVE_SIGNAL_STATUSES = {"sent", "entered", "hit_stop", "hit_target"}
 OPEN_LIVE_STATUSES = {"sent", "entered"}
 WATCH_SIGNAL_STATUSES = {"skipped"}
-WATCH_ALERT_STAGES = {"watch", "ignition", "tr_morning_watch"}
+WATCH_ALERT_STAGES = {"watch", "ignition", "tr_morning_watch", "us_eu_morning"}
 INFO_ALERT_STAGES = {"downside"}
 LONG_HOLD_ALERT_STAGES = {"long_hold"}
 ALERT_STAGE_RANK = {
@@ -292,6 +197,7 @@ ALERT_STAGE_RANK = {
     "long_hold": 0,
     "watch": 1,
     "tr_morning_watch": 1,
+    "us_eu_morning": 1,
     "trade": 2,
 }
 
@@ -471,8 +377,8 @@ def _resolve_daily_fx_rate(pair: str = "EURUSD") -> dict:
 
 def load_config() -> AdvisoryConfig:
     markets = _csv_set("ADVISORY_MARKETS", "US,EU")
-    live = _csv_set("ADVISORY_LIVE_MARKETS", "US")
-    shadow = _csv_set("ADVISORY_SHADOW_MARKETS", "EU")
+    live = _csv_set("ADVISORY_LIVE_MARKETS", "US,EU")
+    shadow = _csv_set("ADVISORY_SHADOW_MARKETS", "")
     shadow_discord = _csv_set("ADVISORY_SHADOW_DISCORD_MARKETS", "OFF")
     fx = _resolve_daily_fx_rate()
     return AdvisoryConfig(
@@ -540,6 +446,9 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
             return "eu_catalyst_only"
         return None
     if market == "US":
+        morning_start = _env_int("ADVISORY_US_MORNING_START_MINUTES", 10 * 60)
+        if morning_start <= minutes < 15 * 60:
+            return "us_eu_morning"
         if 15 * 60 <= minutes < 15 * 60 + 30:
             return "us_premarket"
         if 15 * 60 + 30 <= minutes < 17 * 60:
@@ -556,6 +465,9 @@ def _window_name(market: str, now_cet: Optional[datetime] = None) -> Optional[st
 
 def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
     tr_start_minutes = _env_int("ADVISORY_TR_MORNING_START_MINUTES", 7 * 60)
+    us_morning_start_minutes = _env_int(
+        "ADVISORY_US_MORNING_START_MINUTES", 10 * 60
+    )
     starts = {
         "EU": {
             "tr_morning_watch": (tr_start_minutes // 60, tr_start_minutes % 60),
@@ -563,6 +475,10 @@ def _session_start_cet(market: str, window: str, now_cet: datetime) -> datetime:
             "eu_catalyst_only": (14, 0),
         },
         "US": {
+            "us_eu_morning": (
+                us_morning_start_minutes // 60,
+                us_morning_start_minutes % 60,
+            ),
             "us_premarket":   (15, 0),
             "us_open":        (15, 30),
             "us_midday":      (17, 0),
@@ -2019,11 +1935,10 @@ def _format_trade_card(signal: dict) -> str:
     if is_downside:
         prefix = "DOWNSIDE RISK"
     elif (
-        signal_json.get("broker_profile") == "trade_republic"
-        and signal_json.get("window") == "tr_morning_watch"
+        signal_json.get("window") in {"tr_morning_watch", "us_eu_morning"}
         and signal.get("alert_stage") in WATCH_ALERT_STAGES
     ):
-        prefix = "TRADE REPUBLIC MORNING WATCH"
+        prefix = "GERMAN BROKER MORNING WATCH"
     elif is_holding and is_runner:
         prefix = "RUNNER HOLD"
     elif is_holding:
@@ -2148,6 +2063,11 @@ def _format_trade_card(signal: dict) -> str:
     size_line = f"{size_label}: {notional} | Risk: ~€{signal['risk_eur']:.0f}"
     if signal.get("listing_type") == "eu_us_mirror":
         notes.append(f"Pre-Nasdaq mirror of {signal.get('primary_symbol')}: early EU read; execute on primary listing.")
+    if signal_json.get("window") == "us_eu_morning":
+        notes.append(
+            "Broker check: Trade Republic/Scalable quote and spread can differ from "
+            "the US premarket reference; use a limit order."
+        )
     if signal.get("liquidity_note"):
         notes.append(f"Liquidity: {signal['liquidity_note']}")
     if (
@@ -2929,8 +2849,8 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     breakout = _breakout_quality(side, composite, signals, getattr(regime_state, "market_regime", ""))
     orb_active = bool((signals.get("orb") or {}).get("meta", {}).get("active"))
     grade = _grade(composite, breakout, orb_active)
-    # TR morning watch: cap alert_stage to "watch" — no trade alerts during pre-Xetra window
-    _tr_morning_watch = (window == "tr_morning_watch")
+    # Morning broker windows are watch-only: no automated or trade-stage advice.
+    _morning_watch = window in {"tr_morning_watch", "us_eu_morning"}
     grade_cap = None
     if is_live_market:
         grade, grade_cap = _intraday_grade_cap(grade, side, signals, window)
@@ -2990,8 +2910,8 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     if window == "us_premarket":
         alert_stage = "ignition" if ignition_ready and not watch_ready else "watch"
     # TR morning watch: always cap to "watch" — pre-Xetra, informational only
-    if _tr_morning_watch:
-        alert_stage = "watch"
+    if _morning_watch:
+        alert_stage = "us_eu_morning" if window == "us_eu_morning" else "watch"
     plan = _entry_plan(
         quality["last_price"], side, atr_data.get("atr_pct"),
         item.get("currency", "EUR"), cfg, grade,

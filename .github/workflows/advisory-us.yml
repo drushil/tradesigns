@@ -2,7 +2,8 @@ name: Trading Agent - Advisory US
 
 # US-only advisory cycle. Scans ADVISORY_UNIVERSE["US"] only (19 tickers).
 # Triggered every 2 min by cron-job.org during NYSE/NASDAQ session hours.
-# Runs independently from advisory-eu.yml so EU and US cycles never compete.
+# Runs independently from advisory-us-morning.yml so regular and morning US
+# cycles never compete.
 #
 # Trigger setup (cron-job.org):
 #   Schedule: every 2 min, 13:00-20:00 UTC, Mon-Fri
@@ -106,6 +107,7 @@ jobs:
           ADVISORY_US_MIN_MINUTES_AFTER_OPEN: "${{ vars.ADVISORY_US_MIN_MINUTES_AFTER_OPEN }}"
           ADVISORY_US_EARLY_MIN_ROWS: "${{ vars.ADVISORY_US_EARLY_MIN_ROWS }}"
           ADVISORY_TR_MORNING_START_MINUTES: "${{ vars.ADVISORY_TR_MORNING_START_MINUTES }}"
+          ADVISORY_US_MORNING_START_MINUTES: "${{ vars.ADVISORY_US_MORNING_START_MINUTES }}"
           ADVISORY_LATE_CHASE_ATR_MULT: "${{ vars.ADVISORY_LATE_CHASE_ATR_MULT }}"
           ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
           ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"
@@ -134,6 +136,7 @@ jobs:
           ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED: "${{ vars.ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED }}"
           ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC: "${{ vars.ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC }}"
           ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R: "${{ vars.ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R }}"
+          ADVISORY_AUTO_PAPER_WEAK_CANCEL_ENABLED: "${{ vars.ADVISORY_AUTO_PAPER_WEAK_CANCEL_ENABLED }}"
           ADVISORY_EU_EARLY_GATE_COMPOSITE: "${{ vars.ADVISORY_EU_EARLY_GATE_COMPOSITE }}"
           ADVISORY_EU_EARLY_GATE_LOOKBACK_MINUTES: "${{ vars.ADVISORY_EU_EARLY_GATE_LOOKBACK_MINUTES }}"
           ADVISORY_EU_EARLY_MIN_ROWS: "${{ vars.ADVISORY_EU_EARLY_MIN_ROWS }}"

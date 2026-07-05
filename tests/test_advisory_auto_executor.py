@@ -293,6 +293,105 @@ def test_paper_levels_below_min_size_when_one_share_exceeds_cap(monkeypatch):
     assert levels["error"] == "below_min_size"
 
 
+def test_reconcile_cancels_pending_on_weak_signal(monkeypatch):
+    signal = _signal(id=501, data_symbol="CRWD", auto_status="submitted",
+                     auto_order_id="ord-w", market="US")
+    updates, cancels = [], []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order",
+                        lambda oid: SimpleNamespace(status="accepted", legs=[]))
+    monkeypatch.setattr(executor, "PAPER_WEAK_CANCEL_ENABLED", True)
+    monkeypatch.setattr(executor, "_paper_signal_weakened", lambda sig: "latest_signal_sell")
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: cancels.append(t))
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, f: updates.append((sid, f)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    res = executor._reconcile_active_orders({}, set(),
+                                            now_utc=datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc))
+
+    assert res["pending_cancelled_weak"] == 1
+    assert res["pending_cancelled"] == 0
+    assert cancels == ["CRWD"]
+    assert updates[0][1]["auto_exit_reason"] == "cancelled_signal_weak:latest_signal_sell"
+
+
+def test_reconcile_weak_signal_checked_before_stop_breach(monkeypatch):
+    # Both conditions true: weak-signal must win (mirrors the simulator's own
+    # precedence, where _signal_weakened is checked before the fill/stop scan).
+    signal = _signal(id=502, data_symbol="MU", auto_status="submitted",
+                     auto_order_id="ord-w2", stop_price=400.0)
+    updates, cancels = [], []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order",
+                        lambda oid: SimpleNamespace(status="accepted", legs=[]))
+    monkeypatch.setattr(executor, "PAPER_WEAK_CANCEL_ENABLED", True)
+    monkeypatch.setattr(executor, "_paper_signal_weakened", lambda sig: "grade_drop:A->C")
+    monkeypatch.setattr(executor, "_get_current_price", lambda t: 398.0)  # also below stop
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: cancels.append(t))
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, f: updates.append((sid, f)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    res = executor._reconcile_active_orders({}, set(),
+                                            now_utc=datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc))
+
+    assert res["pending_cancelled_weak"] == 1
+    assert res["pending_cancelled"] == 0
+    assert updates[0][1]["auto_exit_reason"] == "cancelled_signal_weak:grade_drop:A->C"
+
+
+def test_reconcile_no_weak_signal_falls_through_to_stop_check(monkeypatch):
+    signal = _signal(id=503, data_symbol="ARM", auto_status="submitted",
+                     auto_order_id="ord-p2", stop_price=400.0)
+    updates, cancels = [], []
+    monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
+    monkeypatch.setattr(executor, "_get_auto_order",
+                        lambda oid: SimpleNamespace(status="accepted", legs=[]))
+    monkeypatch.setattr(executor, "PAPER_WEAK_CANCEL_ENABLED", True)
+    monkeypatch.setattr(executor, "_paper_signal_weakened", lambda sig: None)
+    monkeypatch.setattr(executor, "_get_current_price", lambda t: 398.0)  # below stop
+    monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: cancels.append(t))
+    monkeypatch.setattr(executor, "update_advisory_auto_fields",
+                        lambda sid, f: updates.append((sid, f)) or {})
+    monkeypatch.setattr(executor, "log_event", lambda *a, **k: None)
+
+    res = executor._reconcile_active_orders({}, set(),
+                                            now_utc=datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc))
+
+    assert res["pending_cancelled_weak"] == 0
+    assert res["pending_cancelled"] == 1
+    assert updates[0][1]["auto_exit_reason"] == "cancelled_below_stop"
+
+
+def test_paper_signal_weakened_disabled_short_circuits(monkeypatch):
+    monkeypatch.setattr(executor, "PAPER_WEAK_CANCEL_ENABLED", False)
+    signal = _signal(data_symbol="NVDA")
+    assert executor._paper_signal_weakened(signal) is None
+
+
+def test_paper_signal_weakened_delegates_to_simulator(monkeypatch):
+    import backend.advisory_auto.simulator as sim
+    signal = _signal(id=600, data_symbol="NVDA", grade="A", market="US")
+    monkeypatch.setattr(executor, "PAPER_WEAK_CANCEL_ENABLED", True)
+
+    captured = {}
+
+    def _fake_weakened(sim_dict):
+        captured.update(sim_dict)
+        return "latest_composite_bearish"
+
+    monkeypatch.setattr(sim, "_signal_weakened", _fake_weakened)
+
+    reason = executor._paper_signal_weakened(signal)
+
+    assert reason == "latest_composite_bearish"
+    assert captured == {
+        "data_symbol": "NVDA", "market": "US",
+        "advisory_signal_id": 600, "grade": "A",
+    }
+
+
 def test_reconcile_cancels_pending_below_stop(monkeypatch):
     signal = _signal(id=500, data_symbol="ARM", auto_status="submitted",
                      auto_order_id="ord-p", stop_price=400.0)
@@ -300,6 +399,7 @@ def test_reconcile_cancels_pending_below_stop(monkeypatch):
     monkeypatch.setattr(executor, "get_active_advisory_auto_signals", lambda limit=100: [signal])
     monkeypatch.setattr(executor, "_get_auto_order",
                         lambda oid: SimpleNamespace(status="accepted", legs=[]))
+    monkeypatch.setattr(executor, "_paper_signal_weakened", lambda sig: None)
     monkeypatch.setattr(executor, "_get_current_price", lambda t: 398.0)  # below stop 400
     monkeypatch.setattr(executor, "_cancel_symbol_orders", lambda t: cancels.append(t))
     monkeypatch.setattr(executor, "update_advisory_auto_fields",

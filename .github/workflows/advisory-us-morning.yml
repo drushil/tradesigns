@@ -1,14 +1,15 @@
-name: Trading Agent - Advisory Fast (Full Scan / Manual)
+name: Trading Agent - Advisory US Morning
 
-# Full-market advisory cycle — scans both EU + US universes.
-# Use for manual dispatch and debugging only.
-# Production cron-job.org triggers use advisory-us-morning.yml and advisory-us.yml
-# which run market-isolated cycles (~60-80s each) in separate concurrency groups.
+# German-broker morning lane. Scans liquid US primary symbols using US
+# premarket data, while displaying actionable levels in EUR.
+# Runs independently from advisory-us.yml so morning and regular US cycles
+# never compete.
 #
-# Manual dispatch:
-#   https://api.github.com/repos/drushil/tradesigns/actions/workflows/advisory-fast.yml/dispatches
-#   Body: {"ref": "main", "inputs": {"mode": ""}}
-#   OR via GitHub UI → Actions → Trading Agent - Advisory Fast (Full Scan / Manual) → Run workflow
+# Trigger setup (cron-job.org):
+#   Schedule: every 2 min, 08:00-12:58 UTC, Mon-Fri during CEST
+#             (09:00-13:58 UTC during CET)
+#   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
+#   Body: {"event_type": "advisory-us-morning-cycle"}
 
 on:
   workflow_dispatch:
@@ -18,17 +19,18 @@ on:
         required: false
         default: ''
   repository_dispatch:
-    types: [advisory-fast-cycle]
+    # Backward-compatible until the existing cron request body is updated.
+    types: [advisory-us-morning-cycle, advisory-eu-cycle]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
-  group: advisory-fast-cycle
+  group: advisory-us-morning-cycle
   cancel-in-progress: false
 
 jobs:
-  run-advisory-fast:
+  run-advisory-us-morning:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -61,7 +63,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-agent.txt
 
-      - name: Run advisory cycle
+      - name: Run US morning advisory cycle
         env:
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
           ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
@@ -75,10 +77,10 @@ jobs:
           FRED_API_KEY:         "${{ secrets.FRED_API_KEY }}"
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
-          ADVISORY_MARKETS:     "${{ vars.ADVISORY_MARKETS }}"
-          ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
-          ADVISORY_SHADOW_MARKETS: "${{ vars.ADVISORY_SHADOW_MARKETS }}"
-          ADVISORY_SHADOW_DISCORD_MARKETS: "${{ vars.ADVISORY_SHADOW_DISCORD_MARKETS }}"
+          ADVISORY_MARKETS:     "US"
+          ADVISORY_LIVE_MARKETS: "US"
+          ADVISORY_SHADOW_MARKETS: ""
+          ADVISORY_SHADOW_DISCORD_MARKETS: ""
           ADVISORY_CAPITAL_EUR: "${{ vars.ADVISORY_CAPITAL_EUR }}"
           ADVISORY_MAX_LIVE_ALERTS_PER_DAY: "${{ vars.ADVISORY_MAX_LIVE_ALERTS_PER_DAY }}"
           ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY: "${{ vars.ADVISORY_MAX_SHADOW_SIGNALS_PER_DAY }}"
@@ -110,7 +112,7 @@ jobs:
           ADVISORY_US_MORNING_START_MINUTES: "${{ vars.ADVISORY_US_MORNING_START_MINUTES }}"
           ADVISORY_LATE_CHASE_ATR_MULT: "${{ vars.ADVISORY_LATE_CHASE_ATR_MULT }}"
           ADVISORY_ALLOW_SHORT: "${{ vars.ADVISORY_ALLOW_SHORT }}"
-          ADVISORY_AUTO_RUN:    "${{ vars.ADVISORY_AUTO_RUN }}"
+          ADVISORY_AUTO_RUN:    "false"
           ADVISORY_AUTO_ALPACA_API_KEY:    "${{ secrets.ADVISORY_AUTO_ALPACA_API_KEY }}"
           ADVISORY_AUTO_ALPACA_SECRET_KEY: "${{ secrets.ADVISORY_AUTO_ALPACA_SECRET_KEY }}"
           ADVISORY_AUTO_CAPITAL_EUR:       "${{ vars.ADVISORY_AUTO_CAPITAL_EUR }}"
@@ -173,15 +175,21 @@ jobs:
               print("Advisory mode disabled — ADVISORY_MODE not set. Skipping.")
           else:
               now = datetime.now(timezone.utc)
-              in_window = (
-                  now.weekday() < 5 and
-                  7 <= now.hour <= 20  # EU open 07:00 → US close 20:00 UTC
-              )
+              from zoneinfo import ZoneInfo
+              berlin_now = now.astimezone(ZoneInfo("Europe/Berlin"))
+              minutes = berlin_now.hour * 60 + berlin_now.minute
+              in_window = now.weekday() < 5 and 10 * 60 <= minutes < 15 * 60
               dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
               if in_window or dispatch_mode == "advisory":
-                  print(f"Running advisory cycle at {now.strftime('%H:%M UTC')}...")
+                  print(
+                      "Running US morning advisory cycle at "
+                      f"{berlin_now.strftime('%H:%M Berlin')}..."
+                  )
                   result = run_advisory_cycle()
                   print(f"Advisory result: {result}")
               else:
-                  print(f"Outside advisory window ({now.strftime('%H:%M UTC')}) — skipping.")
+                  print(
+                      "Outside US morning window "
+                      f"({berlin_now.strftime('%H:%M Berlin')}) — skipping."
+                  )
           PY
