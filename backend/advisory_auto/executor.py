@@ -44,6 +44,10 @@ Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED  Mirror the simulator's near-T1 profit-protection exit on paper (default: true)
   ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC  Fraction of fill→T1 run-up that arms protection (default: 0.8)
   ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R Risk-multiple give-back from peak that triggers the exit (default: 0.5)
+  ADVISORY_AUTO_PAPER_WEAK_CANCEL_ENABLED  Cancel a still-resting (unfilled) paper limit order when the
+                                    latest live signal for that symbol has weakened — mirrors the
+                                    simulator's cancelled_signal_weak so a paper limit can't fill into
+                                    a setup the sim would already have abandoned (default: true)
   ADVISORY_AUTO_ALPACA_API_KEY      Separate paper account key (falls back to ALPACA_API_KEY)
   ADVISORY_AUTO_ALPACA_SECRET_KEY   Separate paper account secret (falls back to ALPACA_SECRET_KEY)
 """
@@ -114,6 +118,15 @@ ORPHAN_MIN_AGE_MIN   = float(os.getenv("ADVISORY_AUTO_ORPHAN_MIN_AGE_MIN") or "3
 PAPER_NEAR_T1_ENABLED   = os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ENABLED", "true").strip().lower() != "false"
 PAPER_NEAR_T1_ARM_FRAC  = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_ARM_FRAC") or "0.8")
 PAPER_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_PAPER_NEAR_T1_RETRACE_R") or "0.5")
+
+# Pre-fill weak-signal cancel: the simulator cancels a still-pending resting
+# limit the moment the latest live signal for that symbol weakens (flips
+# bearish / grade collapses), rather than let it fill into a souring setup.
+# Paper previously had no equivalent, so a resting paper limit could fill
+# after the sim had already walked away from the same signal. Reuses the
+# simulator's validated _signal_weakened so paper and sim apply identical
+# pre-fill discipline and stay directly comparable.
+PAPER_WEAK_CANCEL_ENABLED = os.getenv("ADVISORY_AUTO_PAPER_WEAK_CANCEL_ENABLED", "true").strip().lower() != "false"
 
 # Watch-entry band logic. A watch limit rests at the entry band and fills on a
 # pullback, so a snapshot price slightly above the band is fine — only reject when
@@ -568,6 +581,27 @@ def _near_t1_protection_qty(signal: dict, order) -> Optional[float]:
     return None
 
 
+def _paper_signal_weakened(signal: dict) -> Optional[str]:
+    """True if the latest live signal for this symbol has weakened since the
+    resting paper limit was placed (flipped bearish / grade collapsed). Reuses
+    the simulator's validated _signal_weakened so paper cancels a pending
+    order on exactly the same evidence the sim would."""
+    if not PAPER_WEAK_CANCEL_ENABLED:
+        return None
+    try:
+        from backend.advisory_auto.simulator import _signal_weakened
+        return _signal_weakened({
+            "data_symbol": signal.get("data_symbol"),
+            "market": signal.get("market") or "US",
+            "advisory_signal_id": signal.get("id"),
+            "grade": signal.get("grade"),
+        })
+    except Exception as e:
+        log_event("WARN", "advisory_auto_weak_check_failed",
+                  {"ticker": signal.get("data_symbol"), "error": str(e)[:160]})
+        return None
+
+
 def _reconcile_active_orders(positions: Optional[dict] = None,
                              open_orders: Optional[set] = None,
                              now_utc: Optional[datetime] = None) -> dict:
@@ -583,7 +617,7 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
     now_utc = now_utc or datetime.now(timezone.utc)
     result = {"checked": 0, "filled": 0, "closed": 0, "terminal": 0,
               "near_t1_protected": 0, "flattened_eod": 0, "flattened_orphan": 0,
-              "pending_cancelled": 0, "errors": 0}
+              "pending_cancelled": 0, "pending_cancelled_weak": 0, "errors": 0}
     for signal in active:
         result["checked"] += 1
         signal_id = signal.get("id")
@@ -600,10 +634,27 @@ def _reconcile_active_orders(positions: Optional[dict] = None,
                 result["terminal"] += 1
                 continue
 
-            # Pending (unfilled) resting limit: cancel if price has already broken
-            # below the stop, so a gap-down can't fill us straight into a loss.
+            # Pending (unfilled) resting limit: cancel if the underlying signal has
+            # weakened (checked first, mirroring the simulator's own precedence),
+            # or if price has already broken below the stop, so a gap-down can't
+            # fill us straight into a loss.
             if status != "filled" and str(signal.get("auto_status")) == "submitted":
                 sym = str(signal.get("data_symbol") or "").upper()
+
+                weak_reason = _paper_signal_weakened(signal)
+                if weak_reason:
+                    _cancel_symbol_orders(sym)
+                    update_advisory_auto_fields(signal_id, {
+                        "auto_status": "cancelled",
+                        "auto_exit_reason": f"cancelled_signal_weak:{weak_reason}",
+                    })
+                    result["pending_cancelled_weak"] += 1
+                    log_event("INFO", "advisory_auto_pending_cancelled_weak", {
+                        "advisory_signal_id": signal_id, "ticker": sym,
+                        "reason": weak_reason,
+                    })
+                    continue
+
                 stop_n = float(signal.get("stop_price") or 0)
                 if stop_n > 0:
                     cur = _get_current_price(sym)
