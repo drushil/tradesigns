@@ -35,6 +35,7 @@ import pandas as pd
 from database.client import (
     get_advisory_auto_chase_skips,
     get_advisory_auto_sim_signal_ids,
+    get_advisory_signal_history_for_symbols,
     get_active_advisory_auto_simulations,
     get_eligible_advisory_signals_for_simulation,
     get_latest_advisory_signal_for_symbol,
@@ -65,6 +66,11 @@ SIM_CANCEL_GRADE_DROP = int(os.getenv("ADVISORY_AUTO_SIM_CANCEL_GRADE_DROP", "2"
 # then book if price retraces this many R (R = fill - stop) back from the peak.
 SIM_NEAR_T1_ARM_FRAC = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_ARM_FRAC", "0.8"))
 SIM_NEAR_T1_RETRACE_R = float(os.getenv("ADVISORY_AUTO_SIM_NEAR_T1_RETRACE_R", "0.5"))
+
+# Match the paper executor's intraday flatten timestamp. We still wait until
+# after the official close to fetch stable bars, but the simulated exit itself
+# is marked at 16:00 ET minus this buffer.
+SIM_EOD_FLAT_BUFFER_MIN = float(os.getenv("ADVISORY_AUTO_EOD_FLAT_BUFFER_MIN") or "10")
 
 # Momentum-continuation simulator: for strong watch signals, measure the
 # alternative "buy the signal price" policy next to the normal pullback limit.
@@ -97,7 +103,9 @@ def _grade_rank(grade) -> int:
 #        old-vs-new comparisons.
 #   v4 — chase_tracker rejects synthetic entries already at/through T1. Earlier
 #        versions could label those rows hit_target with a negative R-multiple.
-SIM_VERSION = 4
+#   v5 — pending fill/cancel races are resolved chronologically, and EOD exits
+#        use the same pre-close buffer as paper execution.
+SIM_VERSION = 5
 
 _STATUS_TO_CLOSURE_REASON = {
     "hit_target_1":          "target_1",
@@ -577,13 +585,32 @@ def _signal_weakened_from_latest(sim: dict, latest: Optional[dict]) -> Optional[
     return None
 
 
+def _first_weakening_event(sim: dict, signal_history: list,
+                           window_end: datetime) -> tuple[Optional[str], Optional[datetime], Optional[int]]:
+    """Return the first causal weakening event within the pending lifetime."""
+    simulated_at = _parse_dt(sim.get("simulated_at"))
+    for latest in sorted(signal_history or [], key=lambda row: str(row.get("created_at") or "")):
+        created_at = _parse_dt(latest.get("created_at"))
+        if created_at is None:
+            continue
+        if simulated_at and created_at < simulated_at:
+            continue
+        if created_at > window_end:
+            continue
+        reason = _signal_weakened_from_latest(sim, latest)
+        if reason:
+            return reason, created_at, int(latest.get("id") or 0) or None
+    return None, None, None
+
+
 def _yfinance_symbol(market_symbol: str) -> str:
     """Pass-through for US tickers. (EU tickers carry suffixes that yfinance
     already understands.) Kept as a hook for future market-specific quirks."""
     return market_symbol
 
 
-def _process_pending(sim: dict, now_utc: datetime) -> dict:
+def _process_pending(sim: dict, now_utc: datetime,
+                     signal_history: Optional[list] = None) -> dict:
     """Check whether a pending sim filled. Returns the update payload.
 
     The bar window is [last_check, min(now, valid_until)]. We check for a fill
@@ -592,23 +619,76 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
     born after valid_until still gets a proper fill check on historical bars
     before being closed.
     """
-    # Pull the resting limit if conviction has died since it was placed. We'd
-    # have cancelled the order rather than let it fill into a souring setup, so
-    # this terminates before the fill check (slight imprecision on exact
-    # fill-vs-cancel timing is acceptable for measurement).
-    weak_reason = _signal_weakened(sim)
-    if weak_reason:
-        return {
-            "status": "cancelled_signal_weak",
-            "last_checked_at": _iso_z(now_utc),
-            "closed_at": _iso_z(now_utc),
-            "notes": {**(sim.get("notes") or {}), "cancel_reason": weak_reason},
-        }
     valid_until = _parse_dt(sim.get("valid_until"))
     simulated_at = _parse_dt(sim.get("simulated_at")) or now_utc
     last_check = _parse_dt(sim.get("last_checked_at")) or simulated_at
     window_end = min(now_utc, valid_until) if valid_until else now_utc
     bars = _fetch_1m_bars(_yfinance_symbol(sim["data_symbol"]), last_check, window_end)
+    fill_update = None
+    fill_at = None
+    if bars is not None and not bars.empty:
+        entry_min = float(sim["entry_min"])
+        entry_max = float(sim["entry_max"])
+        for ts, bar in bars.iterrows():
+            bar_low = float(bar.get("Low") or 0)
+            bar_high = float(bar.get("High") or 0)
+            if bar_low <= 0 or bar_high <= 0:
+                continue
+            if bar_low <= entry_max and bar_high >= entry_min:
+                if bar_low <= entry_min:
+                    fill = entry_min
+                elif bar_high >= entry_max:
+                    fill = entry_max
+                else:
+                    fill = (max(bar_low, entry_min) + min(bar_high, entry_max)) / 2.0
+                fill_at = ts.to_pydatetime()
+                fill_update = {
+                    "status": "filled",
+                    "fill_at": _iso_z(fill_at),
+                    "fill_price": round(fill, 4),
+                    "mfe_pct": 0.0,
+                    "mae_pct": 0.0,
+                    "last_price": round(float(bar.get("Close") or fill), 4),
+                    "last_checked_at": _iso_z(now_utc),
+                    "entry_policy_quality": _entry_policy_quality(fill, entry_min, entry_max),
+                }
+                break
+
+    if signal_history is None:
+        latest = get_latest_advisory_signal_for_symbol(
+            str(sim.get("data_symbol") or ""), market=str(sim.get("market") or "US")
+        )
+        signal_history = [latest] if latest else []
+    weak_reason, weak_at, weak_signal_id = _first_weakening_event(
+        sim, signal_history, window_end
+    )
+
+    # A fill bar is stamped at the start of its minute. If weakening occurred
+    # later in that same minute, treat the fill as first; this is conservative
+    # and mirrors the real paper order already being live during the minute.
+    if weak_reason and (fill_at is None or (weak_at and weak_at < fill_at)):
+        return {
+            "status": "cancelled_signal_weak",
+            "last_checked_at": _iso_z(now_utc),
+            "closed_at": _iso_z(weak_at or now_utc),
+            "notes": {
+                **(sim.get("notes") or {}),
+                "cancel_reason": weak_reason,
+                "cancel_signal_id": weak_signal_id,
+                "cancel_signal_at": _iso_z(weak_at) if weak_at else None,
+                "causal_event": "weakening_before_fill",
+            },
+        }
+    if fill_update:
+        if weak_at:
+            fill_update["notes"] = {
+                **(sim.get("notes") or {}),
+                "causal_event": "fill_before_weakening",
+                "later_weak_signal_id": weak_signal_id,
+                "later_weak_signal_at": _iso_z(weak_at),
+            }
+        return fill_update
+
     if bars is None or bars.empty:
         if valid_until and now_utc > valid_until:
             return {
@@ -618,36 +698,6 @@ def _process_pending(sim: dict, now_utc: datetime) -> dict:
                 "notes": {**(sim.get("notes") or {}), "expired_reason": "no_bars_in_window"},
             }
         return {"last_checked_at": _iso_z(now_utc)}
-    entry_min = float(sim["entry_min"])
-    entry_max = float(sim["entry_max"])
-    for ts, bar in bars.iterrows():
-        bar_low = float(bar.get("Low") or 0)
-        bar_high = float(bar.get("High") or 0)
-        if bar_low <= 0 or bar_high <= 0:
-            continue
-        # Limit fill heuristic: the bar's range must intersect the entry band.
-        if bar_low <= entry_max and bar_high >= entry_min:
-            # Fill price = the closer band edge to the bar's open / midpoint.
-            # For BUY limit, we'd want to buy as cheaply as possible — fill at
-            # entry_min if the bar dipped that far, else at the midpoint of
-            # the intersection.
-            if bar_low <= entry_min:
-                fill = entry_min
-            elif bar_high >= entry_max:
-                fill = entry_max
-            else:
-                fill = (max(bar_low, entry_min) + min(bar_high, entry_max)) / 2.0
-            epq = _entry_policy_quality(fill, entry_min, entry_max)
-            return {
-                "status": "filled",
-                "fill_at": _iso_z(ts.to_pydatetime()),
-                "fill_price": round(fill, 4),
-                "mfe_pct": 0.0,
-                "mae_pct": 0.0,
-                "last_price": round(float(bar.get("Close") or fill), 4),
-                "last_checked_at": _iso_z(now_utc),
-                "entry_policy_quality": epq,
-            }
     # No fill in this window. Mark expired if we're past valid_until.
     if valid_until and now_utc > valid_until:
         return {
@@ -791,6 +841,19 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
     created_chase = _create_chase_tracker_sims(market=market)
     created_momentum = _create_momentum_continuation_sims(market=market)
     active = get_active_advisory_auto_simulations(limit=200)
+    pending = [row for row in active if str(row.get("status") or "") == "pending"]
+    histories = {}
+    if pending:
+        created_from = min(
+            (_parse_dt(row.get("simulated_at")) or now_utc) for row in pending
+        )
+        histories = get_advisory_signal_history_for_symbols(
+            [row.get("data_symbol") for row in pending],
+            created_from=_iso_z(created_from),
+            created_to=_iso_z(now_utc),
+            mode="live",
+            limit=1000,
+        )
     transitions: dict = {
         "pending_checked": 0,
         "filled_new": 0,
@@ -808,7 +871,11 @@ def run_advisory_auto_simulation_cycle(market: str = "US") -> dict:
             status = str(sim.get("status") or "")
             if status == "pending":
                 transitions["pending_checked"] += 1
-                update = _process_pending(sim, now_utc)
+                history_key = (
+                    str(sim.get("market") or market).upper(),
+                    str(sim.get("data_symbol") or "").upper(),
+                )
+                update = _process_pending(sim, now_utc, histories.get(history_key, []))
                 new_status = update.get("status") or status
                 if new_status == "filled":
                     transitions["filled_new"] += 1
@@ -904,16 +971,16 @@ def _us_session_close_utc(fill_at: datetime) -> Optional[datetime]:
                                tzinfo=timezone.utc)
 
 
-def _eod_close_price_fallback(sim: dict, session_close: datetime) -> Optional[float]:
-    """Return the last available close at/before session close.
+def _eod_close_price_fallback(sim: dict, simulated_exit: datetime) -> Optional[float]:
+    """Return the last available close at/before the paper-aligned exit time.
 
     _process_filled can legitimately return no last_price if yfinance's final
     slice is empty. For EOD accounting, use the latest available 1m close from
     the filled session before falling back to any previously stored last_price.
     """
     fill_at = _parse_dt(sim.get("fill_at"))
-    start = fill_at or (session_close - timedelta(hours=7))
-    bars = _fetch_1m_bars(str(sim.get("data_symbol") or ""), start, session_close)
+    start = fill_at or (simulated_exit - timedelta(hours=7))
+    bars = _fetch_1m_bars(str(sim.get("data_symbol") or ""), start, simulated_exit)
     if bars is not None and not bars.empty and "Close" in bars:
         close = _float_or_none(bars["Close"].iloc[-1])
         if close:
@@ -928,8 +995,8 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
       1. Determine the session-close UTC for its date (16:00 ET).
       2. If now_utc is at least 30 minutes past that close (buffer for late
          yfinance data), the session is definitively over.
-      3. Re-run _process_filled up to session_close to catch any terminal
-         hits in the closing bars. If none fired, status becomes closed_eod.
+      3. Re-run _process_filled up to the same pre-close flatten timestamp used
+         by paper. If no terminal fired by then, status becomes closed_eod.
 
     closed_eod means: survived to session end with no stop or target hit.
     It is excluded from sim_target_win_pct (inconclusive) but counted in
@@ -948,15 +1015,16 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
         session_close = _us_session_close_utc(fill_at)
         if session_close is None:
             continue
+        simulated_exit = session_close - timedelta(minutes=SIM_EOD_FLAT_BUFFER_MIN)
         # Require a 30-min buffer after session close before marking EOD —
         # yfinance occasionally delivers late bars.
         if now_utc < session_close + timedelta(minutes=30):
             continue
         try:
-            # Run _process_filled capped at session_close. Any unfired
-            # terminals in the closing bars are caught here; otherwise we
+            # Run _process_filled capped at the paper-aligned exit. Any unfired
+            # terminals before that timestamp are caught here; otherwise we
             # get back an mfe/mae update with no status change.
-            update = _process_filled(sim, session_close)
+            update = _process_filled(sim, simulated_exit)
             new_status = update.get("status")
             fill_price = float(sim.get("fill_price") or 0)
             stop_price = float(sim.get("stop_price") or 0)
@@ -987,7 +1055,7 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
                 # No terminal — mark as closed_eod with win/loss status and new cols.
                 eod_price = float(update.get("last_price") or 0)
                 if eod_price <= 0:
-                    fallback_price = _eod_close_price_fallback(sim, session_close)
+                    fallback_price = _eod_close_price_fallback(sim, simulated_exit)
                     eod_price = float(fallback_price or 0)
                     if eod_price > 0:
                         update["last_price"] = round(eod_price, 4)
@@ -999,7 +1067,7 @@ def _eod_close_fills(market: str = "US", now_utc: Optional[datetime] = None) -> 
                 eod_update = {
                     **update,
                     "status": eod_status,
-                    "closed_at": _iso_z(session_close),
+                    "closed_at": _iso_z(simulated_exit),
                     "closure_reason": "eod_close",
                     "eod_marked_at": _iso_z(now_utc),
                     "eod_close_price": round(eod_price, 4) if eod_price else None,

@@ -17,7 +17,7 @@ LEVEL_COLORS = {
 
 def render():
     try:
-        from database.client import get_logs
+        from database.client import get_advisory_cycle_health, get_logs
     except Exception as e:
         st.error(f"DB error: {e}")
         return
@@ -28,6 +28,20 @@ def render():
         eyebrow="Observability",
         pills=[status_pill("Live log stream", "info")],
     )
+
+    cycle_health = get_advisory_cycle_health(stale_after_minutes=12)
+    cycle_detail = cycle_health.get("detail") or {}
+    age = cycle_health.get("age_minutes")
+    age_text = f"{age:.1f} min ago" if isinstance(age, (int, float)) else "—"
+    health_cols = st.columns(4)
+    health_cols[0].metric("Cycle health", str(cycle_health.get("label") or "unknown"))
+    health_cols[1].metric("Last completed", age_text)
+    health_cols[2].metric("Symbols scanned", int(cycle_detail.get("scanned") or 0))
+    health_cols[3].metric("Paper orders", int(cycle_detail.get("auto_submitted") or 0))
+    if cycle_health.get("status") == "stale":
+        st.error("No completed advisory heartbeat within 12 minutes. Check the US advisory workflow.")
+    elif cycle_health.get("status") == "unknown":
+        st.warning("No advisory heartbeat has been recorded yet. It will appear after the next deployed cycle.")
 
     col_f1, col_f2, col_ref = st.columns([2, 2, 1])
     with col_f1:

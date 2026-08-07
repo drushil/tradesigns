@@ -3032,16 +3032,30 @@ def run_advisory_cycle() -> dict:
     # per the timing telemetry). Each fn catches its own errors and returns []
     # so .result() never raises here. The 90d trades window is unchanged — it
     # feeds EV, so narrowing it would alter signal behaviour, not just latency.
+    # Column lists below are exactly the fields this cycle's helper functions
+    # read off these rows (watch/downside/runner/long-hold repeat checks,
+    # EV lookback) — see _watch_repeat_blocked, _recent_downside_signal,
+    # _prior_runner_signal, _long_hold_repeat_blocked, compute_expected_value.
+    # Narrowing here is what actually moves the egress needle since the
+    # signal_json/composite_score/etc. that ARE used stay in the select.
+    _SIGNAL_PROLOGUE_COLUMNS = (
+        "id,market,data_symbol,side,status,created_at,grade,composite_score,"
+        "breakout_quality,manual_pnl_eur,message_text,signal_json"
+    )
+    _TRADE_PROLOGUE_COLUMNS = "regime,composite_score,net_pnl_pct,side"
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=4) as _pool:
-        _f_live = _pool.submit(get_recent_advisory_signals, days=1, mode="live")
-        _f_shadow = _pool.submit(get_recent_advisory_signals, days=1, mode="shadow")
-        _f_trades = _pool.submit(get_recent_trades, days=90)
+        _f_live = _pool.submit(get_recent_advisory_signals, days=1, mode="live",
+                                columns=_SIGNAL_PROLOGUE_COLUMNS)
+        _f_shadow = _pool.submit(get_recent_advisory_signals, days=1, mode="shadow",
+                                  columns=_SIGNAL_PROLOGUE_COLUMNS)
+        _f_trades = _pool.submit(get_recent_trades, days=90, columns=_TRADE_PROLOGUE_COLUMNS)
         _f_long_hold = _pool.submit(
             get_recent_advisory_signals,
             days=max(1, int(cfg.long_hold_cooldown_days or 1)),
             mode="live",
             limit=500,
+            columns=_SIGNAL_PROLOGUE_COLUMNS,
         )
         recent_live = _f_live.result()
         recent_shadow = _f_shadow.result()
@@ -3822,6 +3836,10 @@ def run_advisory_cycle() -> dict:
         "long_hold_sent_today": long_hold_sent_today,
     })
 
+    auto_enabled = False
+    auto_result = {}
+    simulator_result = {}
+
     # Trigger advisory-auto evaluation immediately so US live signals are scored
     # while still inside the freshness window (default 6 min). Without this,
     # auto-cycle would only fire from run_signal_cycle on a separate cadence
@@ -3832,11 +3850,13 @@ def run_advisory_cycle() -> dict:
         and "US" in cfg.markets
         and os.getenv("ADVISORY_AUTO_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
     ):
+        auto_enabled = True
         _auto_started = time.perf_counter()
         try:
             from backend.advisory_auto.executor import run_advisory_auto_cycle
-            run_advisory_auto_cycle()
+            auto_result = run_advisory_auto_cycle() or {}
         except Exception as exc:
+            auto_result = {"errors": [{"error": str(exc)[:160]}]}
             log_event("WARN", "advisory_auto_cycle_failed", {"error": str(exc)[:160]})
         advisory_auto_s = round(time.perf_counter() - _auto_started, 3)
 
@@ -3849,8 +3869,9 @@ def run_advisory_cycle() -> dict:
         _sim_started = time.perf_counter()
         try:
             from backend.advisory_auto.simulator import run_advisory_auto_simulation_cycle
-            run_advisory_auto_simulation_cycle(market="US")
+            simulator_result = run_advisory_auto_simulation_cycle(market="US") or {}
         except Exception as exc:
+            simulator_result = {"errors": 1, "error": str(exc)[:160]}
             log_event("WARN", "advisory_auto_sim_cycle_failed", {"error": str(exc)[:160]})
         simulator_s = round(time.perf_counter() - _sim_started, 3)
 
@@ -3858,6 +3879,36 @@ def run_advisory_cycle() -> dict:
             "advisory_auto_s": advisory_auto_s,
             "simulator_s": simulator_s,
         })
+
+    auto_eligible = len(auto_result.get("eligible") or [])
+    auto_submitted = len(auto_result.get("submitted") or [])
+    auto_errors = len(auto_result.get("errors") or [])
+    if not auto_enabled:
+        outcome = "auto_execution_disabled"
+    elif auto_errors:
+        outcome = "auto_execution_error"
+    elif auto_submitted:
+        outcome = "orders_submitted"
+    elif auto_eligible:
+        outcome = "eligible_but_not_submitted"
+    else:
+        outcome = "healthy_no_eligible_setup"
+
+    log_event("INFO", "advisory_trading_cycle_heartbeat", {
+        "cycle_id": cycle_id,
+        "outcome": outcome,
+        "markets": sorted(cfg.markets),
+        "scanned": sum(int(row.get("scanned") or 0) for row in market_timings),
+        "signals_emitted": len(emitted),
+        "signals_blocked": len(blocked),
+        "auto_enabled": auto_enabled,
+        "auto_eligible": auto_eligible,
+        "auto_submitted": auto_submitted,
+        "auto_errors": auto_errors,
+        "sim_active": int(simulator_result.get("active") or 0),
+        "sim_errors": int(simulator_result.get("errors") or 0),
+        "total_elapsed_s": round(time.perf_counter() - cycle_started, 3),
+    })
 
     return {
         "emitted": len(emitted),

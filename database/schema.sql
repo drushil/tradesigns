@@ -59,6 +59,10 @@ create table if not exists trades (
     signals_json    jsonb,
     order_id        text,
     client_order_id text,
+    entry_policy    text,
+    intended_entry_price numeric(14,4),
+    entry_slippage_pct numeric(8,4),
+    planned_risk_eur numeric(10,2),
     close_order_id  text,
     close_error     text,
     commission_eur  numeric(8,4) default 0,
@@ -91,7 +95,11 @@ alter table if exists trades
     add column if not exists hold_score_latest numeric(6,4),
     add column if not exists hold_score_min numeric(6,4),
     add column if not exists hold_score_max numeric(6,4),
-    add column if not exists trim_done boolean default false;
+    add column if not exists trim_done boolean default false,
+    add column if not exists entry_policy text,
+    add column if not exists intended_entry_price numeric(14,4),
+    add column if not exists entry_slippage_pct numeric(8,4),
+    add column if not exists planned_risk_eur numeric(10,2);
 
 alter table if exists trades
     add column if not exists client_order_id text;
@@ -961,6 +969,10 @@ create index if not exists idx_trades_advisory_signal_id
     on trades (advisory_signal_id)
     where advisory_signal_id is not null;
 
+create index if not exists idx_trades_advisory_pairing
+    on trades (advisory_signal_id, entry_policy, created_at desc)
+    where trade_source = 'advisory_auto' and advisory_signal_id is not null;
+
 update trades set trade_source = 'advisory_manual'
 where order_id like 'MANUAL-%'
   and coalesce(trade_source, '') <> 'advisory_manual';
@@ -978,7 +990,12 @@ alter table advisory_signals
     add column if not exists auto_fill_price numeric(12,4),
     add column if not exists auto_fill_qty   numeric(14,6),
     add column if not exists auto_pnl_eur    numeric(10,2),
-    add column if not exists auto_exit_reason text;
+    add column if not exists auto_exit_reason text,
+    add column if not exists auto_client_order_id text,
+    add column if not exists auto_limit_price numeric(14,4),
+    add column if not exists auto_planned_risk_eur numeric(10,2),
+    add column if not exists auto_entry_policy text,
+    add column if not exists auto_submitted_qty numeric(14,6);
 
 create index if not exists idx_advisory_signals_auto_status
     on advisory_signals (auto_status, created_at desc)

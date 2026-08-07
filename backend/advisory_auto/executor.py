@@ -21,6 +21,9 @@ Alpaca paper account at the same time.
 
 Environment variables (all optional — safe defaults provided):
   ADVISORY_AUTO_CAPITAL_EUR         Paper capital budget (default: 20000)
+  ADVISORY_AUTO_MAX_POSITION_PCT    Max notional per position as % of capital (default: 5)
+  ADVISORY_AUTO_RISK_PER_TRADE_PCT  Max stop-loss exposure as % of capital (default: 0.25)
+  ADVISORY_AUTO_DAILY_LOSS_R        Daily loss cap in planned-risk units (default: 3)
   ADVISORY_AUTO_MAX_POSITIONS       Max concurrent open positions (default: 3)
   ADVISORY_AUTO_DAILY_LOSS_EUR      Stop trading if day P&L < this (default: -500)
   ADVISORY_AUTO_ALLOC_A_PLUS        % of suggested_size_eur for A+ (default: 100)
@@ -75,8 +78,15 @@ from database.client import (
 # ── Config ────────────────────────────────────────────────────────────────────
 
 CAPITAL_EUR        = float(os.getenv("ADVISORY_AUTO_CAPITAL_EUR", "20000"))
+MAX_POSITION_PCT   = float(os.getenv("ADVISORY_AUTO_MAX_POSITION_PCT") or "5") / 100
+RISK_PER_TRADE_PCT = float(os.getenv("ADVISORY_AUTO_RISK_PER_TRADE_PCT") or "0.25") / 100
+DAILY_LOSS_R       = float(os.getenv("ADVISORY_AUTO_DAILY_LOSS_R") or "3")
 MAX_POSITIONS      = int(os.getenv("ADVISORY_AUTO_MAX_POSITIONS", "3"))
-DAILY_LOSS_LIMIT   = float(os.getenv("ADVISORY_AUTO_DAILY_LOSS_EUR", "-500"))
+_CONFIGURED_DAILY_LOSS = float(os.getenv("ADVISORY_AUTO_DAILY_LOSS_EUR") or "-500")
+_RISK_BASED_DAILY_LOSS = -(CAPITAL_EUR * RISK_PER_TRADE_PCT * DAILY_LOSS_R)
+# Honor an explicitly tighter euro limit, but never let a stale loose setting
+# (the historic -EUR500 default) defeat the risk-based circuit breaker.
+DAILY_LOSS_LIMIT   = max(_CONFIGURED_DAILY_LOSS, _RISK_BASED_DAILY_LOSS)
 ALLOC_A_PLUS       = float(os.getenv("ADVISORY_AUTO_ALLOC_A_PLUS", "100")) / 100   # 1.00
 ALLOC_A            = float(os.getenv("ADVISORY_AUTO_ALLOC_A",      "70"))  / 100   # 0.70
 ALLOC_B            = float(os.getenv("ADVISORY_AUTO_ALLOC_B",      "50"))  / 100   # 0.50
@@ -276,13 +286,22 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
         }
 
     fx = _eurusd_rate(signal)
-    size_usd = float(size_eur) * fx
-    qty = math.floor(size_usd / limit_price)
+    max_position_eur = CAPITAL_EUR * MAX_POSITION_PCT
+    requested_eur = min(float(size_eur), max_position_eur)
+    size_usd = requested_eur * fx
+    notional_qty = math.floor(size_usd / limit_price)
+
+    risk_per_share_usd = abs(limit_price - stop_price)
+    risk_budget_eur = CAPITAL_EUR * RISK_PER_TRADE_PCT
+    risk_budget_usd = risk_budget_eur * fx
+    risk_qty = math.floor(risk_budget_usd / risk_per_share_usd) if risk_per_share_usd > 0 else 0
+    qty = min(notional_qty, risk_qty)
     if qty <= 0:
-        # Bracket orders require whole shares. Take 1 share if it still fits under
-        # the per-position cap; otherwise this is a sizing skip, not an error.
-        cap_usd = CAPITAL_EUR * 0.15 * fx
-        if limit_price <= cap_usd:
+        # Bracket orders require whole shares. Take one only when it fits under
+        # both the notional ceiling and the planned stop-risk ceiling.
+        cap_usd = max_position_eur * fx
+        one_share_risk_usd = risk_per_share_usd
+        if limit_price <= cap_usd and one_share_risk_usd <= risk_budget_usd:
             qty = 1
         else:
             return {
@@ -291,7 +310,11 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
                 "size_usd": round(size_usd, 2),
                 "one_share_usd": round(limit_price, 2),
                 "cap_usd": round(cap_usd, 2),
+                "one_share_risk_eur": round(one_share_risk_usd / fx, 2),
+                "risk_budget_eur": round(risk_budget_eur, 2),
             }
+
+    planned_risk_eur = qty * risk_per_share_usd / fx
 
     return {
         "ticker": ticker,
@@ -301,6 +324,9 @@ def _paper_order_levels(signal: dict, current_price: float, size_eur: float) -> 
         "stop_price": _round_price(stop_price),
         "size_usd": round(qty * limit_price, 2),
         "size_eur": round((qty * limit_price) / _eurusd_rate(signal), 2),
+        "planned_risk_eur": round(planned_risk_eur, 2),
+        "risk_budget_eur": round(risk_budget_eur, 2),
+        "max_position_eur": round(max_position_eur, 2),
     }
 
 
@@ -392,6 +418,18 @@ def _build_trade_payload(signal: dict, *, entry_price: float, qty: float,
     pnl_usd = (exit_price - entry_price) * qty
     pnl_eur = pnl_usd / _eurusd_rate(signal)
     pnl_pct = round(((exit_price - entry_price) / entry_price) * 100, 4) if entry_price else None
+    stop_price = float(signal.get("stop_price") or 0)
+    risk_per_share = abs(entry_price - stop_price)
+    r_multiple = round((exit_price - entry_price) / risk_per_share, 4) if risk_per_share > 0 else None
+    intended_entry = float(signal.get("auto_limit_price") or 0) or None
+    entry_slippage_pct = (
+        round(((entry_price / intended_entry) - 1) * 100, 4)
+        if intended_entry and entry_price else None
+    )
+    alert_stage = _alert_stage(signal)
+    entry_policy = signal.get("auto_entry_policy") or (
+        "trade_now" if alert_stage == "trade" else "watch_pullback"
+    )
     return {
         "ticker": signal.get("data_symbol"),
         "side": "BUY",
@@ -407,15 +445,26 @@ def _build_trade_payload(signal: dict, *, entry_price: float, qty: float,
         "pnl_pct": pnl_pct,
         "net_pnl_pct": pnl_pct,
         "pnl_eur": round(pnl_eur, 2),
+        "r_multiple": r_multiple,
         "entry_time": str(entry_time) if entry_time else None,
         "exit_time": datetime.utcnow().isoformat() + "Z",
         "exit_reason": exit_reason,
         "composite_score": signal.get("composite_score"),
+        "setup_grade": signal.get("grade"),
         "signals_json": signal.get("signal_json") or {},
         "trade_source": "advisory_auto",
         "advisory_signal_id": signal.get("id"),
         "horizon": "intraday",
         "strategy_family": "advisory_auto",
+        "entry_policy": entry_policy,
+        "intended_entry_price": intended_entry,
+        "entry_slippage_pct": entry_slippage_pct,
+        "planned_risk_eur": signal.get("auto_planned_risk_eur"),
+        "intended_size_eur": signal.get("suggested_size_eur"),
+        "executed_size_eur": round((entry_price * qty) / _eurusd_rate(signal), 2),
+        "executed_size_usd": round(entry_price * qty, 2),
+        "submitted_qty": signal.get("auto_submitted_qty"),
+        "client_order_id": signal.get("auto_client_order_id"),
     }
 
 
@@ -867,7 +916,8 @@ def _get_current_price(ticker: str) -> Optional[float]:
 def _compute_size_eur(signal: dict) -> float:
     """
     Position size = suggested_size_eur × grade_allocation_multiplier.
-    Hard cap at 15% of CAPITAL_EUR regardless of grade.
+    Hard cap at MAX_POSITION_PCT of CAPITAL_EUR regardless of grade. Final
+    quantity is also constrained by the stop-risk budget in _paper_order_levels.
     Falls back to risk-based estimate when suggested_size_eur is absent.
     """
     grade = str(signal.get("grade") or "B")
@@ -881,7 +931,7 @@ def _compute_size_eur(signal: dict) -> float:
         risk_eur = float(signal.get("risk_eur") or CAPITAL_EUR * 0.004)
         size_eur = (risk_eur / 0.02) * alloc  # assume ~2% stop as denominator
 
-    return round(min(size_eur, CAPITAL_EUR * 0.15), 2)
+    return round(min(size_eur, CAPITAL_EUR * MAX_POSITION_PCT), 2)
 
 
 def _sort_key(signal: dict) -> tuple:
@@ -1090,6 +1140,13 @@ def run_advisory_auto_cycle() -> dict:
                         submitted_this_cycle += 1
                         mark_advisory_auto_decision(signal_id, "submitted", extra_fields={
                             "auto_order_id": order["order_id"],
+                            "auto_client_order_id": order.get("client_order_id"),
+                            "auto_limit_price": order.get("limit_price"),
+                            "auto_planned_risk_eur": order.get("planned_risk_eur"),
+                            "auto_entry_policy": (
+                                "trade_now" if _alert_stage(sig) == "trade" else "watch_pullback"
+                            ),
+                            "auto_submitted_qty": order.get("submitted_qty") or order.get("qty"),
                         })
                         submitted_record = {
                             **eligible_record,
@@ -1100,6 +1157,9 @@ def run_advisory_auto_cycle() -> dict:
                             "take_profit_price": order.get("take_profit_price"),
                             "stop_price": order.get("stop_price"),
                             "broker_status": order.get("status"),
+                            "planned_risk_eur": order.get("planned_risk_eur"),
+                            "risk_budget_eur": order.get("risk_budget_eur"),
+                            "max_position_eur": order.get("max_position_eur"),
                         }
                         results["submitted"].append(submitted_record)
                         log_event("TRADE", "advisory_auto_order_submitted", submitted_record)
