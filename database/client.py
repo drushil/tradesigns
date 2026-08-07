@@ -1871,6 +1871,7 @@ def get_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 
 _LATEST_SCAN_LOG_COLUMNS = (
     "scanned_at,market,data_symbol,primary_symbol,session_window,grade,side,"
     "alert_stage,composite_score,ev_net_pct,breakout_quality,price_native,"
+    "move_pct_open,"
     "vwap_score,macd_score,rel_strength_score,tape_score,rsi_score,orb_active,"
     "downside_risk,gate_reason"
 )
@@ -2340,6 +2341,7 @@ def get_portfolio_reviews(limit: int = 12) -> list:
 
 _DEFAULT_DB_LOG_LEVELS = {"WARN", "ERROR", "TRADE", "LEARNING"}
 _DEFAULT_DB_LOG_EVENT_ALLOWLIST = {
+    "advisory_full_scan_complete",
     "advisory_trading_cycle_heartbeat",
     "daily_eod_review_complete",
     "advisory_learner_complete",
@@ -2388,6 +2390,22 @@ def get_logs(level: str = None, limit: int = 100, columns: str = None) -> list:
         q = q.eq("level", level)
     result = q.limit(limit).execute()
     return result.data or []
+
+
+def get_latest_log_event(event: str) -> dict:
+    """Return the latest persisted row for one event, or an empty dict."""
+    try:
+        db = get_client()
+        result = (db.table("agent_logs")
+                  .select("logged_at,event,detail")
+                  .eq("event", event)
+                  .order("logged_at", desc=True)
+                  .limit(1)
+                  .execute())
+        return (result.data or [{}])[0]
+    except Exception as e:
+        print(f"[LATEST_LOG_EVENT_READ_FAILED] {event}: {str(e)[:200]}")
+        return {}
 
 
 def get_log_health(limit: int = 100) -> dict:

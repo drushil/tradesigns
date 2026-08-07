@@ -33,8 +33,19 @@ from database.client import (
     update_advisory_exit_status,
 )
 try:
-    from database.client import insert_advisory_scan_log
+    from database.client import (
+        get_latest_advisory_scan_log,
+        get_latest_log_event,
+        insert_advisory_scan_log,
+    )
 except (ImportError, AttributeError):
+    def get_latest_advisory_scan_log(market: str = "US", hours_back: int = 4,
+                                     limit: int = 100) -> list:
+        return []
+
+    def get_latest_log_event(event: str) -> dict:
+        return {}
+
     def insert_advisory_scan_log(record: dict) -> dict:
         return {"skipped": True, "reason": "scan_log_helper_unavailable"}
 try:
@@ -263,6 +274,165 @@ def _env_bool(key: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _priority_scan_scope(now_utc: datetime, *, enabled: bool = None,
+                         requested: str = None, full_every_minutes: int = None) -> str:
+    """Resolve whether this invocation scans the full universe or only hot names."""
+    if enabled is None:
+        enabled = _env_bool("ADVISORY_DYNAMIC_PRIORITY_ENABLED", False)
+    if not enabled:
+        return "full"
+    scope = str(requested if requested is not None else os.getenv("ADVISORY_SCAN_SCOPE", "auto"))
+    scope = scope.strip().lower()
+    if scope in {"full", "hot"}:
+        return scope
+    cadence = max(2, int(
+        full_every_minutes
+        if full_every_minutes is not None
+        else _env_int("ADVISORY_FULL_SCAN_EVERY_MINUTES", 6)
+    ))
+    minute = int(now_utc.astimezone(timezone.utc).timestamp() // 60)
+    return "full" if minute % cadence < 2 else "hot"
+
+
+def _full_priority_scan_due(now_utc: datetime, marker: dict,
+                            full_every_minutes: int = 6) -> bool:
+    """A missing or stale full-scan marker forces a new full-universe scan."""
+    logged_at = _parse_dt((marker or {}).get("logged_at"))
+    if logged_at is None:
+        return True
+    age_minutes = (
+        now_utc.astimezone(timezone.utc) - logged_at.astimezone(timezone.utc)
+    ).total_seconds() / 60.0
+    return age_minutes >= max(2, int(full_every_minutes))
+
+
+def _priority_proximity_score(scan_row: dict, signal_row: dict) -> float:
+    price = float((scan_row or {}).get("price_native") or 0)
+    entry_min = float((signal_row or {}).get("entry_min") or 0)
+    entry_max = float((signal_row or {}).get("entry_max") or 0)
+    if price <= 0 or entry_min <= 0 or entry_max <= 0:
+        return 0.0
+    low, high = sorted((entry_min, entry_max))
+    if low <= price <= high:
+        return 1.0
+    nearest = low if price < low else high
+    distance_pct = abs(price - nearest) / nearest * 100 if nearest else 100
+    return max(0.0, 1.0 - distance_pct / 2.0)
+
+
+def _dynamic_priority_score(item: dict, scan_row: dict = None,
+                            signal_row: dict = None,
+                            exposure_symbols: set = None) -> dict:
+    """Score urgency for the next fast cycle without making a trade decision.
+
+    Tape is used as the existing relative-volume/activity proxy. Exposure is a
+    hard override: open positions and pending paper entries are always hot.
+    """
+    scan_row = scan_row or {}
+    signal_row = signal_row or {}
+    symbol = str(item.get("data_symbol") or "").upper()
+    exposed = symbol in {str(value).upper() for value in (exposure_symbols or set())}
+    if exposed:
+        return {"score": 100.0, "band": "hot", "forced": True, "components": {"exposure": 100.0}}
+
+    def _bounded(value, scale=1.0):
+        try:
+            return min(1.0, abs(float(value or 0)) / scale)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return 0.0
+
+    base_priority = str(item.get("base_priority") or item.get("priority") or "medium").lower()
+    components = {
+        "relative_volume": 25.0 * _bounded(scan_row.get("tape_score"), 1.0),
+        "intraday_volatility": 20.0 * _bounded(scan_row.get("move_pct_open"), 2.0),
+        "entry_proximity": 20.0 * _priority_proximity_score(scan_row, signal_row),
+        "signal_strength": 15.0 * _bounded(scan_row.get("composite_score"), 0.60),
+        "liquidity": 10.0 * {"high": 1.0, "medium": 0.7, "low": 0.4}.get(base_priority, 0.7),
+        "catalyst": 10.0 * max(
+            1.0 if scan_row.get("orb_active") else 0.0,
+            _bounded(scan_row.get("move_pct_open"), 3.0),
+        ),
+    }
+    score = round(min(100.0, sum(components.values())), 2)
+    hot_threshold = _env_float("ADVISORY_HOT_PRIORITY_THRESHOLD", 55.0)
+    active_threshold = _env_float("ADVISORY_ACTIVE_PRIORITY_THRESHOLD", 35.0)
+    band = "hot" if score >= hot_threshold else ("active" if score >= active_threshold else "quiet")
+    return {
+        "score": score,
+        "band": band,
+        "forced": False,
+        "components": {key: round(value, 2) for key, value in components.items()},
+    }
+
+
+def _priority_scan_items(items: list, scan_rows: list = None,
+                         signal_rows: list = None, exposure_symbols: set = None,
+                         scope: str = "full", min_hot: int = None,
+                         max_hot: int = None) -> tuple[list, list]:
+    """Rank a universe and return (selected items, complete ranking metadata)."""
+    scans = {
+        str(row.get("data_symbol") or "").upper(): row
+        for row in (scan_rows or [])
+        if row.get("data_symbol")
+    }
+    signals = {}
+    for row in signal_rows or []:
+        symbol = str(row.get("data_symbol") or "").upper()
+        if symbol and symbol not in signals:
+            signals[symbol] = row
+
+    ranked = []
+    for original in items or []:
+        item = dict(original)
+        symbol = str(item.get("data_symbol") or "").upper()
+        item["base_priority"] = item.get("base_priority") or item.get("priority", "medium")
+        priority = _dynamic_priority_score(
+            item, scans.get(symbol), signals.get(symbol), exposure_symbols
+        )
+        item["dynamic_priority_score"] = priority["score"]
+        item["dynamic_priority_band"] = priority["band"]
+        item["dynamic_priority_forced"] = priority["forced"]
+        item["dynamic_priority_components"] = priority["components"]
+        item["priority"] = "high" if priority["band"] == "hot" else (
+            "medium" if priority["band"] == "active" else "low"
+        )
+        ranked.append(item)
+
+    ranked.sort(key=lambda row: (
+        not bool(row.get("dynamic_priority_forced")),
+        -float(row.get("dynamic_priority_score") or 0),
+        str(row.get("data_symbol") or ""),
+    ))
+    metadata = [{
+        "symbol": row.get("data_symbol"),
+        "score": row.get("dynamic_priority_score"),
+        "band": row.get("dynamic_priority_band"),
+        "forced": row.get("dynamic_priority_forced"),
+        "components": row.get("dynamic_priority_components"),
+    } for row in ranked]
+    if scope != "hot":
+        return ranked, metadata
+
+    min_count = max(1, min_hot if min_hot is not None else _env_int("ADVISORY_HOT_SCAN_MIN_SYMBOLS", 6))
+    max_count = max(min_count, max_hot if max_hot is not None else _env_int("ADVISORY_HOT_SCAN_MAX_SYMBOLS", 10))
+    eligible = [row for row in ranked if not row.get("benchmark_only")]
+    selected = [row for row in eligible if row.get("dynamic_priority_band") == "hot"]
+    selected_symbols = {str(row.get("data_symbol") or "").upper() for row in selected}
+    for row in eligible:
+        symbol = str(row.get("data_symbol") or "").upper()
+        if len(selected) >= min_count:
+            break
+        if symbol not in selected_symbols:
+            selected.append(row)
+            selected_symbols.add(symbol)
+    forced = [row for row in eligible if row.get("dynamic_priority_forced")]
+    selected = selected[:max_count]
+    for row in forced:
+        if row not in selected:
+            selected.append(row)
+    return selected, metadata
 
 
 def _today_utc_date() -> str:
@@ -2543,6 +2713,10 @@ def _scan_snapshot(cycle_id: str, cycle_started_at: datetime, cfg: AdvisoryConfi
         "trade_target": item.get("trade_target", True),
         "benchmark_only": item.get("benchmark_only", False),
         "priority": item.get("priority", "medium"),
+        "base_priority": item.get("base_priority", item.get("priority", "medium")),
+        "dynamic_priority_score": item.get("dynamic_priority_score"),
+        "dynamic_priority_band": item.get("dynamic_priority_band"),
+        "dynamic_priority_forced": item.get("dynamic_priority_forced", False),
         "category": item.get("category"),
     }
     return {
@@ -2768,7 +2942,8 @@ def _build_downside_candidate(
 
 
 def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
-                    recent_trades: list, now_cet: datetime) -> Optional[dict]:
+                    recent_trades: list, now_cet: datetime,
+                    include_diagnostics: bool = False) -> Optional[dict]:
     symbol = item["data_symbol"]
     window = _window_name(market, now_cet)
     if not window:
@@ -2841,7 +3016,22 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
             ),
         )
     if composite <= 0:
-        return None
+        if not include_diagnostics:
+            return None
+        return {
+            "_diagnostic_only": True,
+            "status": "no_candidate",
+            "market": market,
+            "mode": mode,
+            "data_symbol": symbol,
+            "primary_symbol": primary_symbol,
+            "listing_type": listing_type,
+            "side": "SELL",
+            "composite_score": round(composite, 4),
+            "reference_price": quality.get("last_price"),
+            "data_quality_json": quality,
+            "signal_json": _compact_signal_payload(signal_result),
+        }
 
     side = "BUY" if composite > 0 else "SELL"
 
@@ -2897,7 +3087,27 @@ def _scan_candidate(item: dict, market: str, mode: str, cfg: AdvisoryConfig,
     )
     ignition_ready = bool(ignition) and not trade_ready
     if is_live_market and not (trade_ready or watch_ready or ignition_ready or downside_ready):
-        return None
+        if not include_diagnostics:
+            return None
+        return {
+            "_diagnostic_only": True,
+            "status": "no_candidate",
+            "market": market,
+            "mode": mode,
+            "data_symbol": symbol,
+            "primary_symbol": primary_symbol,
+            "listing_type": listing_type,
+            "side": side,
+            "grade": grade,
+            "composite_score": round(composite, 4),
+            "breakout_quality": breakout,
+            "reference_price": quality.get("last_price"),
+            "data_quality_json": quality,
+            "signal_json": {
+                **_compact_signal_payload(signal_result),
+                "ignition": ignition or {},
+            },
+        }
 
     if downside_ready:
         alert_stage = "downside"
@@ -3040,7 +3250,7 @@ def run_advisory_cycle() -> dict:
     # signal_json/composite_score/etc. that ARE used stay in the select.
     _SIGNAL_PROLOGUE_COLUMNS = (
         "id,market,data_symbol,side,status,created_at,grade,composite_score,"
-        "breakout_quality,manual_pnl_eur,message_text,signal_json"
+        "breakout_quality,manual_pnl_eur,message_text,signal_json,entry_min,entry_max,auto_status"
     )
     _TRADE_PROLOGUE_COLUMNS = "regime,composite_score,net_pnl_pct,side"
     from concurrent.futures import ThreadPoolExecutor
@@ -3368,6 +3578,8 @@ def run_advisory_cycle() -> dict:
         return False, str(detail.get("discord_reason") or "persisted_no_discord")
 
     market_timings = []
+    cycle_scan_scopes = {}
+    cycle_dynamic_markets = set()
 
     for market in _ordered_markets(cfg):
         market_started = time.perf_counter()
@@ -3411,11 +3623,72 @@ def run_advisory_cycle() -> dict:
             })
             intraday_market_block_reason = "open_trade_cap"
         market_candidates = []
-        _priority_rank = {"high": 0, "medium": 1, "low": 2}
-        _sorted_items = sorted(
-            ADVISORY_UNIVERSE[market],
-            key=lambda it: _priority_rank.get(str(it.get("priority", "medium")), 1),
+        dynamic_enabled = (
+            market == "US"
+            and mode == "live"
+            and _env_bool("ADVISORY_DYNAMIC_PRIORITY_ENABLED", False)
         )
+        if dynamic_enabled:
+            cycle_dynamic_markets.add(market)
+        scan_scope = _priority_scan_scope(now_utc, enabled=dynamic_enabled)
+        if (
+            dynamic_enabled
+            and str(os.getenv("ADVISORY_SCAN_SCOPE", "auto")).strip().lower() == "auto"
+        ):
+            full_cadence = _env_int("ADVISORY_FULL_SCAN_EVERY_MINUTES", 6)
+            full_marker = get_latest_log_event("advisory_full_scan_complete")
+            scan_scope = (
+                "full" if _full_priority_scan_due(now_utc, full_marker, full_cadence)
+                else "hot"
+            )
+        exposure_symbols = {
+            str(row.get("data_symbol") or row.get("ticker") or "").upper()
+            for row in open_advisory_positions
+            if row.get("data_symbol") or row.get("ticker")
+        }
+        for row in recent_live:
+            if (
+                str(row.get("status") or "").lower() in {"entered", "sent"}
+                or str(row.get("auto_status") or "").lower() in {"submitted", "pending", "filled"}
+            ):
+                exposure_symbols.add(str(row.get("data_symbol") or "").upper())
+        if dynamic_enabled:
+            latest_scan_rows = get_latest_advisory_scan_log(
+                market=market, hours_back=4, limit=100
+            )
+            _sorted_items, priority_ranking = _priority_scan_items(
+                ADVISORY_UNIVERSE[market],
+                scan_rows=latest_scan_rows,
+                signal_rows=recent_live,
+                exposure_symbols=exposure_symbols,
+                scope=scan_scope,
+            )
+        else:
+            _priority_rank = {"high": 0, "medium": 1, "low": 2}
+            _sorted_items = sorted(
+                ADVISORY_UNIVERSE[market],
+                key=lambda it: _priority_rank.get(str(it.get("priority", "medium")), 1),
+            )
+            priority_ranking = [{
+                "symbol": row.get("data_symbol"),
+                "score": None,
+                "band": row.get("priority", "medium"),
+                "forced": False,
+                "components": {},
+            } for row in _sorted_items]
+        cycle_scan_scopes[market] = scan_scope
+        log_event("INFO", "advisory_priority_scan_plan", {
+            "market": market,
+            "scope": scan_scope,
+            "selected": [row.get("data_symbol") for row in _sorted_items],
+            "selected_count": len(_sorted_items),
+            "universe_count": len(ADVISORY_UNIVERSE[market]),
+            "forced": [
+                row.get("data_symbol") for row in _sorted_items
+                if row.get("dynamic_priority_forced")
+            ],
+            "top_scores": priority_ranking[:10],
+        })
         scanned_count = 0
         high_priority_count = len([
             it for it in _sorted_items
@@ -3562,7 +3835,10 @@ def run_advisory_cycle() -> dict:
                     recent_live, item["data_symbol"], market, now_cet
                 )
             _scan_started = time.perf_counter()
-            candidate = _scan_candidate(item, market, mode, cfg, recent_trades, now_cet)
+            candidate = _scan_candidate(
+                item, market, mode, cfg, recent_trades, now_cet,
+                include_diagnostics=dynamic_enabled,
+            )
             scan_compute_s += time.perf_counter() - _scan_started
             if candidate is not None and first_candidate_elapsed_s is None:
                 first_candidate_elapsed_s = round(time.perf_counter() - cycle_started, 3)
@@ -3599,7 +3875,20 @@ def run_advisory_cycle() -> dict:
                     "tape_score": _payload_score(_signal_payload, "tape_aggression"),
                     "rsi_score": _payload_score(_signal_payload, "rsi_divergence"),
                     "orb_active": bool(_signal_payload.get("orb_active")),
+                    "move_pct_open": (
+                        (candidate.get("data_quality_json") or {})
+                        .get("intraday_price_context", {})
+                        .get("return_from_open_pct")
+                        or (_signal_payload.get("ignition") or {}).get("move_pct")
+                    ),
                 })
+
+            if candidate and candidate.get("_diagnostic_only"):
+                _buf_snapshot(_scan_snapshot(
+                    cycle_id, now_cet, cfg, item, market, mode, window, "no_candidate", candidate
+                ))
+                _buf_scanlog(_scan_log_base)
+                continue
 
             if not candidate:
                 _buf_snapshot(_scan_snapshot(
@@ -3822,6 +4111,7 @@ def run_advisory_cycle() -> dict:
         "immediate_live_sent": immediate_live_sent,
         "market_timings": market_timings,
         "markets": sorted(cfg.markets),
+        "scan_scopes": cycle_scan_scopes,
     })
     log_event("INFO", "advisory_cycle_complete", {
         "emitted": len(emitted),
@@ -3834,7 +4124,19 @@ def run_advisory_cycle() -> dict:
         "first_live_discord_elapsed_s": first_live_discord_elapsed_s,
         "immediate_live_sent": immediate_live_sent,
         "long_hold_sent_today": long_hold_sent_today,
+        "scan_scopes": cycle_scan_scopes,
     })
+    full_markets = sorted(
+        market for market, scope in cycle_scan_scopes.items()
+        if scope == "full" and market in cycle_dynamic_markets
+    )
+    if full_markets:
+        log_event("INFO", "advisory_full_scan_complete", {
+            "cycle_id": cycle_id,
+            "markets": full_markets,
+            "total_elapsed_s": total_elapsed_s,
+            "market_timings": market_timings,
+        })
 
     auto_enabled = False
     auto_result = {}
@@ -3898,6 +4200,7 @@ def run_advisory_cycle() -> dict:
         "cycle_id": cycle_id,
         "outcome": outcome,
         "markets": sorted(cfg.markets),
+        "scan_scopes": cycle_scan_scopes,
         "scanned": sum(int(row.get("scanned") or 0) for row in market_timings),
         "signals_emitted": len(emitted),
         "signals_blocked": len(blocked),

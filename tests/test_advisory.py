@@ -855,6 +855,86 @@ def test_us_avgo_is_high_priority_for_immediate_send():
     assert avgo["trade_target"] is True
 
 
+def test_priority_scan_scope_runs_full_every_six_minutes():
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc),
+        enabled=True,
+        requested="auto",
+        full_every_minutes=6,
+    ) == "full"
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 2, tzinfo=timezone.utc),
+        enabled=True,
+        requested="auto",
+        full_every_minutes=6,
+    ) == "hot"
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 4, tzinfo=timezone.utc),
+        enabled=False,
+        requested="hot",
+        full_every_minutes=6,
+    ) == "full"
+
+
+def test_full_priority_scan_due_uses_persisted_marker():
+    now = datetime(2026, 8, 7, 12, 8, tzinfo=timezone.utc)
+    assert advisory._full_priority_scan_due(now, {}, 6) is True
+    assert advisory._full_priority_scan_due(
+        now, {"logged_at": "2026-08-07T12:04:00Z"}, 6
+    ) is False
+    assert advisory._full_priority_scan_due(
+        now, {"logged_at": "2026-08-07T12:02:00Z"}, 6
+    ) is True
+
+
+def test_dynamic_priority_forces_open_exposure_hot():
+    result = advisory._dynamic_priority_score(
+        {"data_symbol": "AMD", "priority": "medium"},
+        scan_row={},
+        signal_row={},
+        exposure_symbols={"AMD"},
+    )
+    assert result["score"] == 100
+    assert result["band"] == "hot"
+    assert result["forced"] is True
+
+
+def test_priority_hot_scan_uses_activity_proximity_and_excludes_benchmarks(monkeypatch):
+    monkeypatch.setenv("ADVISORY_HOT_PRIORITY_THRESHOLD", "55")
+    items = [
+        {"data_symbol": "HOT", "priority": "medium", "benchmark_only": False},
+        {"data_symbol": "NEAR", "priority": "high", "benchmark_only": False},
+        {"data_symbol": "OPEN", "priority": "low", "benchmark_only": False},
+        {"data_symbol": "QUIET", "priority": "medium", "benchmark_only": False},
+        {"data_symbol": "SPY", "priority": "low", "benchmark_only": True},
+    ]
+    scans = [
+        {"data_symbol": "HOT", "tape_score": 1.0, "move_pct_open": 2.0,
+         "composite_score": 0.6, "orb_active": True, "price_native": 100},
+        {"data_symbol": "NEAR", "tape_score": 0.2, "move_pct_open": 0.4,
+         "composite_score": 0.3, "orb_active": False, "price_native": 100.2},
+        {"data_symbol": "SPY", "tape_score": 1.0, "move_pct_open": 3.0,
+         "composite_score": 0.8, "orb_active": True, "price_native": 600},
+    ]
+    signals = [{"data_symbol": "NEAR", "entry_min": 100, "entry_max": 101}]
+
+    selected, ranking = advisory._priority_scan_items(
+        items,
+        scan_rows=scans,
+        signal_rows=signals,
+        exposure_symbols={"OPEN"},
+        scope="hot",
+        min_hot=3,
+        max_hot=3,
+    )
+
+    symbols = [row["data_symbol"] for row in selected]
+    assert symbols == ["OPEN", "HOT", "NEAR"]
+    assert "SPY" not in symbols
+    assert next(row for row in ranking if row["symbol"] == "OPEN")["forced"] is True
+    assert next(row for row in ranking if row["symbol"] == "NEAR")["components"]["entry_proximity"] == 20.0
+
+
 def _make_fake_bars(n_rows, volume):
     """Build a MagicMock that satisfies all _data_quality access patterns."""
     from unittest.mock import MagicMock
@@ -1442,6 +1522,57 @@ def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
     assert len(log_calls) == 1
     assert isinstance(snap_calls[0], list) and len(snap_calls[0]) >= 1
     assert isinstance(log_calls[0], list) and len(log_calls[0]) >= 1
+
+
+def test_run_advisory_cycle_hot_scope_scans_only_ranked_fast_lane(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    scanned = []
+    logs = []
+
+    monkeypatch.setenv("ADVISORY_DYNAMIC_PRIORITY_ENABLED", "true")
+    monkeypatch.setenv("ADVISORY_SCAN_SCOPE", "hot")
+    monkeypatch.setenv("ADVISORY_HOT_SCAN_MIN_SYMBOLS", "1")
+    monkeypatch.setenv("ADVISORY_HOT_SCAN_MAX_SYMBOLS", "1")
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(long_hold_enabled=False))
+    monkeypatch.setattr(
+        advisory, "_now_cet",
+        lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin),
+    )
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {"US": [
+        {"data_symbol": "HOT", "priority": "medium", "currency": "USD"},
+        {"data_symbol": "QUIET", "priority": "high", "currency": "USD"},
+    ]})
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_latest_advisory_scan_log", lambda **kwargs: [
+        {"data_symbol": "HOT", "tape_score": 1.0, "move_pct_open": 2.0,
+         "composite_score": 0.6, "orb_active": True, "price_native": 100.0},
+        {"data_symbol": "QUIET", "tape_score": 0.0, "move_pct_open": 0.0,
+         "composite_score": 0.0, "orb_active": False, "price_native": 100.0},
+    ])
+    monkeypatch.setattr(advisory, "_monitor_open_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_monitor_virtual_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_is_broker_supported", lambda *args: True)
+    monkeypatch.setattr(
+        advisory, "_scan_candidate",
+        lambda item, *args, **kwargs: scanned.append(item["data_symbol"]) or None,
+    )
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs", lambda rows: {"written": len(rows)})
+    monkeypatch.setattr(
+        advisory, "log_event",
+        lambda level, event, detail=None: logs.append((event, detail or {})),
+    )
+
+    advisory.run_advisory_cycle()
+
+    assert scanned == ["HOT"]
+    plan = next(detail for event, detail in logs if event == "advisory_priority_scan_plan")
+    assert plan["scope"] == "hot"
+    assert plan["selected"] == ["HOT"]
+    heartbeat = next(detail for event, detail in logs if event == "advisory_trading_cycle_heartbeat")
+    assert heartbeat["scan_scopes"] == {"US": "hot"}
+    assert heartbeat["scanned"] == 1
 
 
 def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(monkeypatch):
