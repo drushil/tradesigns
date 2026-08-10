@@ -4,7 +4,7 @@ Supabase client wrapper. All DB operations go through here.
 Reads credentials from os.environ (which app.py populates from st.secrets).
 """
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 try:
     from postgrest import ReturnMethod
@@ -282,14 +282,27 @@ def _trade_matches_source(row: dict, source: str = "agent") -> bool:
     return row_source == source
 
 
-def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent") -> list:
+_TRADE_SOURCE_FILTER_COLUMNS = ("trade_source", "order_id", "advisory_signal_id", "strategy_family")
+
+
+def get_recent_trades(days: int = 30, ticker: str = None, source: str = "agent",
+                       columns: str = None) -> list:
     db = get_client()
-    q = db.table("trades").select("*").order("created_at", desc=True)
+    select_cols = "*"
+    if columns:
+        have = {c.strip() for c in columns.split(",") if c.strip()}
+        missing = [c for c in _TRADE_SOURCE_FILTER_COLUMNS if c not in have]
+        select_cols = columns if not missing else columns + "," + ",".join(missing)
+    q = db.table("trades").select(select_cols).order("created_at", desc=True)
     if days:
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
         q = q.gte("created_at", cutoff)
     if ticker:
         q = q.eq("ticker", ticker)
+    if source == "advisory_auto":
+        # Exact match — trade_source == "advisory_auto" is the whole condition
+        # for this branch (no legacy-row fallback), so it's safe to push into SQL.
+        q = q.eq("trade_source", "advisory_auto")
     result = q.limit(500).execute()
     rows = result.data or []
     return [row for row in rows if _trade_matches_source(row, source)]
@@ -625,12 +638,13 @@ def insert_advisory_signal(signal: dict) -> dict:
 
 
 def get_recent_advisory_signals(days: int = 1, mode: str = None,
-                                market: str = None, limit: int = 200) -> list:
+                                market: str = None, limit: int = 200,
+                                columns: str = None) -> list:
     try:
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
         db = get_client()
         q = (db.table("advisory_signals")
-             .select("*")
+             .select(columns or "*")
              .gte("created_at", cutoff)
              .order("created_at", desc=True)
              .limit(limit))
@@ -1014,12 +1028,19 @@ def upsert_premarket_radar_snapshots(cycle: dict) -> list:
         return [{"error": str(e)}]
 
 
+_PREMARKET_RADAR_COLUMNS = (
+    "cycle_started_at,session_window,ticker,gap_pct,premarket_high,premarket_low,"
+    "premarket_vwap,premarket_rvol,spread_pct,classification,radar_score,"
+    "opening_plan,reasons_json,latest_headline"
+)
+
+
 def get_latest_premarket_radar_snapshots(limit: int = 100) -> list:
     """Fetch recent pre-market radar rows for dashboards and reviews."""
     try:
         db = get_client()
         result = (db.table("premarket_radar_snapshots")
-                  .select("*")
+                  .select(_PREMARKET_RADAR_COLUMNS)
                   .order("cycle_started_at", desc=True)
                   .limit(limit)
                   .execute())
@@ -1452,12 +1473,21 @@ def get_advisory_auto_sim_signal_ids() -> set:
         return set()
 
 
+_ACTIVE_SIM_COLUMNS = (
+    "id,advisory_signal_id,data_symbol,market,side,grade,entry_min,entry_max,"
+    "stop_price,target_1,target_2,simulated_at,valid_until,status,fill_at,"
+    "fill_price,mfe_pct,mae_pct,last_checked_at,notes,r_multiple"
+)
+
+
 def get_active_advisory_auto_simulations(limit: int = 200) -> list:
-    """Fetch sims still being tracked: pending (no fill yet) or filled (no terminal)."""
+    """Fetch sims still being tracked: pending (no fill yet) or filled (no terminal).
+    Excludes bars_json (large 1m-bar payload) — that's only read by the separate
+    EOD bar-capture pass via get_resolved_sims_missing_bars, not this cycle."""
     try:
         db = get_client()
         result = (db.table("advisory_auto_simulations")
-                  .select("*")
+                  .select(_ACTIVE_SIM_COLUMNS)
                   .in_("status", ["pending", "filled"])
                   .order("simulated_at", desc=False)
                   .limit(limit)
@@ -1622,6 +1652,51 @@ def get_latest_advisory_signals_for_symbols(data_symbols: list[str],
         return latest
     except Exception as e:
         print(f"[ADVISORY_LATEST_SIGNALS_FAILED] {str(e)[:200]}")
+        return {}
+
+
+def get_advisory_signal_history_for_symbols(data_symbols: list[str],
+                                             created_from: str,
+                                             created_to: str,
+                                             mode: str = "live",
+                                             limit: int = 1000) -> dict:
+    """Return chronological intraday signal histories keyed by (market, symbol).
+
+    The pending-order simulator uses this to resolve fill-vs-cancel races without
+    consulting a signal that was created after the simulated order had filled.
+    """
+    symbols = sorted({
+        str(symbol or "").strip()
+        for symbol in data_symbols
+        if str(symbol or "").strip()
+    })
+    if not symbols:
+        return {}
+    try:
+        db = get_client()
+        result = (db.table("advisory_signals")
+                  .select("id,created_at,market,data_symbol,side,grade,composite_score,signal_json")
+                  .in_("data_symbol", symbols)
+                  .eq("mode", mode)
+                  .gte("created_at", created_from)
+                  .lte("created_at", created_to)
+                  .order("created_at", desc=False)
+                  .limit(limit)
+                  .execute())
+        histories: dict = {}
+        for row in result.data or []:
+            signal_json = row.get("signal_json") or {}
+            stage = str(signal_json.get("alert_stage") or "").strip().lower()
+            if stage not in _INTRADAY_WEAKENING_STAGES:
+                continue
+            key = (
+                str(row.get("market") or "").upper(),
+                str(row.get("data_symbol") or "").upper(),
+            )
+            histories.setdefault(key, []).append(row)
+        return histories
+    except Exception as e:
+        print(f"[ADVISORY_SIGNAL_HISTORY_FAILED] {str(e)[:200]}")
         return {}
 
 
@@ -1793,13 +1868,22 @@ def get_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 
         return []
 
 
+_LATEST_SCAN_LOG_COLUMNS = (
+    "scanned_at,market,data_symbol,primary_symbol,session_window,grade,side,"
+    "alert_stage,composite_score,ev_net_pct,breakout_quality,price_native,"
+    "move_pct_open,"
+    "vwap_score,macd_score,rel_strength_score,tape_score,rsi_score,orb_active,"
+    "downside_risk,gate_reason"
+)
+
+
 def get_latest_advisory_scan_log(market: str = "US", hours_back: int = 4, limit: int = 100) -> list:
     """Return the latest scan-log row per symbol for the dashboard's current scan table."""
     try:
         cutoff = (datetime.utcnow() - timedelta(hours=hours_back)).isoformat() + "Z"
         db = get_client()
         q = (db.table("advisory_scan_log")
-             .select("*")
+             .select(_LATEST_SCAN_LOG_COLUMNS)
              .gte("scanned_at", cutoff)
              .order("scanned_at", desc=True)
              .limit(max(limit * 5, 200)))
@@ -1969,11 +2053,11 @@ def insert_config_change_recommendations(review_id: int, review_date: str,
         return [{"error": str(e)}]
 
 
-def get_daily_reviews(limit: int = 20) -> list:
+def get_daily_reviews(limit: int = 20, columns: str = None) -> list:
     try:
         db = get_client()
         result = (db.table("daily_reviews")
-                  .select("*")
+                  .select(columns or "*")
                   .order("review_date", desc=True)
                   .limit(limit)
                   .execute())
@@ -2257,6 +2341,8 @@ def get_portfolio_reviews(limit: int = 12) -> list:
 
 _DEFAULT_DB_LOG_LEVELS = {"WARN", "ERROR", "TRADE", "LEARNING"}
 _DEFAULT_DB_LOG_EVENT_ALLOWLIST = {
+    "advisory_full_scan_complete",
+    "advisory_trading_cycle_heartbeat",
     "daily_eod_review_complete",
     "advisory_learner_complete",
     "post_market_analytics_complete",
@@ -2297,13 +2383,90 @@ def log_event(level: str, event: str, detail: dict = None):
         print(f"[LOG_WRITE_FAILED] {level} {event}: {str(e)[:200]}")
 
 
-def get_logs(level: str = None, limit: int = 100) -> list:
+def get_logs(level: str = None, limit: int = 100, columns: str = None) -> list:
     db = get_client()
-    q = db.table("agent_logs").select("*").order("logged_at", desc=True)
+    q = db.table("agent_logs").select(columns or "*").order("logged_at", desc=True)
     if level:
         q = q.eq("level", level)
     result = q.limit(limit).execute()
     return result.data or []
+
+
+def get_latest_log_event(event: str) -> dict:
+    """Return the latest persisted row for one event, or an empty dict."""
+    try:
+        db = get_client()
+        result = (db.table("agent_logs")
+                  .select("logged_at,event,detail")
+                  .eq("event", event)
+                  .order("logged_at", desc=True)
+                  .limit(1)
+                  .execute())
+        return (result.data or [{}])[0]
+    except Exception as e:
+        print(f"[LATEST_LOG_EVENT_READ_FAILED] {event}: {str(e)[:200]}")
+        return {}
+
+
+def get_log_health(limit: int = 100) -> dict:
+    """Compact sidebar health check — last log time + error count, no detail payload."""
+    try:
+        rows = get_logs(limit=limit, columns="level,logged_at")
+        latest = rows[0] if rows else {}
+        errors = sum(1 for row in rows if str(row.get("level") or "").upper() == "ERROR")
+        return {"last_seen": latest.get("logged_at"), "errors": errors}
+    except Exception as e:
+        print(f"[LOG_HEALTH_READ_FAILED] {str(e)[:200]}")
+        return {"last_seen": None, "errors": 0}
+
+
+def get_advisory_cycle_health(stale_after_minutes: int = 12) -> dict:
+    """Return the latest persisted end-to-end advisory cycle heartbeat."""
+    try:
+        db = get_client()
+        result = (db.table("agent_logs")
+                  .select("logged_at,detail")
+                  .eq("event", "advisory_trading_cycle_heartbeat")
+                  .order("logged_at", desc=True)
+                  .limit(1)
+                  .execute())
+        row = (result.data or [{}])[0]
+        logged_at = row.get("logged_at")
+        detail = row.get("detail") or {}
+        if not logged_at:
+            return {
+                "status": "unknown",
+                "label": "waiting for heartbeat",
+                "last_seen": None,
+                "age_minutes": None,
+                "detail": {},
+            }
+        parsed = datetime.fromisoformat(str(logged_at).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age_minutes = max(
+            0.0,
+            (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds() / 60.0,
+        )
+        stale = age_minutes > max(1, stale_after_minutes)
+        outcome = str(detail.get("outcome") or "completed")
+        label = "cycle stale" if stale else outcome.replace("_", " ")
+        return {
+            "status": "stale" if stale else "healthy",
+            "label": label,
+            "last_seen": logged_at,
+            "age_minutes": round(age_minutes, 1),
+            "detail": detail,
+        }
+    except Exception as e:
+        print(f"[ADVISORY_CYCLE_HEALTH_READ_FAILED] {str(e)[:200]}")
+        return {
+            "status": "unknown",
+            "label": "health unavailable",
+            "last_seen": None,
+            "age_minutes": None,
+            "detail": {},
+        }
 
 
 def _delete_older_than(db, table: str, column: str, cutoff_iso: str, filters: dict = None) -> int:

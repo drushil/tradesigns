@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import pytest
@@ -33,6 +33,71 @@ def test_weakening_accepts_intraday_downside_signal():
     }
 
     assert sim._signal_weakened_from_latest(pending, latest) == "latest_signal_sell"
+
+
+@pytest.mark.skipif(
+    not _HAS_REAL_PANDAS,
+    reason="builds a real pandas DataFrame/DatetimeIndex (bare-env stub lacks it)",
+)
+def test_pending_fill_wins_when_weakening_arrives_later_same_minute(monkeypatch):
+    created = datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)
+    fill_bar = created + timedelta(minutes=1)
+    pending = {
+        "id": 10, "advisory_signal_id": 100, "data_symbol": "APP", "market": "US",
+        "grade": "B", "entry_min": 99.0, "entry_max": 100.0,
+        "simulated_at": created.isoformat(),
+        "valid_until": (created + timedelta(minutes=30)).isoformat(),
+        "status": "pending", "notes": {},
+    }
+    bars = pd.DataFrame(
+        {"Low": [99.5], "High": [100.5], "Close": [100.0]},
+        index=pd.DatetimeIndex([fill_bar]),
+    )
+    history = [{
+        "id": 101,
+        "created_at": (fill_bar + timedelta(seconds=20)).isoformat(),
+        "side": "SELL", "grade": "C", "composite_score": -0.2,
+        "signal_json": {"alert_stage": "watch"},
+    }]
+    monkeypatch.setattr(sim, "_fetch_1m_bars", lambda *_: bars)
+
+    update = sim._process_pending(pending, fill_bar + timedelta(minutes=2), history)
+
+    assert update["status"] == "filled"
+    assert update["notes"]["causal_event"] == "fill_before_weakening"
+
+
+@pytest.mark.skipif(
+    not _HAS_REAL_PANDAS,
+    reason="builds a real pandas DataFrame/DatetimeIndex (bare-env stub lacks it)",
+)
+def test_pending_cancels_when_weakening_precedes_fill(monkeypatch):
+    created = datetime(2026, 6, 10, 14, 0, tzinfo=timezone.utc)
+    fill_bar = created + timedelta(minutes=2)
+    pending = {
+        "id": 11, "advisory_signal_id": 100, "data_symbol": "APP", "market": "US",
+        "grade": "B", "entry_min": 99.0, "entry_max": 100.0,
+        "simulated_at": created.isoformat(),
+        "valid_until": (created + timedelta(minutes=30)).isoformat(),
+        "status": "pending", "notes": {},
+    }
+    bars = pd.DataFrame(
+        {"Low": [99.5], "High": [100.5], "Close": [100.0]},
+        index=pd.DatetimeIndex([fill_bar]),
+    )
+    weak_at = created + timedelta(minutes=1)
+    history = [{
+        "id": 101, "created_at": weak_at.isoformat(),
+        "side": "SELL", "grade": "C", "composite_score": -0.2,
+        "signal_json": {"alert_stage": "watch"},
+    }]
+    monkeypatch.setattr(sim, "_fetch_1m_bars", lambda *_: bars)
+
+    update = sim._process_pending(pending, fill_bar + timedelta(minutes=2), history)
+
+    assert update["status"] == "cancelled_signal_weak"
+    assert update["closed_at"] == "2026-06-10T14:01:00Z"
+    assert update["notes"]["causal_event"] == "weakening_before_fill"
 
 
 def test_create_momentum_continuation_sim_for_high_grade_watch(monkeypatch):
@@ -162,7 +227,7 @@ def test_chase_tracker_quarantines_entry_at_or_above_target(monkeypatch):
     assert payload["status"] == "expired"
     assert payload["closure_reason"] == "invalid_chase_geometry"
     assert payload["notes"]["invalid_chase_geometry"] is True
-    assert payload["sim_version"] == 4
+    assert payload["sim_version"] == 5
 
 
 def test_chase_tracker_keeps_valid_target_geometry(monkeypatch):
@@ -234,3 +299,4 @@ def test_eod_close_falls_back_to_last_available_close(monkeypatch):
     assert update["status"] == "closed_eod_win"
     assert update["eod_close_price"] == 102.5
     assert update["r_multiple"] == 0.5
+    assert update["closed_at"] == "2026-06-10T19:50:00Z"

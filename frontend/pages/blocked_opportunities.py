@@ -304,7 +304,7 @@ def _render_eod_gate_activity():
     try:
         from database.client import get_daily_reviews
 
-        reviews = get_daily_reviews(limit=5)
+        reviews = get_daily_reviews(limit=5, columns="review_date,metrics_json")
     except Exception:
         reviews = []
     if not reviews:

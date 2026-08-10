@@ -146,20 +146,29 @@ with st.sidebar:
     _sync_page_query_param(selection)
     st.markdown("---")
     try:
-        from database.client import get_logs
+        from database.client import get_advisory_cycle_health, get_log_health
 
-        logs = get_logs(limit=100)
-        latest = logs[0] if logs else {}
-        last_seen = str(latest.get("logged_at") or latest.get("created_at") or "—")
-        errors = sum(1 for row in logs if str(row.get("level") or "").upper() == "ERROR")
-        health_color = "var(--td-negative)" if errors else "var(--td-positive)"
-        health_label = "needs attention" if errors else "healthy"
+        health = get_log_health(limit=100)
+        cycle_health = get_advisory_cycle_health(stale_after_minutes=12)
+        errors = health.get("errors", 0)
+        cycle_status = cycle_health.get("status")
+        health_color = (
+            "var(--td-positive)" if cycle_status == "healthy"
+            else "var(--td-negative)" if cycle_status == "stale"
+            else "var(--td-warning)"
+        )
+        health_label = str(cycle_health.get("label") or "unknown")
+        cycle_detail = cycle_health.get("detail") or {}
+        submitted = int(cycle_detail.get("auto_submitted") or 0)
+        age = cycle_health.get("age_minutes")
+        age_label = f"{age:.1f} min ago" if isinstance(age, (int, float)) else "—"
         st.markdown(
             f"""
             <div style="font-size:11px;color:var(--td-muted);line-height:1.55">
               <div style="text-transform:uppercase;letter-spacing:.08em;color:var(--td-muted)">Advisory health</div>
               <div><span style="color:{health_color}">●</span> {health_label}</div>
-              <div>Last log: {last_seen[:16]}</div>
+              <div>Last cycle: {age_label}</div>
+              <div>Orders this cycle: {submitted}</div>
               <div>Errors in recent log: {errors}</div>
             </div>
             """,

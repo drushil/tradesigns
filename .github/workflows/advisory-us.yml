@@ -6,7 +6,7 @@ name: Trading Agent - Advisory US
 # cycles never compete.
 #
 # Trigger setup (cron-job.org):
-#   Schedule: every 2 min, 13:00-20:00 UTC, Mon-Fri
+#   Schedule: */2 13-20 * * 1-5 (UTC)
 #   HTTP POST to: https://api.github.com/repos/drushil/tradesigns/dispatches
 #   Body: {"event_type": "advisory-us-cycle"}
 
@@ -30,7 +30,9 @@ concurrency:
 jobs:
   run-advisory-us:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Normal end-to-end runtime is about five minutes including runner setup.
+    # Leave headroom for transient package/data-provider latency.
+    timeout-minutes: 8
     permissions:
       contents: read
 
@@ -76,6 +78,13 @@ jobs:
           EURUSD_RATE:          "${{ vars.EURUSD_RATE }}"
           ADVISORY_MODE:        "${{ vars.ADVISORY_MODE }}"
           ADVISORY_MARKETS:     "US"
+          ADVISORY_DYNAMIC_PRIORITY_ENABLED: "true"
+          ADVISORY_SCAN_SCOPE:  "auto"
+          ADVISORY_FULL_SCAN_EVERY_MINUTES: "6"
+          ADVISORY_HOT_PRIORITY_THRESHOLD: "55"
+          ADVISORY_ACTIVE_PRIORITY_THRESHOLD: "35"
+          ADVISORY_HOT_SCAN_MIN_SYMBOLS: "6"
+          ADVISORY_HOT_SCAN_MAX_SYMBOLS: "10"
           ADVISORY_LIVE_MARKETS: "${{ vars.ADVISORY_LIVE_MARKETS }}"
           ADVISORY_SHADOW_MARKETS: "${{ vars.ADVISORY_SHADOW_MARKETS }}"
           ADVISORY_SHADOW_DISCORD_MARKETS: "${{ vars.ADVISORY_SHADOW_DISCORD_MARKETS }}"
@@ -114,6 +123,9 @@ jobs:
           ADVISORY_AUTO_ALPACA_API_KEY:    "${{ secrets.ADVISORY_AUTO_ALPACA_API_KEY }}"
           ADVISORY_AUTO_ALPACA_SECRET_KEY: "${{ secrets.ADVISORY_AUTO_ALPACA_SECRET_KEY }}"
           ADVISORY_AUTO_CAPITAL_EUR:       "${{ vars.ADVISORY_AUTO_CAPITAL_EUR }}"
+          ADVISORY_AUTO_MAX_POSITION_PCT:  "${{ vars.ADVISORY_AUTO_MAX_POSITION_PCT }}"
+          ADVISORY_AUTO_RISK_PER_TRADE_PCT: "${{ vars.ADVISORY_AUTO_RISK_PER_TRADE_PCT }}"
+          ADVISORY_AUTO_DAILY_LOSS_R:      "${{ vars.ADVISORY_AUTO_DAILY_LOSS_R }}"
           ADVISORY_AUTO_MAX_POSITIONS:     "${{ vars.ADVISORY_AUTO_MAX_POSITIONS }}"
           ADVISORY_AUTO_DRY_RUN:           "${{ vars.ADVISORY_AUTO_DRY_RUN }}"
           ADVISORY_AUTO_PAPER_EXECUTION:   "${{ vars.ADVISORY_AUTO_PAPER_EXECUTION }}"
@@ -161,6 +173,7 @@ jobs:
           import os
           from datetime import datetime, timezone
           from backend.advisory import run_advisory_cycle
+          from database.client import log_event
 
           def _truthy(value, default=False):
               raw = str(value if value is not None else "").strip().lower()
@@ -180,8 +193,15 @@ jobs:
               dispatch_mode = os.getenv("DISPATCH_MODE", "").strip()
               if in_window or dispatch_mode == "advisory":
                   print(f"Running US advisory cycle at {now.strftime('%H:%M UTC')}...")
-                  result = run_advisory_cycle()
-                  print(f"Advisory result: {result}")
+                  try:
+                      result = run_advisory_cycle()
+                      print(f"Advisory result: {result}")
+                  except Exception as exc:
+                      log_event("ERROR", "advisory_trading_cycle_failed", {
+                          "workflow_run_id": os.getenv("GITHUB_RUN_ID"),
+                          "error": str(exc)[:500],
+                      })
+                      raise
               else:
                   print(f"Outside US window ({now.strftime('%H:%M UTC')}) — skipping.")
           PY

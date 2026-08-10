@@ -855,6 +855,86 @@ def test_us_avgo_is_high_priority_for_immediate_send():
     assert avgo["trade_target"] is True
 
 
+def test_priority_scan_scope_runs_full_every_six_minutes():
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc),
+        enabled=True,
+        requested="auto",
+        full_every_minutes=6,
+    ) == "full"
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 2, tzinfo=timezone.utc),
+        enabled=True,
+        requested="auto",
+        full_every_minutes=6,
+    ) == "hot"
+    assert advisory._priority_scan_scope(
+        datetime(2026, 8, 7, 12, 4, tzinfo=timezone.utc),
+        enabled=False,
+        requested="hot",
+        full_every_minutes=6,
+    ) == "full"
+
+
+def test_full_priority_scan_due_uses_persisted_marker():
+    now = datetime(2026, 8, 7, 12, 8, tzinfo=timezone.utc)
+    assert advisory._full_priority_scan_due(now, {}, 6) is True
+    assert advisory._full_priority_scan_due(
+        now, {"logged_at": "2026-08-07T12:04:00Z"}, 6
+    ) is False
+    assert advisory._full_priority_scan_due(
+        now, {"logged_at": "2026-08-07T12:02:00Z"}, 6
+    ) is True
+
+
+def test_dynamic_priority_forces_open_exposure_hot():
+    result = advisory._dynamic_priority_score(
+        {"data_symbol": "AMD", "priority": "medium"},
+        scan_row={},
+        signal_row={},
+        exposure_symbols={"AMD"},
+    )
+    assert result["score"] == 100
+    assert result["band"] == "hot"
+    assert result["forced"] is True
+
+
+def test_priority_hot_scan_uses_activity_proximity_and_excludes_benchmarks(monkeypatch):
+    monkeypatch.setenv("ADVISORY_HOT_PRIORITY_THRESHOLD", "55")
+    items = [
+        {"data_symbol": "HOT", "priority": "medium", "benchmark_only": False},
+        {"data_symbol": "NEAR", "priority": "high", "benchmark_only": False},
+        {"data_symbol": "OPEN", "priority": "low", "benchmark_only": False},
+        {"data_symbol": "QUIET", "priority": "medium", "benchmark_only": False},
+        {"data_symbol": "SPY", "priority": "low", "benchmark_only": True},
+    ]
+    scans = [
+        {"data_symbol": "HOT", "tape_score": 1.0, "move_pct_open": 2.0,
+         "composite_score": 0.6, "orb_active": True, "price_native": 100},
+        {"data_symbol": "NEAR", "tape_score": 0.2, "move_pct_open": 0.4,
+         "composite_score": 0.3, "orb_active": False, "price_native": 100.2},
+        {"data_symbol": "SPY", "tape_score": 1.0, "move_pct_open": 3.0,
+         "composite_score": 0.8, "orb_active": True, "price_native": 600},
+    ]
+    signals = [{"data_symbol": "NEAR", "entry_min": 100, "entry_max": 101}]
+
+    selected, ranking = advisory._priority_scan_items(
+        items,
+        scan_rows=scans,
+        signal_rows=signals,
+        exposure_symbols={"OPEN"},
+        scope="hot",
+        min_hot=3,
+        max_hot=3,
+    )
+
+    symbols = [row["data_symbol"] for row in selected]
+    assert symbols == ["OPEN", "HOT", "NEAR"]
+    assert "SPY" not in symbols
+    assert next(row for row in ranking if row["symbol"] == "OPEN")["forced"] is True
+    assert next(row for row in ranking if row["symbol"] == "NEAR")["components"]["entry_proximity"] == 20.0
+
+
 def _make_fake_bars(n_rows, volume):
     """Build a MagicMock that satisfies all _data_quality access patterns."""
     from unittest.mock import MagicMock
@@ -1273,14 +1353,16 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     saved = []
     sent = []
+    logs = []
 
+    monkeypatch.delenv("ADVISORY_AUTO_RUN", raising=False)
     monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
     monkeypatch.setattr(advisory, "_now_cet", lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin))
     monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1305,7 +1387,11 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
     monkeypatch.setattr(advisory, "update_advisory_exit_status", lambda signal_id, update: update)
     monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook_url: sent.append(text) or True)
-    monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        advisory,
+        "log_event",
+        lambda level, event, detail=None: logs.append((level, event, detail or {})),
+    )
 
     result = advisory.run_advisory_cycle()
 
@@ -1316,6 +1402,12 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert advisory._parse_dt(saved[0]["valid_until"]) == datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc)
     assert len(sent) == 1
     assert "NVDA" in sent[0]
+    heartbeat = next(detail for _, event, detail in logs
+                     if event == "advisory_trading_cycle_heartbeat")
+    assert heartbeat["outcome"] == "auto_execution_disabled"
+    assert heartbeat["scanned"] == 1
+    assert heartbeat["signals_emitted"] == 1
+    assert heartbeat["auto_submitted"] == 0
 
 
 def test_scan_log_distinguishes_persistence_from_failed_discord_delivery(monkeypatch):
@@ -1356,7 +1448,7 @@ def test_scan_log_distinguishes_persistence_from_failed_discord_delivery(monkeyp
         "US": [{"data_symbol": "MU", "broker_display_name": "Micron", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda **kwargs: [])
     monkeypatch.setattr(advisory, "_monitor_open_positions", lambda *args: [])
     monkeypatch.setattr(advisory, "_monitor_virtual_positions", lambda *args: [])
@@ -1394,7 +1486,7 @@ def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1432,6 +1524,57 @@ def test_run_advisory_cycle_batches_diagnostic_writes(monkeypatch):
     assert isinstance(log_calls[0], list) and len(log_calls[0]) >= 1
 
 
+def test_run_advisory_cycle_hot_scope_scans_only_ranked_fast_lane(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    scanned = []
+    logs = []
+
+    monkeypatch.setenv("ADVISORY_DYNAMIC_PRIORITY_ENABLED", "true")
+    monkeypatch.setenv("ADVISORY_SCAN_SCOPE", "hot")
+    monkeypatch.setenv("ADVISORY_HOT_SCAN_MIN_SYMBOLS", "1")
+    monkeypatch.setenv("ADVISORY_HOT_SCAN_MAX_SYMBOLS", "1")
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg(long_hold_enabled=False))
+    monkeypatch.setattr(
+        advisory, "_now_cet",
+        lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin),
+    )
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {"US": [
+        {"data_symbol": "HOT", "priority": "medium", "currency": "USD"},
+        {"data_symbol": "QUIET", "priority": "high", "currency": "USD"},
+    ]})
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_open_advisory_positions", lambda **kwargs: [])
+    monkeypatch.setattr(advisory, "get_latest_advisory_scan_log", lambda **kwargs: [
+        {"data_symbol": "HOT", "tape_score": 1.0, "move_pct_open": 2.0,
+         "composite_score": 0.6, "orb_active": True, "price_native": 100.0},
+        {"data_symbol": "QUIET", "tape_score": 0.0, "move_pct_open": 0.0,
+         "composite_score": 0.0, "orb_active": False, "price_native": 100.0},
+    ])
+    monkeypatch.setattr(advisory, "_monitor_open_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_monitor_virtual_positions", lambda *args: [])
+    monkeypatch.setattr(advisory, "_is_broker_supported", lambda *args: True)
+    monkeypatch.setattr(
+        advisory, "_scan_candidate",
+        lambda item, *args, **kwargs: scanned.append(item["data_symbol"]) or None,
+    )
+    monkeypatch.setattr(advisory, "bulk_insert_advisory_scan_logs", lambda rows: {"written": len(rows)})
+    monkeypatch.setattr(
+        advisory, "log_event",
+        lambda level, event, detail=None: logs.append((event, detail or {})),
+    )
+
+    advisory.run_advisory_cycle()
+
+    assert scanned == ["HOT"]
+    plan = next(detail for event, detail in logs if event == "advisory_priority_scan_plan")
+    assert plan["scope"] == "hot"
+    assert plan["selected"] == ["HOT"]
+    heartbeat = next(detail for event, detail in logs if event == "advisory_trading_cycle_heartbeat")
+    assert heartbeat["scan_scopes"] == {"US": "hot"}
+    assert heartbeat["scanned"] == 1
+
+
 def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     flush_events = []
@@ -1451,7 +1594,7 @@ def test_run_advisory_cycle_flushes_early_continue_market_before_next_market(mon
         "EU": [{"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "XETRA", "currency": "EUR"}],
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_is_broker_supported",
                         lambda item, cfg: flush_events.append(("broker_check", item["data_symbol"])) or False)
     monkeypatch.setattr(advisory, "log_event", lambda *a, **k: None)
@@ -1477,7 +1620,7 @@ def test_run_advisory_cycle_failed_bulk_writes_do_not_count_as_written(monkeypat
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1526,7 +1669,7 @@ def test_trade_alert_creates_virtual_a_grade_entry(monkeypatch):
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1577,7 +1720,7 @@ def test_run_advisory_cycle_sends_high_priority_live_before_rest_of_scan(monkeyp
         ]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
 
     def candidate(symbol):
@@ -1638,7 +1781,7 @@ def test_run_advisory_cycle_dedups_discord_within_cycle(monkeypatch):
         ]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_scan_candidate", lambda item, *args, **kwargs: {
         "market": "US",
         "mode": "live",
@@ -1694,7 +1837,7 @@ def test_benchmark_only_live_ticker_does_not_consume_alert_cap(monkeypatch):
         ]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1744,7 +1887,7 @@ def test_run_advisory_cycle_waits_for_us_open_bars(monkeypatch):
         "US": [{"data_symbol": "NVDA", "broker_display_name": "NVIDIA", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: saved.append(signal) or {"id": 1})
     monkeypatch.setattr(advisory, "log_event", lambda level, event, detail=None: logs.append((level, event, detail)))
 
@@ -1772,7 +1915,7 @@ def test_run_advisory_cycle_skips_entries_not_supported_by_active_broker(monkeyp
         }]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: pytest.fail("unsupported broker entry should not scan"))
     monkeypatch.setattr(advisory, "upsert_advisory_scan_snapshot", lambda snapshot: snapshots.append(snapshot) or {})
     monkeypatch.setattr(advisory, "log_event", lambda *args, **kwargs: None)
@@ -1795,7 +1938,7 @@ def test_us_premarket_window_can_emit_watch_without_open_wait(monkeypatch):
         "US": [{"data_symbol": "AMZN", "broker_display_name": "Amazon", "exchange": "NASDAQ", "currency": "USD"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 10, "age_minutes": 1.0,
         "avg_recent_volume": 100000, "early_session_relaxed": True,
@@ -1854,7 +1997,7 @@ def test_run_advisory_cycle_blocks_watch_after_symbol_cap(monkeypatch):
             "created_at": "2026-05-15T13:40:00+00:00",
         }
     ] if kwargs.get("mode") == "live" else [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 12, "age_minutes": 1.0,
         "avg_recent_volume": 100000, "early_session_relaxed": True,
@@ -1911,7 +2054,7 @@ def test_run_advisory_cycle_suppresses_duplicate_ticker_but_expiry_frees_open_ca
         ]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: recent_live)
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 100.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -1959,7 +2102,7 @@ def test_run_advisory_cycle_keeps_eu_shadow_separate_from_live_alerts(monkeypatc
         "EU": [{"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 180.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -2014,7 +2157,7 @@ def test_eu_early_gate_ignores_stale_prior_shadow(monkeypatch):
             "created_at": "2026-05-14T07:45:00+00:00",
         }
     ] if kwargs.get("mode") == "shadow" else [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 180.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })
@@ -2070,7 +2213,7 @@ def test_eu_early_gate_skips_recent_flat_shadow(monkeypatch):
             "created_at": "2026-05-15T07:40:00+00:00",
         }
     ] if kwargs.get("mode") == "shadow" else [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: pytest.fail("recent flat EU shadow should be skipped"))
     monkeypatch.setattr(advisory, "insert_advisory_signal", lambda signal: pytest.fail("skip should not persist"))
     monkeypatch.setattr(advisory, "log_event", lambda level, event, detail=None: logs.append((event, detail or {})))
@@ -2107,7 +2250,7 @@ def test_eu_early_gate_never_skips_high_priority_downside_names(monkeypatch):
             "created_at": "2026-07-01T07:55:00+00:00",
         }
     ] if kwargs.get("mode") == "shadow" else [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(
         advisory,
         "_scan_candidate",
@@ -2637,7 +2780,7 @@ def test_shadow_discord_can_be_disabled_by_market(monkeypatch):
         "EU": [{"data_symbol": "SAP.DE", "broker_display_name": "SAP", "exchange": "Xetra", "currency": "EUR"}]
     })
     monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
-    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90: [])
+    monkeypatch.setattr(advisory, "get_recent_trades", lambda days=90, columns=None: [])
     monkeypatch.setattr(advisory, "_data_quality", lambda symbol, market, listing_type=None: {
         "ok": True, "last_price": 180.0, "rows": 90, "age_minutes": 1.0, "avg_recent_volume": 100000,
     })

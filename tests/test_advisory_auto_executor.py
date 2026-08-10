@@ -97,7 +97,14 @@ def test_paper_execution_submits_order_and_preserves_eligible_log(monkeypatch):
     assert result["submitted"][0]["order_id"] == "ord-123"
     assert decisions[0][0][:2] == (101, "eligible")
     assert decisions[1][0][:2] == (101, "submitted")
-    assert decisions[1][1]["extra_fields"] == {"auto_order_id": "ord-123"}
+    assert decisions[1][1]["extra_fields"] == {
+        "auto_order_id": "ord-123",
+        "auto_client_order_id": "advauto-101-nvda",
+        "auto_limit_price": 101.0,
+        "auto_planned_risk_eur": None,
+        "auto_entry_policy": "trade_now",
+        "auto_submitted_qty": 10,
+    }
 
 
 def test_watch_stage_can_be_eligible_with_limit_order(monkeypatch):
@@ -279,7 +286,7 @@ def test_paper_levels_reject_below_entry_band():
 
 def test_paper_levels_min_one_share_when_affordable():
     # Tiny allocation would floor to 0 shares, but 1 share ($101) fits under the
-    # per-position cap (15% of 30k ≈ €4,500), so take 1 share.
+    # 5% per-position cap and the stop-risk budget, so take 1 share.
     levels = executor._paper_order_levels(_signal(), current_price=101.0, size_eur=10)
     assert "error" not in levels
     assert levels["qty"] == 1
@@ -291,6 +298,30 @@ def test_paper_levels_below_min_size_when_one_share_exceeds_cap(monkeypatch):
     sig = _signal(entry_min=200.0, entry_max=205.0, stop_price=190.0, target_1=230.0)
     levels = executor._paper_order_levels(sig, current_price=202.0, size_eur=10)
     assert levels["error"] == "below_min_size"
+
+
+def test_compute_size_caps_notional_at_five_percent(monkeypatch):
+    monkeypatch.setattr(executor, "CAPITAL_EUR", 30_000.0)
+    monkeypatch.setattr(executor, "MAX_POSITION_PCT", 0.05)
+    size = executor._compute_size_eur(
+        _signal(grade="A+", suggested_size_eur=10_000.0)
+    )
+    assert size == 1_500.0
+
+
+def test_paper_levels_cap_quantity_by_stop_risk(monkeypatch):
+    monkeypatch.setattr(executor, "CAPITAL_EUR", 30_000.0)
+    monkeypatch.setattr(executor, "MAX_POSITION_PCT", 0.05)
+    monkeypatch.setattr(executor, "RISK_PER_TRADE_PCT", 0.0025)
+    sig = _signal(entry_min=100.0, entry_max=100.0, stop_price=90.0,
+                  target_1=120.0, fx_rate=1.0)
+
+    levels = executor._paper_order_levels(sig, current_price=100.0, size_eur=1_500.0)
+
+    assert levels["qty"] == 7
+    assert levels["planned_risk_eur"] == 70.0
+    assert levels["risk_budget_eur"] == 75.0
+    assert levels["max_position_eur"] == 1_500.0
 
 
 def test_reconcile_cancels_pending_on_weak_signal(monkeypatch):
@@ -930,13 +961,27 @@ def test_flatten_and_record_surfaces_journal_failure_after_broker_close(monkeypa
 
 
 def test_build_trade_payload_pnl():
-    sig = _signal(auto_fill_price=100.0)
+    sig = _signal(
+        auto_fill_price=100.0,
+        auto_limit_price=99.5,
+        auto_planned_risk_eur=20.0,
+        auto_entry_policy="watch_pullback",
+        auto_submitted_qty=10,
+        auto_client_order_id="advauto-101-nvda",
+    )
     p = executor._build_trade_payload(
         sig, entry_price=100.0, qty=10, exit_price=95.0, exit_reason="eod_flat")
     assert p["exit_reason"] == "eod_flat"
     assert p["pnl_pct"] == -5.0
     assert p["pnl_eur"] == round((95 - 100) * 10 / 1.08, 2)  # -46.3
     assert p["trade_source"] == "advisory_auto"
+    assert p["setup_grade"] == "A"
+    assert p["r_multiple"] == -2.5
+    assert p["entry_policy"] == "watch_pullback"
+    assert p["intended_entry_price"] == 99.5
+    assert p["entry_slippage_pct"] == 0.5025
+    assert p["planned_risk_eur"] == 20.0
+    assert p["client_order_id"] == "advauto-101-nvda"
 
 
 def test_paper_order_levels_use_entry_band_and_targets():
