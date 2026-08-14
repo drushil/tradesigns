@@ -864,6 +864,17 @@ def test_us_amat_is_active_semiconductor_trade_target():
     assert amat["trade_target"] is True
 
 
+def test_us_nbis_and_iren_are_active_medium_priority_trade_targets():
+    universe = {item["data_symbol"]: item for item in advisory.ADVISORY_UNIVERSE["US"]}
+
+    assert universe["NBIS"]["broker_display_name"] == "Nebius Group"
+    assert universe["NBIS"]["category"] == "ai_infrastructure"
+    assert universe["IREN"]["broker_display_name"] == "IREN"
+    assert universe["IREN"]["category"] == "crypto_proxy"
+    assert universe["NBIS"]["priority"] == universe["IREN"]["priority"] == "medium"
+    assert universe["NBIS"]["trade_target"] is universe["IREN"]["trade_target"] is True
+
+
 def test_priority_scan_scope_runs_full_every_six_minutes():
     assert advisory._priority_scan_scope(
         datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc),

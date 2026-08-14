@@ -1,6 +1,6 @@
 name: Trading Agent - Advisory US
 
-# US-only advisory cycle. Scans 20 trade targets plus the QQQ benchmark.
+# US-only advisory cycle. Scans 22 trade targets plus the QQQ benchmark.
 # Triggered every 2 min by cron-job.org during NYSE/NASDAQ session hours.
 # Runs independently from advisory-us-morning.yml so regular and morning US
 # cycles never compete.

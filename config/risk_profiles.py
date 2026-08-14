@@ -230,7 +230,7 @@ RISK_PROFILES = {
         "max_trades_per_day": 12,
         "min_hold_minutes": 10,
         "max_hold_minutes": 60,
-        "allowed_instruments": ["SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLF", "NVDA", "TSLA", "IBIT", "SMH", "PLTR", "AVGO", "AMAT", "AMD", "META"],
+        "allowed_instruments": ["SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLF", "NVDA", "TSLA", "IBIT", "SMH", "PLTR", "AVGO", "AMAT", "NBIS", "IREN", "AMD", "META"],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
         "allow_short_selling": True,
@@ -294,7 +294,7 @@ RISK_PROFILES = {
         "allowed_instruments": [
             "SPY", "QQQ", "IWM", "GLD", "TLT", "XOP", "XLE", "XLF",
             "NVDA", "AMD", "TSLA", "META", "AMZN", "PLTR", "AVGO", "AMAT",
-            "SMH", "IBIT", "COIN", "MSTR", "ARM",
+            "SMH", "IBIT", "COIN", "MSTR", "IREN", "ARM", "NBIS",
         ],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": True,    # TQQQ/SOXL gated by A+ grade + VIX < 22
@@ -359,7 +359,7 @@ RISK_PROFILES = {
         "max_trades_per_day": 20,
         "min_hold_minutes": 5,
         "max_hold_minutes": 45,
-        "allowed_instruments": ["SPY", "QQQ", "GLD", "TLT", "AAPL", "TSLA", "NVDA", "META", "AMZN", "AMAT"],
+        "allowed_instruments": ["SPY", "QQQ", "GLD", "TLT", "AAPL", "TSLA", "NVDA", "META", "AMZN", "AMAT", "NBIS", "IREN"],
         "allow_individual_stocks": True,
         "allow_leveraged_etfs": False,
         "allow_short_selling": True,

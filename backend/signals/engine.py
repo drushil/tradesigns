@@ -1399,6 +1399,8 @@ _TICKER_SECTORS = {
     "MSFT": {"technology", "tech"},
     "COIN": {"crypto", "risk_on"},
     "IBIT": {"crypto", "bitcoin"},
+    "NBIS": {"technology", "ai", "cloud", "data_centers"},
+    "IREN": {"crypto", "bitcoin", "ai", "data_centers"},
     "XLE": {"energy", "oil"},
     "XOM": {"energy", "oil"},
     "USO": {"energy", "oil"},

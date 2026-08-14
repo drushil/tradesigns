@@ -29,10 +29,13 @@ SECTOR_MAP: dict[str, list[str]] = {
     "META":  ["QQQ", "PLTR"],
     "PLTR":  ["QQQ", "META"],
     "TSLA":  ["QQQ", "NVDA"],
+    # AI cloud / data-centre infrastructure
+    "NBIS":  ["VRT", "QQQ", "NVDA"],
     # Crypto proxy
-    "IBIT":  ["COIN", "MSTR"],
-    "COIN":  ["IBIT", "MSTR"],
-    "MSTR":  ["COIN", "IBIT"],
+    "IBIT":  ["COIN", "MSTR", "IREN"],
+    "COIN":  ["IBIT", "MSTR", "IREN"],
+    "MSTR":  ["COIN", "IBIT", "IREN"],
+    "IREN":  ["IBIT", "COIN", "MSTR"],
     # Broad market
     "SPY":   ["QQQ", "IWM"],
     "IWM":   ["SPY", "QQQ"],
