@@ -4,6 +4,8 @@ from backend.execution.evidence import (
     primary_factor_bucket,
     session_window,
 )
+from backend.market.sector import _ticker_theme
+from config.risk_profiles import RISK_PROFILES
 
 
 def _signal(score, **meta):
@@ -12,8 +14,14 @@ def _signal(score, **meta):
 
 def test_primary_factor_bucket_is_mutually_exclusive_starter_map():
     assert primary_factor_bucket("NVDA") == "semis"
+    assert primary_factor_bucket("AMAT") == "semis"
     assert primary_factor_bucket("QQQ") == "broad_tech"
     assert primary_factor_bucket("IBIT") == "crypto"
+
+
+def test_amat_is_enabled_in_active_sector_and_risk_universe():
+    assert _ticker_theme("AMAT") == "semis"
+    assert "AMAT" in RISK_PROFILES["ultra_aggressive"]["allowed_instruments"]
 
 
 def test_session_window_classification():

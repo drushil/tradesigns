@@ -17,10 +17,11 @@ from typing import Optional
 # Peers must be in TICKER_UNIVERSE to contribute composite scores at runtime.
 SECTOR_MAP: dict[str, list[str]] = {
     # Semis cluster — NVDA leads, AMD/AVGO/SMH follow
-    "NVDA":  ["SMH", "AMD", "AVGO"],
-    "AMD":   ["NVDA", "SMH", "AVGO"],
-    "SMH":   ["NVDA", "AMD", "AVGO"],
-    "AVGO":  ["NVDA", "AMD", "SMH"],
+    "NVDA":  ["SMH", "AMD", "AVGO", "AMAT"],
+    "AMD":   ["NVDA", "SMH", "AVGO", "AMAT"],
+    "SMH":   ["NVDA", "AMD", "AVGO", "AMAT"],
+    "AVGO":  ["NVDA", "AMD", "SMH", "AMAT"],
+    "AMAT":  ["SMH", "NVDA", "AVGO"],
     "MU":    ["NVDA", "AMD", "SMH"],
     "ARM":   ["NVDA", "AMD", "SMH"],
     # Broad tech / growth
