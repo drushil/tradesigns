@@ -855,6 +855,15 @@ def test_us_avgo_is_high_priority_for_immediate_send():
     assert avgo["trade_target"] is True
 
 
+def test_us_amat_is_active_semiconductor_trade_target():
+    amat = next(item for item in advisory.ADVISORY_UNIVERSE["US"] if item.get("data_symbol") == "AMAT")
+
+    assert amat["broker_display_name"] == "Applied Materials"
+    assert amat["category"] == "semis"
+    assert amat["priority"] == "medium"
+    assert amat["trade_target"] is True
+
+
 def test_priority_scan_scope_runs_full_every_six_minutes():
     assert advisory._priority_scan_scope(
         datetime(2026, 8, 7, 12, 0, tzinfo=timezone.utc),

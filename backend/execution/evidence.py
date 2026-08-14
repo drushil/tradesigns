@@ -32,6 +32,7 @@ _PRIMARY_FACTOR_BUCKETS = {
     "NVDA": "semis",
     "AMD": "semis",
     "AVGO": "semis",
+    "AMAT": "semis",
     "ARM": "semis",
     "MU": "semis",
     "SOXL": "leveraged_semis",

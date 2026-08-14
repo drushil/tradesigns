@@ -40,7 +40,7 @@ _DEFAULT_SECTOR_UNIVERSE = {
     "sectors": {
         "semis": {
             "proxy": "SMH",
-            "core": ["NVDA", "AMD", "ARM", "AVGO", "SMH", "MU"],
+            "core": ["NVDA", "AMD", "ARM", "AVGO", "AMAT", "SMH", "MU"],
             "shadow": ["TSM", "ASML", "INTC", "QCOM"],
             "leveraged": ["SOXL", "NVDL"],
             "max_live_per_cycle": 2,
