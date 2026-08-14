@@ -60,7 +60,7 @@ _DEFAULT_SECTOR_UNIVERSE = {
         "ai_power": {
             "proxy": "XLI",
             "proxy_basket": ["VRT", "ETN", "CEG", "VST"],
-            "core": ["VRT", "ETN", "CEG", "VST"],
+            "core": ["VRT", "ETN", "CEG", "VST", "NBIS"],
             "shadow": ["GEV", "NEE", "PEG"],
             "max_live_per_cycle": 1,
             "max_leveraged_per_cycle": 0,
@@ -69,7 +69,7 @@ _DEFAULT_SECTOR_UNIVERSE = {
         },
         "crypto": {
             "proxy": "IBIT",
-            "core": ["IBIT", "COIN", "MSTR"],
+            "core": ["IBIT", "COIN", "MSTR", "IREN"],
             "shadow": ["MARA", "RIOT"],
             "max_live_per_cycle": 1,
             "max_leveraged_per_cycle": 0,

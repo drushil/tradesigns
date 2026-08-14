@@ -17,11 +17,20 @@ def test_primary_factor_bucket_is_mutually_exclusive_starter_map():
     assert primary_factor_bucket("AMAT") == "semis"
     assert primary_factor_bucket("QQQ") == "broad_tech"
     assert primary_factor_bucket("IBIT") == "crypto"
+    assert primary_factor_bucket("NBIS") == "ai_power"
+    assert primary_factor_bucket("IREN") == "crypto"
 
 
 def test_amat_is_enabled_in_active_sector_and_risk_universe():
     assert _ticker_theme("AMAT") == "semis"
     assert "AMAT" in RISK_PROFILES["ultra_aggressive"]["allowed_instruments"]
+
+
+def test_nbis_and_iren_are_enabled_in_their_primary_factor_universes():
+    assert _ticker_theme("NBIS") == "ai_power"
+    assert _ticker_theme("IREN") == "crypto"
+    assert "NBIS" in RISK_PROFILES["ultra_aggressive"]["allowed_instruments"]
+    assert "IREN" in RISK_PROFILES["ultra_aggressive"]["allowed_instruments"]
 
 
 def test_session_window_classification():

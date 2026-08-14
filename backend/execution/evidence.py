@@ -41,6 +41,8 @@ _PRIMARY_FACTOR_BUCKETS = {
     "IBIT": "crypto",
     "COIN": "crypto",
     "MSTR": "crypto",
+    "NBIS": "ai_power",
+    "IREN": "crypto",
     "XLE": "energy",
     "XOP": "energy",
     "XLF": "financials",

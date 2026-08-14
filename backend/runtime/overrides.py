@@ -141,7 +141,7 @@ def _apply_execution_overrides(profile: dict) -> dict:
     p.setdefault("advisory_confirmation_lookback_minutes", 90)
     p.setdefault(
         "advisory_confirmation_tickers",
-        "NVDA,AMD,AAPL,MSFT,META,AMZN,TSLA,GOOGL,NFLX,PLTR,MU,AVGO,AMAT",
+        "NVDA,AMD,AAPL,MSFT,META,AMZN,TSLA,GOOGL,NFLX,PLTR,MU,AVGO,AMAT,NBIS,IREN",
     )
     if state.IS_PAPER_TRADING:
         for key, value in p.get("paper_overrides", {}).items():
