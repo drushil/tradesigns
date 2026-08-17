@@ -1806,6 +1806,68 @@ def _send_discord(text: str, webhook_url: str) -> bool:
         return False
 
 
+_US_REGULAR_WINDOWS = {"us_open", "us_midday", "us_power_hour", "us_close"}
+
+
+def _send_degraded_discord_summary(candidates: list[dict], cfg: AdvisoryConfig,
+                                   now_cet: datetime, scanned: int) -> bool:
+    """Send one cache-gated summary when Supabase persistence is unavailable.
+
+    The workflow grants at most one sender per five-minute UTC bucket using the
+    GitHub Actions cache. This function stays fail-closed unless the grant is
+    explicit and the US regular session is active.
+    """
+    if not _env_bool("ADVISORY_DEGRADED_DISCORD_ENABLED", False):
+        return False
+    if not _env_bool("ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED", False):
+        print("[INFO] advisory_degraded_discord_skipped: five-minute bucket already sent")
+        return False
+    if _window_name("US", now_cet) not in _US_REGULAR_WINDOWS:
+        print("[INFO] advisory_degraded_discord_skipped: outside US regular session")
+        return False
+
+    eligible = [
+        row for row in (candidates or [])
+        if str(row.get("market") or "").upper() == "US"
+        and str(row.get("mode") or "").lower() == "live"
+        and _should_send_discord(row, cfg)
+    ]
+    grade_rank = {"A+": 4, "A": 3, "B": 2, "C": 1}
+    stage_rank = {"trade": 5, "watch": 4, "ignition": 3, "downside": 2, "long_hold": 1}
+
+    def _rank(row: dict) -> tuple:
+        return (
+            grade_rank.get(str(row.get("grade") or "C").upper(), 0),
+            stage_rank.get(str(row.get("alert_stage") or "").lower(), 0),
+            abs(float(row.get("composite_score") or 0)),
+        )
+
+    lines = []
+    for row in sorted(eligible, key=_rank, reverse=True)[:5]:
+        symbol = str(row.get("data_symbol") or "?").upper()
+        side = str(row.get("side") or "?").upper()
+        stage = str(row.get("alert_stage") or "candidate").replace("_", " ").title()
+        grade = str(row.get("grade") or "C").upper()
+        composite = float(row.get("composite_score") or 0)
+        lines.append(f"• **{symbol} {side}** — {stage}, {grade}, score {composite:+.3f}")
+
+    timestamp = now_cet.astimezone(timezone.utc).strftime("%H:%M UTC")
+    if not lines:
+        lines.append("• No qualifying A-grade advisory setup in this scan.")
+    message = "\n".join([
+        "⚠️ **US ADVISORY — DEGRADED MODE (SCAN ONLY)**",
+        f"{timestamp} | {int(scanned)} scanned | {len(eligible)} alert candidates",
+        *lines,
+        "Supabase persistence unavailable: no new paper orders or tracked exits.",
+    ])
+    sent = _send_discord(message[:1900], cfg.discord_webhook_url)
+    print(
+        "[INFO] advisory_degraded_discord_summary: "
+        f"sent={sent} eligible={len(eligible)} included={len(lines)}"
+    )
+    return sent
+
+
 def _ordered_markets(cfg: AdvisoryConfig) -> list[str]:
     live = [market for market in ["US", "EU"] if market in cfg.markets and market in cfg.live_markets]
     shadow = [
@@ -4190,6 +4252,13 @@ def run_advisory_cycle() -> dict:
             "market_timings": market_timings,
         })
 
+    scanned_total = sum(int(row.get("scanned") or 0) for row in market_timings)
+    degraded_discord_sent = False
+    if database_degraded:
+        degraded_discord_sent = _send_degraded_discord_summary(
+            emitted, cfg, now_cet, scanned_total
+        )
+
     auto_enabled = False
     auto_result = {}
     simulator_result = {}
@@ -4256,9 +4325,10 @@ def run_advisory_cycle() -> dict:
         "outcome": outcome,
         "database_degraded": database_degraded,
         "database_degraded_reason": database_degraded_reason or None,
+        "degraded_discord_sent": degraded_discord_sent,
         "markets": sorted(cfg.markets),
         "scan_scopes": cycle_scan_scopes,
-        "scanned": sum(int(row.get("scanned") or 0) for row in market_timings),
+        "scanned": scanned_total,
         "signals_emitted": len(emitted),
         "signals_blocked": len(blocked),
         "auto_enabled": auto_enabled,
@@ -4278,4 +4348,5 @@ def run_advisory_cycle() -> dict:
         "long_hold_sent_today": long_hold_sent_today,
         "database_degraded": database_degraded,
         "database_degraded_reason": database_degraded_reason or None,
+        "degraded_discord_sent": degraded_discord_sent,
     }
