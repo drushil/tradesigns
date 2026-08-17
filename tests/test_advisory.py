@@ -796,6 +796,71 @@ def test_discord_alert_requires_a_grade_or_better():
     assert advisory._should_send_discord({"mode": "shadow", "market": "EU", "grade": "C"}, cfg) is False
 
 
+def test_degraded_discord_summary_sends_when_five_minute_slot_is_granted(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    sent = []
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_ENABLED", "true")
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED", "true")
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook: sent.append((text, webhook)) or True)
+    candidates = [
+        {"data_symbol": "META", "side": "BUY", "mode": "live", "market": "US",
+         "alert_stage": "watch", "grade": "A", "composite_score": 0.19},
+        {"data_symbol": "NVDA", "side": "BUY", "mode": "live", "market": "US",
+         "alert_stage": "trade", "grade": "A+", "composite_score": 0.41},
+    ]
+
+    result = advisory._send_degraded_discord_summary(
+        candidates,
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 8, 17, 15, 35, tzinfo=berlin),
+        scanned=24,
+    )
+
+    assert result is True
+    assert len(sent) == 1
+    message, webhook = sent[0]
+    assert "DEGRADED MODE (SCAN ONLY)" in message
+    assert message.index("NVDA") < message.index("META")
+    assert "no new paper orders or tracked exits" in message
+    assert webhook == "https://discord.test"
+
+
+def test_degraded_discord_summary_sends_heartbeat_without_a_grade_candidate(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    sent = []
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_ENABLED", "true")
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED", "true")
+    monkeypatch.setattr(advisory, "_send_discord", lambda text, webhook: sent.append(text) or True)
+
+    result = advisory._send_degraded_discord_summary(
+        [],
+        _cfg(discord_webhook_url="https://discord.test"),
+        datetime(2026, 8, 17, 15, 35, tzinfo=berlin),
+        scanned=24,
+    )
+
+    assert result is True
+    assert "No qualifying A-grade advisory setup" in sent[0]
+
+
+def test_degraded_discord_summary_fails_closed_without_slot_or_regular_session(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    candidate = {"data_symbol": "META", "side": "BUY", "mode": "live", "market": "US",
+                 "alert_stage": "watch", "grade": "A", "composite_score": 0.19}
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_ENABLED", "true")
+    monkeypatch.setattr(advisory, "_send_discord", lambda *_: pytest.fail("Discord must remain gated"))
+
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED", "false")
+    assert advisory._send_degraded_discord_summary(
+        [candidate], _cfg(), datetime(2026, 8, 17, 15, 35, tzinfo=berlin), scanned=24
+    ) is False
+
+    monkeypatch.setenv("ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED", "true")
+    assert advisory._send_degraded_discord_summary(
+        [candidate], _cfg(), datetime(2026, 8, 17, 15, 20, tzinfo=berlin), scanned=24
+    ) is False
+
+
 def test_shadow_trade_card_does_not_overstate_c_grade():
     cfg = _cfg()
     plan = advisory._entry_plan(price=180.0, side="BUY", atr_pct=0.9, currency="EUR", cfg=cfg, grade="C")

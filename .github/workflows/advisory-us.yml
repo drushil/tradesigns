@@ -55,6 +55,17 @@ jobs:
           done
           [ -f requirements-agent.txt ] || { echo "Checkout failed after 3 attempts"; exit 1; }
 
+      - name: Compute degraded Discord five-minute bucket
+        id: degraded-discord-bucket
+        run: echo "key=advisory-degraded-discord-$(( $(date -u +%s) / 300 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore degraded Discord bucket marker
+        id: degraded-discord-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .advisory-degraded-discord
+          key: ${{ steps.degraded-discord-bucket.outputs.key }}
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -64,6 +75,7 @@ jobs:
         run: pip install -r requirements-agent.txt
 
       - name: Run US advisory cycle
+        id: advisory-run
         env:
           ALPACA_API_KEY:       "${{ secrets.ALPACA_API_KEY }}"
           ALPACA_SECRET_KEY:    "${{ secrets.ALPACA_SECRET_KEY }}"
@@ -170,6 +182,8 @@ jobs:
           # If Supabase is quota-restricted, continue the market-data scan but
           # suppress persistence-dependent alerts and paper orders.
           ADVISORY_DB_DEGRADED_SCAN: "true"
+          ADVISORY_DEGRADED_DISCORD_ENABLED: "true"
+          ADVISORY_DEGRADED_DISCORD_SLOT_GRANTED: "${{ steps.degraded-discord-cache.outputs.cache-hit != 'true' }}"
           DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
         run: |
           python << 'PY'
@@ -199,6 +213,9 @@ jobs:
                   try:
                       result = run_advisory_cycle()
                       print(f"Advisory result: {result}")
+                      if result.get("degraded_discord_sent"):
+                          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                              output.write("degraded_discord_sent=true\n")
                   except Exception as exc:
                       log_event("ERROR", "advisory_trading_cycle_failed", {
                           "workflow_run_id": os.getenv("GITHUB_RUN_ID"),
@@ -208,3 +225,16 @@ jobs:
               else:
                   print(f"Outside US window ({now.strftime('%H:%M UTC')}) — skipping.")
           PY
+
+      - name: Mark degraded Discord bucket as sent
+        if: steps.advisory-run.outputs.degraded_discord_sent == 'true'
+        run: |
+          mkdir -p .advisory-degraded-discord
+          date -u +%FT%TZ > .advisory-degraded-discord/sent_at
+
+      - name: Save degraded Discord bucket marker
+        if: steps.advisory-run.outputs.degraded_discord_sent == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .advisory-degraded-discord
+          key: ${{ steps.degraded-discord-bucket.outputs.key }}
