@@ -3,6 +3,8 @@ import pathlib
 import sys
 import types
 
+import pytest
+
 
 def _load_real_client():
     if "supabase" not in sys.modules:
@@ -54,3 +56,17 @@ def test_all_trade_source_keeps_both_agent_and_manual_rows():
     ]
 
     assert [_trade_matches_source(row, "all") for row in rows] == [True, True, True]
+
+
+def test_runtime_database_disable_blocks_further_network_clients(monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon-test")
+    _client.reset_database_runtime()
+
+    _client.disable_database_runtime("supabase_egress_quota_restricted")
+
+    assert _client.database_runtime_disabled_reason() == "supabase_egress_quota_restricted"
+    with pytest.raises(RuntimeError, match="database runtime disabled"):
+        _client.get_client()
+
+    _client.reset_database_runtime()

@@ -14,6 +14,25 @@ except Exception:  # pragma: no cover - test stubs may not expose postgrest inte
 from supabase import create_client
 
 
+_RUNTIME_DB_DISABLED_REASON: Optional[str] = None
+
+
+def disable_database_runtime(reason: str) -> None:
+    """Stop database calls for the rest of this short-lived process."""
+    global _RUNTIME_DB_DISABLED_REASON
+    _RUNTIME_DB_DISABLED_REASON = str(reason or "database_unavailable")[:200]
+
+
+def database_runtime_disabled_reason() -> Optional[str]:
+    return _RUNTIME_DB_DISABLED_REASON
+
+
+def reset_database_runtime() -> None:
+    """Re-enable database calls; intended for tests in the same process."""
+    global _RUNTIME_DB_DISABLED_REASON
+    _RUNTIME_DB_DISABLED_REASON = None
+
+
 def _get_env(key: str) -> Optional[str]:
     """Read from os.environ (works locally via .env and on Streamlit Cloud via st.secrets bridge)."""
     return os.environ.get(key)
@@ -59,6 +78,8 @@ def get_client(write: bool = False):
     write=False → anon key  (dashboard reads — respects RLS)
     write=True  → service_role key (agent writes — bypasses RLS)
     """
+    if _RUNTIME_DB_DISABLED_REASON:
+        raise RuntimeError(f"database runtime disabled: {_RUNTIME_DB_DISABLED_REASON}")
     url = _get_env("SUPABASE_URL")
     if not url:
         raise ValueError("SUPABASE_URL not set — add it to Streamlit secrets or .env")

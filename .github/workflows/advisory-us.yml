@@ -167,6 +167,9 @@ jobs:
           STARTING_CAPITAL_EUR: "${{ vars.STARTING_CAPITAL_EUR }}"
           TICKER_UNIVERSE:      "${{ vars.TICKER_UNIVERSE }}"
           RISK_PROFILE:         "${{ vars.RISK_PROFILE }}"
+          # If Supabase is quota-restricted, continue the market-data scan but
+          # suppress persistence-dependent alerts and paper orders.
+          ADVISORY_DB_DEGRADED_SCAN: "true"
           DISPATCH_MODE:        "${{ github.event.inputs.mode || github.event.client_payload.mode }}"
         run: |
           python << 'PY'

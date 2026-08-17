@@ -1430,6 +1430,96 @@ def test_run_advisory_cycle_logs_and_sends_single_best_live_signal(monkeypatch):
     assert heartbeat["auto_submitted"] == 0
 
 
+def test_run_advisory_cycle_continues_scan_only_when_supabase_quota_restricted(monkeypatch):
+    berlin = timezone(timedelta(hours=2))
+    disabled = []
+    logs = []
+
+    monkeypatch.setenv("ADVISORY_DB_DEGRADED_SCAN", "true")
+    monkeypatch.setenv("ADVISORY_AUTO_RUN", "true")
+    monkeypatch.setenv("ADVISORY_DYNAMIC_PRIORITY_ENABLED", "false")
+    monkeypatch.setattr(advisory, "load_config", lambda: _cfg())
+    monkeypatch.setattr(
+        advisory, "_now_cet",
+        lambda: datetime(2026, 5, 15, 15, 45, tzinfo=berlin),
+    )
+    monkeypatch.setattr(advisory, "ADVISORY_UNIVERSE", {
+        "US": [{
+            "data_symbol": "NVDA", "broker_display_name": "NVIDIA",
+            "exchange": "NASDAQ", "currency": "USD",
+        }]
+    })
+    monkeypatch.setattr(advisory, "get_recent_advisory_signals", lambda **kwargs: [])
+    monkeypatch.setattr(
+        advisory, "get_recent_trades",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError(
+            "code 402: Service restricted: exceed_egress_quota"
+        )),
+    )
+    monkeypatch.setattr(
+        advisory, "disable_database_runtime",
+        lambda reason: disabled.append(reason),
+    )
+    monkeypatch.setattr(
+        advisory, "_monitor_open_positions",
+        lambda *args: pytest.fail("DB-backed exit monitor must be skipped"),
+    )
+    monkeypatch.setattr(
+        advisory, "_monitor_virtual_positions",
+        lambda *args: pytest.fail("DB-backed virtual monitor must be skipped"),
+    )
+    monkeypatch.setattr(advisory, "_data_quality", lambda *args, **kwargs: {
+        "ok": True, "last_price": 100.0, "rows": 90,
+        "age_minutes": 1.0, "avg_recent_volume": 100000,
+    })
+    monkeypatch.setattr(advisory, "detect_regime", lambda symbol: SimpleNamespace(
+        market_regime="bull", intraday_regime="trending",
+    ))
+    monkeypatch.setattr(advisory, "compute_all_signals", lambda *args, **kwargs: {
+        "composite_score": 0.62,
+        "signals": {
+            "vwap_deviation": {"score": 0.55},
+            "macd_crossover": {"score": 0.55},
+            "relative_strength": {"score": 0.50},
+            "orb": {"score": 0.65, "meta": {"active": True}},
+            "news_sentiment": {"score": 0.10},
+        },
+        "atr_data": {"atr_pct": 1.0},
+    })
+    monkeypatch.setattr(advisory, "compute_expected_value", lambda *args, **kwargs: {
+        "net_ev_pct": 0.82, "confidence": 0.74,
+    })
+    monkeypatch.setattr(advisory, "_market_context", lambda market: {"market": market})
+    monkeypatch.setattr(
+        advisory, "insert_advisory_signal",
+        lambda signal: pytest.fail("degraded scan must not attempt persistence"),
+    )
+    monkeypatch.setattr(
+        advisory, "_send_discord",
+        lambda *args, **kwargs: pytest.fail("degraded scan must not send alerts"),
+    )
+    monkeypatch.setattr(
+        advisory, "bulk_insert_advisory_scan_logs",
+        lambda rows: pytest.fail("degraded scan must not flush diagnostics"),
+    )
+    monkeypatch.setattr(
+        advisory, "log_event",
+        lambda level, event, detail=None: logs.append((event, detail or {})),
+    )
+
+    result = advisory.run_advisory_cycle()
+
+    assert result["database_degraded"] is True
+    assert result["database_degraded_reason"] == "supabase_egress_quota_restricted"
+    assert result["emitted"] == 1
+    assert result["live_sent_today"] == 0
+    assert disabled == ["supabase_egress_quota_restricted"]
+    heartbeat = next(detail for event, detail in logs
+                     if event == "advisory_trading_cycle_heartbeat")
+    assert heartbeat["outcome"] == "database_degraded_scan_only"
+    assert heartbeat["auto_enabled"] is False
+
+
 def test_scan_log_distinguishes_persistence_from_failed_discord_delivery(monkeypatch):
     berlin = timezone(timedelta(hours=2))
     scan_batches = []
