@@ -33,6 +33,11 @@ from database.client import (
     update_advisory_exit_status,
 )
 try:
+    from database.client import disable_database_runtime
+except (ImportError, AttributeError):
+    def disable_database_runtime(reason: str) -> None:
+        return None
+try:
     from database.client import (
         get_latest_advisory_scan_log,
         get_latest_log_event,
@@ -3263,6 +3268,8 @@ def run_advisory_cycle() -> dict:
     )
     _TRADE_PROLOGUE_COLUMNS = "regime,composite_score,net_pnl_pct,side"
     from concurrent.futures import ThreadPoolExecutor
+    database_degraded = False
+    database_degraded_reason = ""
     with ThreadPoolExecutor(max_workers=4) as _pool:
         _f_live = _pool.submit(get_recent_advisory_signals, days=1, mode="live",
                                 columns=_SIGNAL_PROLOGUE_COLUMNS)
@@ -3278,7 +3285,28 @@ def run_advisory_cycle() -> dict:
         )
         recent_live = _f_live.result()
         recent_shadow = _f_shadow.result()
-        recent_trades = _f_trades.result()
+        try:
+            recent_trades = _f_trades.result()
+        except Exception as exc:
+            error_text = str(exc)
+            quota_restricted = (
+                "exceed_egress_quota" in error_text
+                or (
+                    "402" in error_text
+                    and "restricted" in error_text.lower()
+                )
+            )
+            degraded_allowed = _env_bool("ADVISORY_DB_DEGRADED_SCAN", False)
+            if not (degraded_allowed and quota_restricted):
+                raise
+            database_degraded = True
+            database_degraded_reason = "supabase_egress_quota_restricted"
+            disable_database_runtime(database_degraded_reason)
+            recent_trades = []
+            print(
+                "[WARN] advisory_database_degraded: "
+                "Supabase egress quota restricted; continuing in safe scan-only mode"
+            )
         recent_long_hold = _f_long_hold.result()
     now_utc = now_cet.astimezone(timezone.utc)
     live_sent_today = len([
@@ -3364,6 +3392,10 @@ def run_advisory_cycle() -> dict:
         nonlocal flush_db_s, snapshot_rows_total, scanlog_rows_total
         if not _snapshot_buf and not _scanlog_buf:
             return
+        if database_degraded:
+            _snapshot_buf.clear()
+            _scanlog_buf.clear()
+            return
         _t = time.perf_counter()
         if _env_bool("ADVISORY_SCAN_SNAPSHOTS_ENABLED", False) and _snapshot_buf:
             _rows = list(_snapshot_buf)
@@ -3388,7 +3420,12 @@ def run_advisory_cycle() -> dict:
     # Prevents duplicate Discord exit alerts when EU and US workflows run in
     # parallel — the EU workflow has cfg.live_markets={"US"} but cfg.markets={"EU"},
     # so the intersection is empty and it correctly skips exit monitoring.
-    if cfg.live_markets & cfg.markets:
+    if database_degraded:
+        print(
+            "[INFO] advisory_database_degraded_exit_monitor_skipped: "
+            "broker bracket orders remain authoritative"
+        )
+    elif cfg.live_markets & cfg.markets:
         try:
             exit_alerts = _monitor_open_positions(cfg, now_cet)
         except Exception as exc:
@@ -3457,7 +3494,11 @@ def run_advisory_cycle() -> dict:
                 }
 
         _insert_started = time.perf_counter()
-        saved = insert_advisory_signal(candidate)
+        saved = (
+            {"error": database_degraded_reason}
+            if database_degraded
+            else insert_advisory_signal(candidate)
+        )
         db_insert_s += time.perf_counter() - _insert_started
         if "error" not in saved and saved.get("id"):
             candidate["id"] = saved.get("id")
@@ -3913,7 +3954,8 @@ def run_advisory_cycle() -> dict:
             ))
             if candidate.get("benchmark_only") or not candidate.get("trade_target", True):
                 candidate["status"] = "benchmark_logged"
-                insert_advisory_signal(candidate)
+                if not database_degraded:
+                    insert_advisory_signal(candidate)
                 emitted.append(candidate)
                 _scan_log_base["gate_reason"] = "benchmark_only"
                 try:
@@ -3974,7 +4016,8 @@ def run_advisory_cycle() -> dict:
                 }
                 candidate["message_text"] = _format_trade_card(candidate)
             if candidate.get("status", "").startswith("blocked"):
-                insert_advisory_signal(candidate)
+                if not database_degraded:
+                    insert_advisory_signal(candidate)
                 blocked.append(candidate)
                 _scan_log_base["gate_reason"] = candidate.get("status")
                 try:
@@ -4157,7 +4200,8 @@ def run_advisory_cycle() -> dict:
     # and could miss early-session signals entirely. Gated by ADVISORY_AUTO_RUN
     # so the master kill switch in workflow vars controls both call sites.
     if (
-        "US" in cfg.live_markets
+        not database_degraded
+        and "US" in cfg.live_markets
         and "US" in cfg.markets
         and os.getenv("ADVISORY_AUTO_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
     ):
@@ -4194,7 +4238,9 @@ def run_advisory_cycle() -> dict:
     auto_eligible = len(auto_result.get("eligible") or [])
     auto_submitted = len(auto_result.get("submitted") or [])
     auto_errors = len(auto_result.get("errors") or [])
-    if not auto_enabled:
+    if database_degraded:
+        outcome = "database_degraded_scan_only"
+    elif not auto_enabled:
         outcome = "auto_execution_disabled"
     elif auto_errors:
         outcome = "auto_execution_error"
@@ -4208,6 +4254,8 @@ def run_advisory_cycle() -> dict:
     log_event("INFO", "advisory_trading_cycle_heartbeat", {
         "cycle_id": cycle_id,
         "outcome": outcome,
+        "database_degraded": database_degraded,
+        "database_degraded_reason": database_degraded_reason or None,
         "markets": sorted(cfg.markets),
         "scan_scopes": cycle_scan_scopes,
         "scanned": sum(int(row.get("scanned") or 0) for row in market_timings),
@@ -4228,4 +4276,6 @@ def run_advisory_cycle() -> dict:
         "exit_alerts": len(exit_alerts),
         "live_sent_today": live_sent_today,
         "long_hold_sent_today": long_hold_sent_today,
+        "database_degraded": database_degraded,
+        "database_degraded_reason": database_degraded_reason or None,
     }
